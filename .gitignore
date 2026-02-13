@@ -1,0 +1,6 @@
+*.s
+*.o
+a.out
+foobar
+.venv/
+.claude/
