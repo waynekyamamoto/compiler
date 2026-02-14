@@ -4,3 +4,6 @@ a.out
 foobar
 .venv/
 .claude/
+cc_in_c/cc
+cc_in_c/one_more_time/
+cc_in_c/sqlite/
