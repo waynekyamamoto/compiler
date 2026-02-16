@@ -61,6 +61,16 @@ static int func_returns_ptr(const char *name) {
     return 0;
 }
 
+/* All known function names (for function pointer support) */
+static char *known_func_names[512];
+static int nknown_func_names;
+
+static int is_known_func(const char *name) {
+    for (int i = 0; i < nknown_func_names; i++)
+        if (strcmp(known_func_names[i], name) == 0) return 1;
+    return 0;
+}
+
 /* ---- Function layout ---- */
 
 typedef struct {
@@ -365,6 +375,12 @@ static void gen_addr(Expr *e, FuncLayout *layout) {
             emit("\tadd\tx0, x0, _%s@PAGEOFF", e->u.var_name);
             return;
         }
+        /* Check if it's a function name (for function pointers) */
+        if (is_known_func(e->u.var_name)) {
+            emit("\tadrp\tx0, _%s@PAGE", e->u.var_name);
+            emit("\tadd\tx0, x0, _%s@PAGEOFF", e->u.var_name);
+            return;
+        }
         fatal("Unknown variable '%s'", e->u.var_name);
         return;
     }
@@ -417,6 +433,12 @@ static void gen_value(Expr *e, FuncLayout *layout) {
     }
 
     if (e->kind == ND_VAR) {
+        /* Function name used as value: load address, don't dereference */
+        if (find_slot(layout, e->u.var_name) < 0 && !find_global(e->u.var_name) &&
+            is_known_func(e->u.var_name)) {
+            gen_addr(e, layout);
+            return;
+        }
         gen_addr(e, layout);
         /* Check if it's an array or struct var (local or global) */
         int skip_load = 0;
@@ -631,6 +653,30 @@ static void gen_value(Expr *e, FuncLayout *layout) {
         }
 
         if (nargs > 8) fatal("Supports up to 8 call arguments");
+
+        /* Indirect call through function pointer variable */
+        if (!is_known_func(name) &&
+            (find_slot(layout, name) >= 0 || find_global(name))) {
+            /* Load function pointer, push to stack */
+            gen_value(new_var(name), layout);
+            emit("\tstr\tx0, [sp, #-16]!");
+            /* Push args to stack */
+            for (int i = 0; i < nargs; i++) {
+                gen_value(args[i], layout);
+                emit("\tstr\tx0, [sp, #-16]!");
+            }
+            /* Load function pointer from bottom of stack into x8 */
+            emit("\tldr\tx8, [sp, #%d]", nargs * 16);
+            /* Load args from stack into registers */
+            for (int i = 0; i < nargs; i++) {
+                int disp = (nargs - 1 - i) * 16;
+                emit("\tldr\tx%d, [sp, #%d]", i, disp);
+            }
+            /* Pop all (args + function pointer) */
+            emit("\tadd\tsp, sp, #%d", (nargs + 1) * 16);
+            emit("\tblr\tx8");
+            return;
+        }
 
         for (int i = 0; i < nargs; i++) {
             gen_value(args[i], layout);
@@ -1239,6 +1285,17 @@ char *codegen_generate(Program *prog) {
     for (int i = 0; i < prog->nfuncs; i++) {
         if (prog->funcs[i].ret_is_ptr && nptr_ret_funcs < 256)
             ptr_ret_funcs[nptr_ret_funcs++] = prog->funcs[i].name;
+    }
+
+    /* Register all known function names (for function pointer support) */
+    nknown_func_names = 0;
+    for (int i = 0; i < prog->nprotos; i++) {
+        if (nknown_func_names < 512)
+            known_func_names[nknown_func_names++] = prog->protos[i].name;
+    }
+    for (int i = 0; i < prog->nfuncs; i++) {
+        if (nknown_func_names < 512)
+            known_func_names[nknown_func_names++] = prog->funcs[i].name;
     }
 
     /* Register struct/union definitions */

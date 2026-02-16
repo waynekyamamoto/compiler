@@ -227,6 +227,10 @@ int *macro_names[256];
 int *macro_values[256];
 int nmacros;
 
+// Known function names (for function pointer support)
+int *known_funcs[512];
+int nknown_funcs;
+
 // ---- Utility functions ----
 
 int my_fatal(int *msg) {
@@ -2040,6 +2044,15 @@ int func_returns_ptr(int *name) {
   return 0;
 }
 
+int is_known_func(int *name) {
+  int i = 0;
+  while (i < nknown_funcs) {
+    if (my_strcmp(known_funcs[i], name) == 0) { return 1; }
+    i = i + 1;
+  }
+  return 0;
+}
+
 int *cg_new_label(int *base) {
   label_id = label_id + 1;
   int *num = int_to_str(label_id);
@@ -2317,6 +2330,16 @@ int gen_addr(struct Expr *e) {
         emit_line("@PAGEOFF");
         return 0;
       }
+      // Check if it's a function name (for function pointers)
+      if (is_known_func(e->sval)) {
+        emit_s("\tadrp\tx0, _");
+        emit_s(e->sval);
+        emit_line("@PAGE");
+        emit_s("\tadd\tx0, x0, _");
+        emit_s(e->sval);
+        emit_line("@PAGEOFF");
+        return 0;
+      }
       printf("Unknown variable: %s\n", e->sval);
       exit(1);
     }
@@ -2398,6 +2421,11 @@ int gen_value(struct Expr *e) {
   }
 
   if (e->kind == ND_VAR) {
+    // Function name used as value: load its address (don't dereference)
+    if (cg_find_slot(e->sval) < 0 && cg_is_global(e->sval) == 0 && is_known_func(e->sval)) {
+      gen_addr(e);
+      return 0;
+    }
     gen_addr(e);
     if (cg_is_array(e->sval) == 0 && cg_is_structvar(e->sval) == 0 && cg_global_is_array(e->sval) == 0) {
       emit_line("\tldr\tx0, [x0]");
@@ -2611,6 +2639,45 @@ int gen_value(struct Expr *e) {
     // Regular function call
     if (nargs > 8) { my_fatal("too many args"); }
     int ai = 0;
+    int disp = 0;
+
+    // Indirect call through function pointer variable
+    if (is_known_func(name) == 0 && (cg_find_slot(name) >= 0 || cg_is_global(name))) {
+      // Load function pointer into x0, push to stack
+      gen_value(new_var(name));
+      emit_line("\tstr\tx0, [sp, #-16]!");
+      // Push args to stack
+      ai = 0;
+      while (ai < nargs) {
+        gen_value(e->args[ai]);
+        emit_line("\tstr\tx0, [sp, #-16]!");
+        ai = ai + 1;
+      }
+      // Load function pointer from bottom of our stack into x8
+      emit_s("\tldr\tx8, [sp, #");
+      emit_num(nargs * 16);
+      emit_line("]");
+      // Load args from stack into registers
+      ai = 0;
+      while (ai < nargs) {
+        disp = (nargs - 1 - ai) * 16;
+        emit_s("\tldr\tx");
+        emit_num(ai);
+        emit_s(", [sp, #");
+        emit_num(disp);
+        emit_line("]");
+        ai = ai + 1;
+      }
+      // Pop all (args + function pointer)
+      emit_s("\tadd\tsp, sp, #");
+      emit_num((nargs + 1) * 16);
+      emit_ch('\n');
+      emit_line("\tblr\tx8");
+      return 0;
+    }
+
+    // Direct function call
+    ai = 0;
     while (ai < nargs) {
       gen_value(e->args[ai]);
       emit_line("\tstr\tx0, [sp, #-16]!");
@@ -2618,7 +2685,7 @@ int gen_value(struct Expr *e) {
     }
     ai = 0;
     while (ai < nargs) {
-      int disp = (nargs - 1 - ai) * 16;
+      disp = (nargs - 1 - ai) * 16;
       emit_s("\tldr\tx");
       emit_num(ai);
       emit_s(", [sp, #");
@@ -2988,6 +3055,22 @@ int codegen(struct Program *prog) {
       ptr_ret_names[n_ptr_ret] = fd->name;
       n_ptr_ret = n_ptr_ret + 1;
     }
+    pi = pi + 1;
+  }
+
+  // Register all known function names (for function pointer support)
+  nknown_funcs = 0;
+  pi = 0;
+  while (pi < prog->nprotos) {
+    known_funcs[nknown_funcs] = prog->proto_names[pi];
+    nknown_funcs = nknown_funcs + 1;
+    pi = pi + 1;
+  }
+  pi = 0;
+  while (pi < prog->nfuncs) {
+    fd = prog->funcs[pi];
+    known_funcs[nknown_funcs] = fd->name;
+    nknown_funcs = nknown_funcs + 1;
     pi = pi + 1;
   }
 
