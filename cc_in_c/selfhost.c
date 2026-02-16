@@ -1086,6 +1086,18 @@ struct Stmt **parse_block(int *out_len) {
   return stmts;
 }
 
+struct Stmt *parse_stmt();
+
+struct Stmt **parse_block_or_stmt(int *out_len) {
+  if (p_match(TK_OP, "{")) {
+    return parse_block(out_len);
+  }
+  struct Stmt **stmts = my_malloc(8);
+  stmts[0] = parse_stmt();
+  *out_len = 1;
+  return stmts;
+}
+
 struct VarDecl *make_vd(int *name, int *stype, int arr_size, struct Expr *init) {
   struct VarDecl *vd = my_malloc(32);
   vd->name = name;
@@ -1456,7 +1468,7 @@ struct Stmt *parse_stmt() {
     cond = parse_expr(0);
     p_eat(TK_OP, ")");
     then_len = 0;
-    then_body = parse_block(&then_len);
+    then_body = parse_block_or_stmt(&then_len);
     else_body = 0;
     else_len = 0;
     if (p_match(TK_KW, "else")) {
@@ -1466,7 +1478,7 @@ struct Stmt *parse_stmt() {
         else_body[0] = parse_stmt();
         else_len = 1;
       } else {
-        else_body = parse_block(&else_len);
+        else_body = parse_block_or_stmt(&else_len);
       }
     }
     return new_if_s(cond, then_body, then_len, else_body, else_len);
@@ -1478,7 +1490,7 @@ struct Stmt *parse_stmt() {
     cond = parse_expr(0);
     p_eat(TK_OP, ")");
     blen = 0;
-    body = parse_block(&blen);
+    body = parse_block_or_stmt(&blen);
     return new_while_s(cond, body, blen);
   }
 
@@ -1516,7 +1528,7 @@ struct Stmt *parse_stmt() {
     p_eat(TK_OP, ")");
 
     blen = 0;
-    body = parse_block(&blen);
+    body = parse_block_or_stmt(&blen);
     return new_for_s(init, cond, post, body, blen);
   }
 
@@ -1536,7 +1548,7 @@ struct Stmt *parse_stmt() {
   if (p_match(TK_KW, "do")) {
     p_eat(TK_KW, "do");
     blen = 0;
-    body = parse_block(&blen);
+    body = parse_block_or_stmt(&blen);
     p_eat(TK_KW, "while");
     p_eat(TK_OP, "(");
     cond = parse_expr(0);
