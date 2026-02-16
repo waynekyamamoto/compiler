@@ -23,43 +23,12 @@ int system(int *cmd);
 #endif
 
 // ---- Constants ----
-// Token kinds
-int TK_NUM = 0;
-int TK_ID = 1;
-int TK_STR = 2;
-int TK_KW = 3;
-int TK_OP = 4;
-int TK_EOF = 5;
-
-// Expr kinds
-int ND_NUM = 0;
-int ND_VAR = 1;
-int ND_STRLIT = 2;
-int ND_CALL = 3;
-int ND_UNARY = 4;
-int ND_BINARY = 5;
-int ND_INDEX = 6;
-int ND_FIELD = 7;
-int ND_ARROW = 8;
-int ND_ASSIGN = 9;
-int ND_POSTINC = 10;
-int ND_POSTDEC = 11;
-int ND_TERNARY = 12;
-int ND_INITLIST = 13;
-
-// Stmt kinds
-int ST_RETURN = 0;
-int ST_IF = 1;
-int ST_WHILE = 2;
-int ST_FOR = 3;
-int ST_BREAK = 4;
-int ST_CONTINUE = 5;
-int ST_EXPR = 6;
-int ST_VARDECL = 7;
-int ST_DOWHILE = 8;
-int ST_GOTO = 9;
-int ST_LABEL = 10;
-int ST_SWITCH = 11;
+enum { TK_NUM, TK_ID, TK_STR, TK_KW, TK_OP, TK_EOF };
+enum { ND_NUM, ND_VAR, ND_STRLIT, ND_CALL, ND_UNARY, ND_BINARY,
+       ND_INDEX, ND_FIELD, ND_ARROW, ND_ASSIGN, ND_POSTINC, ND_POSTDEC,
+       ND_TERNARY, ND_INITLIST };
+enum { ST_RETURN, ST_IF, ST_WHILE, ST_FOR, ST_BREAK, ST_CONTINUE,
+       ST_EXPR, ST_VARDECL, ST_DOWHILE, ST_GOTO, ST_LABEL, ST_SWITCH };
 
 // ---- Structs ----
 struct Expr {
