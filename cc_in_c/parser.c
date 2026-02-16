@@ -235,9 +235,15 @@ static StructDef parse_struct_or_union_def(int is_union) {
     struct_defs[nstruct_defs].nfields = nfields;
     nstruct_defs++;
 
+    /* Build field_types array for codegen */
+    char **ftypes = xmalloc(nfields * sizeof(char *));
+    for (int i = 0; i < nfields; i++)
+        ftypes[i] = (finfo[i].struct_type && !finfo[i].is_ptr) ? xstrdup(finfo[i].struct_type) : NULL;
+
     StructDef sd;
     sd.name = name;
     sd.fields = fields;
+    sd.field_types = ftypes;
     sd.nfields = nfields;
     sd.is_union = is_union;
     return sd;

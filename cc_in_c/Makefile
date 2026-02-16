@@ -22,7 +22,7 @@ test: $(TARGET)
 	rm -f hello_test hanoi_test ptr_test_out ../hello.s ../hanoi.s ../ptr_test.s ../hello.o ../hanoi.o ../ptr_test.o
 
 test-new: $(TARGET)
-	@for n in 1 2 3 4 5 6 7 8 9 10 11; do \
+	@for n in 1 2 3 4 5 6 7 8 9 10 11 12; do \
 		echo "=== test_batch$$n ==="; \
 		./cc tests/test_batch$$n.c -o tests/test_batch$${n}_out && ./tests/test_batch$${n}_out || exit 1; \
 	done
@@ -31,7 +31,7 @@ test-new: $(TARGET)
 
 test-selfhost: $(TARGET)
 	./cc selfhost.c -o gen1
-	@for n in 1 2 3 4 5 6 7 8 9 10 11; do \
+	@for n in 1 2 3 4 5 6 7 8 9 10 11 12; do \
 		echo "=== test_batch$$n (selfhost) ==="; \
 		./gen1 tests/test_batch$$n.c -o /tmp/test_batch$${n}_out && /tmp/test_batch$${n}_out || exit 1; \
 	done

@@ -30,10 +30,11 @@ typedef struct {
 static LoopEntry loop_stack[64];
 static int nloop_stack;
 
-/* Struct definitions: name -> field names */
+/* Struct definitions: name -> field names + types */
 typedef struct {
     char *name;
     char **fields;
+    char **field_types;  /* NULL = int, non-NULL = struct type name */
     int nfields;
     int is_union;
 } CgStructDef;
@@ -145,6 +146,8 @@ static const char *find_structvar_type(FuncLayout *layout, const char *name) {
     return NULL;
 }
 
+static int cg_struct_nfields(const char *name);
+
 static CgStructDef *find_cg_struct(const char *name) {
     for (int i = 0; i < ncg_structs; i++)
         if (strcmp(cg_structs[i].name, name) == 0)
@@ -157,9 +160,15 @@ static int field_index(const char *struct_name, const char *field_name) {
     if (!sd) fatal("Unknown struct '%s' in codegen", struct_name);
     /* For unions, all fields are at offset 0 */
     if (sd->is_union) return 0;
-    for (int i = 0; i < sd->nfields; i++)
+    int slot = 0;
+    for (int i = 0; i < sd->nfields; i++) {
         if (strcmp(sd->fields[i], field_name) == 0)
-            return i;
+            return slot;
+        if (sd->field_types[i])
+            slot += cg_struct_nfields(sd->field_types[i]);
+        else
+            slot += 1;
+    }
     fatal("Struct '%s' has no field '%s'", struct_name, field_name);
     return -1;
 }
@@ -169,7 +178,14 @@ static int cg_struct_nfields(const char *name) {
     if (!sd) fatal("Unknown struct '%s' for nfields", name);
     /* Unions: all fields overlap, allocate 1 slot */
     if (sd->is_union) return 1;
-    return sd->nfields;
+    int total = 0;
+    for (int i = 0; i < sd->nfields; i++) {
+        if (sd->field_types[i])
+            total += cg_struct_nfields(sd->field_types[i]);
+        else
+            total += 1;
+    }
+    return total;
 }
 
 static GlobalVarEntry *find_global(const char *name) {
@@ -1333,6 +1349,7 @@ char *codegen_generate(Program *prog) {
         if (ncg_structs >= 64) fatal("Too many structs");
         cg_structs[ncg_structs].name = prog->structs[i].name;
         cg_structs[ncg_structs].fields = prog->structs[i].fields;
+        cg_structs[ncg_structs].field_types = prog->structs[i].field_types;
         cg_structs[ncg_structs].nfields = prog->structs[i].nfields;
         cg_structs[ncg_structs].is_union = prog->structs[i].is_union;
         ncg_structs++;

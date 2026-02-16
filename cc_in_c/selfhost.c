@@ -111,6 +111,7 @@ struct FuncDef {
 struct SDef {
   int *name;
   int **fields;
+  int **field_types;
   int nfields;
   int is_union;
 };
@@ -179,6 +180,7 @@ int ncg_g;
 // Struct/union defs for codegen
 int *cg_sname[64];
 int **cg_sfields[64];
+int **cg_sfield_types[64];
 int cg_snfields[64];
 int cg_s_is_union[64];
 int ncg_s;
@@ -1706,9 +1708,22 @@ struct SDef *parse_struct_or_union_def(int is_union) {
   p_sdefs[np_sdefs] = sdi;
   np_sdefs = np_sdefs + 1;
 
-  struct SDef *sd = my_malloc(40);
+  // Build field_types array
+  int **ftypes = my_malloc(64 * 8);
+  int fti = 0;
+  while (fti < nf) {
+    if (finfo[fti]->stype != 0 && finfo[fti]->is_ptr == 0) {
+      ftypes[fti] = my_strdup(finfo[fti]->stype);
+    } else {
+      ftypes[fti] = 0;
+    }
+    fti = fti + 1;
+  }
+
+  struct SDef *sd = my_malloc(48);
   sd->name = name;
   sd->fields = fields;
+  sd->field_types = ftypes;
   sd->nfields = nf;
   sd->is_union = is_union;
   return sd;
@@ -2114,16 +2129,24 @@ int *cg_structvar_type(int *name) {
   return 0;
 }
 
+int cg_struct_nfields(int *sname);
+
 int cg_field_index(int *sname, int *fname) {
   int i = 0;
   while (i < ncg_s) {
     if (my_strcmp(cg_sname[i], sname) == 0) {
       // For unions, all fields are at offset 0
       if (cg_s_is_union[i]) { return 0; }
+      int slot = 0;
       int j = 0;
       while (j < cg_snfields[i]) {
         if (my_strcmp(cg_sfields[i][j], fname) == 0) {
-          return j;
+          return slot;
+        }
+        if (cg_sfield_types[i][j] != 0) {
+          slot = slot + cg_struct_nfields(cg_sfield_types[i][j]);
+        } else {
+          slot = slot + 1;
         }
         j = j + 1;
       }
@@ -2141,7 +2164,17 @@ int cg_struct_nfields(int *sname) {
     if (my_strcmp(cg_sname[i], sname) == 0) {
       // Unions: all fields overlap, allocate 1 slot
       if (cg_s_is_union[i]) { return 1; }
-      return cg_snfields[i];
+      int total = 0;
+      int j = 0;
+      while (j < cg_snfields[i]) {
+        if (cg_sfield_types[i][j] != 0) {
+          total = total + cg_struct_nfields(cg_sfield_types[i][j]);
+        } else {
+          total = total + 1;
+        }
+        j = j + 1;
+      }
+      return total;
     }
     i = i + 1;
   }
@@ -3142,6 +3175,7 @@ int codegen(struct Program *prog) {
     struct SDef *sd = prog->structs[i];
     cg_sname[ncg_s] = sd->name;
     cg_sfields[ncg_s] = sd->fields;
+    cg_sfield_types[ncg_s] = sd->field_types;
     cg_snfields[ncg_s] = sd->nfields;
     cg_s_is_union[ncg_s] = sd->is_union;
     ncg_s = ncg_s + 1;

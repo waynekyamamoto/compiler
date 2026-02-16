@@ -113,6 +113,7 @@ struct Stmt {
 typedef struct {
     char *name;
     char **fields;
+    char **field_types;  /* NULL entry = int, non-NULL = struct type name */
     int nfields;
     int is_union;
 } StructDef;
