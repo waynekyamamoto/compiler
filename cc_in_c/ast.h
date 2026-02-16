@@ -14,6 +14,9 @@ typedef enum {
     ND_FIELD,
     ND_ARROW,
     ND_ASSIGN,
+    ND_POSTINC,
+    ND_POSTDEC,
+    ND_TERNARY,
 } ExprKind;
 
 typedef struct Expr Expr;
@@ -36,6 +39,8 @@ struct Expr {
         struct { Expr *base; Expr *index; } index;    /* ND_INDEX */
         struct { Expr *obj; char *field; char *struct_type; } field; /* ND_FIELD, ND_ARROW */
         struct { Expr *target; Expr *rhs; } assign;   /* ND_ASSIGN */
+        Expr *postinc_operand;      /* ND_POSTINC, ND_POSTDEC */
+        struct { Expr *cond; Expr *then_expr; Expr *else_expr; } ternary; /* ND_TERNARY */
     } u;
 };
 
@@ -50,6 +55,10 @@ typedef enum {
     ST_CONTINUE,
     ST_EXPR,
     ST_VARDECL,
+    ST_DOWHILE,
+    ST_SWITCH,
+    ST_GOTO,
+    ST_LABEL,
 } StmtKind;
 
 typedef struct Stmt Stmt;
@@ -77,6 +86,12 @@ typedef struct {
     int count;
 } VarDeclList;
 
+/* Switch case */
+typedef struct {
+    Expr *value;        /* NULL for default */
+    StmtArray stmts;
+} SwitchCase;
+
 struct Stmt {
     StmtKind kind;
     union {
@@ -86,6 +101,10 @@ struct Stmt {
         struct { Stmt *init; Expr *cond; Expr *post; Block body; } for_s; /* ST_FOR */
         Expr *expr;                    /* ST_EXPR */
         VarDeclList vardecl;           /* ST_VARDECL */
+        struct { Expr *cond; Block body; } dowhile_s;                   /* ST_DOWHILE */
+        struct { Expr *cond; SwitchCase *cases; int ncases; } switch_s; /* ST_SWITCH */
+        char *goto_label;              /* ST_GOTO */
+        struct { char *name; Stmt *stmt; } label_s;                     /* ST_LABEL */
     } u;
 };
 
@@ -102,6 +121,8 @@ typedef struct {
     char **params;
     int nparams;
     Block body;
+    int is_static;
+    int ret_is_ptr;
 } FuncDef;
 
 typedef struct {
@@ -111,7 +132,13 @@ typedef struct {
     int array_size;     /* -1 if not an array */
     Expr *init;         /* NULL if no initializer */
     int is_extern;      /* 1 if extern declaration */
+    int is_static;      /* 1 if static declaration */
 } GlobalDecl;
+
+typedef struct {
+    char *name;
+    int ret_is_ptr;
+} FuncProto;
 
 typedef struct {
     StructDef *structs;
@@ -120,6 +147,8 @@ typedef struct {
     int nfuncs;
     GlobalDecl *globals;
     int nglobals;
+    FuncProto *protos;
+    int nprotos;
 } Program;
 
 /* ---- Constructors ---- */
@@ -134,6 +163,9 @@ Expr *new_index(Expr *base, Expr *index);
 Expr *new_field(Expr *obj, const char *field, const char *struct_type);
 Expr *new_arrow(Expr *obj, const char *field, const char *struct_type);
 Expr *new_assign(Expr *target, Expr *rhs);
+Expr *new_postinc(Expr *operand);
+Expr *new_postdec(Expr *operand);
+Expr *new_ternary(Expr *cond, Expr *then_expr, Expr *else_expr);
 
 Stmt *new_return(Expr *e);
 Stmt *new_if(Expr *cond, Block then_blk, Block *else_blk);
@@ -143,6 +175,10 @@ Stmt *new_break(void);
 Stmt *new_continue(void);
 Stmt *new_exprstmt(Expr *e);
 Stmt *new_vardecl(VarDeclList vdl);
+Stmt *new_dowhile(Expr *cond, Block body);
+Stmt *new_switch(Expr *cond, SwitchCase *cases, int ncases);
+Stmt *new_goto(const char *label);
+Stmt *new_label(const char *name, Stmt *stmt);
 
 void exprarray_push(ExprArray *a, Expr *e);
 void stmtarray_push(StmtArray *a, Stmt *s);

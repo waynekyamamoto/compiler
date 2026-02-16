@@ -101,6 +101,29 @@ Expr *new_assign(Expr *target, Expr *rhs) {
     return e;
 }
 
+Expr *new_postinc(Expr *operand) {
+    Expr *e = xmalloc(sizeof(Expr));
+    e->kind = ND_POSTINC;
+    e->u.postinc_operand = operand;
+    return e;
+}
+
+Expr *new_postdec(Expr *operand) {
+    Expr *e = xmalloc(sizeof(Expr));
+    e->kind = ND_POSTDEC;
+    e->u.postinc_operand = operand;
+    return e;
+}
+
+Expr *new_ternary(Expr *cond, Expr *then_expr, Expr *else_expr) {
+    Expr *e = xmalloc(sizeof(Expr));
+    e->kind = ND_TERNARY;
+    e->u.ternary.cond = cond;
+    e->u.ternary.then_expr = then_expr;
+    e->u.ternary.else_expr = else_expr;
+    return e;
+}
+
 Stmt *new_return(Expr *e) {
     Stmt *s = xmalloc(sizeof(Stmt));
     s->kind = ST_RETURN;
@@ -158,5 +181,37 @@ Stmt *new_vardecl(VarDeclList vdl) {
     Stmt *s = xmalloc(sizeof(Stmt));
     s->kind = ST_VARDECL;
     s->u.vardecl = vdl;
+    return s;
+}
+
+Stmt *new_dowhile(Expr *cond, Block body) {
+    Stmt *s = xmalloc(sizeof(Stmt));
+    s->kind = ST_DOWHILE;
+    s->u.dowhile_s.cond = cond;
+    s->u.dowhile_s.body = body;
+    return s;
+}
+
+Stmt *new_switch(Expr *cond, SwitchCase *cases, int ncases) {
+    Stmt *s = xmalloc(sizeof(Stmt));
+    s->kind = ST_SWITCH;
+    s->u.switch_s.cond = cond;
+    s->u.switch_s.cases = cases;
+    s->u.switch_s.ncases = ncases;
+    return s;
+}
+
+Stmt *new_goto(const char *label) {
+    Stmt *s = xmalloc(sizeof(Stmt));
+    s->kind = ST_GOTO;
+    s->u.goto_label = xstrdup(label);
+    return s;
+}
+
+Stmt *new_label(const char *name, Stmt *stmt) {
+    Stmt *s = xmalloc(sizeof(Stmt));
+    s->kind = ST_LABEL;
+    s->u.label_s.name = xstrdup(name);
+    s->u.label_s.stmt = stmt;
     return s;
 }

@@ -1,10 +1,24 @@
 // Self-hosting C compiler - compiles itself using only the C subset it supports
-// Supported: int, int *, struct, if/else, while, for, break, continue, return
-// No: enum, typedef, union, switch, char, void, sizeof
+// Supported: int, int *, struct, if/else/while/for/do-while/switch/break/continue/return
+// Supported: enum, typedef(skip), sizeof, goto/labels, char/void/unsigned/signed/long/short(as int)
+// Supported: const/volatile/register/static/extern(skip), type casts(no-op), hex literals
+// Supported: ^, <<, >>, ++x/--x, +=/-=/*=//=/%=/&=/|=/^=, ~, ternary
+// No: union, floating point
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef __STDC__
+int printf(int *fmt, ...);
+int *fopen(int *path, int *mode);
+int fgetc(int *f);
+int fclose(int *f);
+int fputc(int c, int *f);
+int *malloc(int size);
+int *realloc(int *ptr, int size);
+int exit(int code);
+int system(int *cmd);
+#endif
 
 // ---- Constants ----
 // Token kinds
@@ -26,6 +40,9 @@ int ND_INDEX = 6;
 int ND_FIELD = 7;
 int ND_ARROW = 8;
 int ND_ASSIGN = 9;
+int ND_POSTINC = 10;
+int ND_POSTDEC = 11;
+int ND_TERNARY = 12;
 
 // Stmt kinds
 int ST_RETURN = 0;
@@ -36,6 +53,10 @@ int ST_BREAK = 4;
 int ST_CONTINUE = 5;
 int ST_EXPR = 6;
 int ST_VARDECL = 7;
+int ST_DOWHILE = 8;
+int ST_GOTO = 9;
+int ST_LABEL = 10;
+int ST_SWITCH = 11;
 
 // ---- Structs ----
 struct Expr {
@@ -67,6 +88,13 @@ struct Stmt {
   struct Stmt *init;
   struct VarDecl **decls;
   int ndecls;
+  int *sval;
+  int *case_vals;
+  struct Stmt ***case_bodies;
+  int *case_nbodies;
+  int ncases;
+  struct Stmt **default_body;
+  int ndefault;
 };
 
 struct FuncDef {
@@ -75,6 +103,7 @@ struct FuncDef {
   int nparams;
   struct Stmt **body;
   int nbody;
+  int ret_is_ptr;
 };
 
 struct SDef {
@@ -95,11 +124,25 @@ struct SDefInfo {
   int nflds;
 };
 
+struct GDecl {
+  int *name;
+  int is_ptr;
+  int array_size;
+  int init_val;
+  int has_init;
+  int *init_str;
+};
+
 struct Program {
   struct SDef **structs;
   int nstructs;
   struct FuncDef **funcs;
   int nfuncs;
+  int **proto_names;
+  int *proto_ret_is_ptr;
+  int nprotos;
+  struct GDecl **globals;
+  int nglobals;
 };
 
 // ---- Globals ----
@@ -107,6 +150,10 @@ struct Program {
 int *outbuf;
 int outlen;
 int outcap;
+
+// Ptr-returning function names (for sxtw after bl)
+int *ptr_ret_names[256];
+int n_ptr_ret;
 
 // Label counter
 int label_id;
@@ -121,6 +168,11 @@ int *loop_brk[64];
 int *loop_cont[64];
 int nloop;
 
+// Global variable names for codegen
+int *cg_gnames[1024];
+int cg_gis_array[1024];
+int ncg_g;
+
 // Struct defs for codegen
 int *cg_sname[64];
 int **cg_sfields[64];
@@ -128,9 +180,9 @@ int cg_snfields[64];
 int ncg_s;
 
 // Token arrays
-int tok_kind[16384];
-int *tok_val[16384];
-int tok_pos[16384];
+int tok_kind[65536];
+int *tok_val[65536];
+int tok_pos[65536];
 int ntokens;
 
 // Parser state
@@ -157,6 +209,14 @@ int *lay_sv_name[64];
 int *lay_sv_type[64];
 int nlay_sv;
 int lay_stack_size;
+
+// Enum constant table
+int *ec_name[1024];
+int ec_val[1024];
+int nec;
+
+// Current function name for goto label mangling
+int *cg_cur_func_name;
 
 // ---- Utility functions ----
 
@@ -193,6 +253,20 @@ int my_strlen(int *s) {
   return strlen(s);
 }
 
+int is_hex_digit(int c) {
+  if (c >= '0' && c <= '9') { return 1; }
+  if (c >= 'a' && c <= 'f') { return 1; }
+  if (c >= 'A' && c <= 'F') { return 1; }
+  return 0;
+}
+
+int hex_digit_val(int c) {
+  if (c >= '0' && c <= '9') { return c - '0'; }
+  if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
+  if (c >= 'A' && c <= 'F') { return c - 'A' + 10; }
+  return 0;
+}
+
 int my_atoi(int *s) {
   int val = 0;
   int i = 0;
@@ -201,9 +275,17 @@ int my_atoi(int *s) {
     neg = 1;
     i = 1;
   }
-  while (__read_byte(s, i) >= '0' && __read_byte(s, i) <= '9') {
-    val = val * 10 + __read_byte(s, i) - '0';
-    i = i + 1;
+  if (__read_byte(s, i) == '0' && (__read_byte(s, i + 1) == 'x' || __read_byte(s, i + 1) == 'X')) {
+    i = i + 2;
+    while (is_hex_digit(__read_byte(s, i))) {
+      val = val * 16 + hex_digit_val(__read_byte(s, i));
+      i = i + 1;
+    }
+  } else {
+    while (__read_byte(s, i) >= '0' && __read_byte(s, i) <= '9') {
+      val = val * 10 + __read_byte(s, i) - '0';
+      i = i + 1;
+    }
   }
   if (neg) {
     val = 0 - val;
@@ -368,6 +450,25 @@ int is_keyword(int *s) {
   if (my_strcmp(s, "break") == 0) { return 1; }
   if (my_strcmp(s, "continue") == 0) { return 1; }
   if (my_strcmp(s, "struct") == 0) { return 1; }
+  if (my_strcmp(s, "do") == 0) { return 1; }
+  if (my_strcmp(s, "goto") == 0) { return 1; }
+  if (my_strcmp(s, "sizeof") == 0) { return 1; }
+  if (my_strcmp(s, "char") == 0) { return 1; }
+  if (my_strcmp(s, "void") == 0) { return 1; }
+  if (my_strcmp(s, "const") == 0) { return 1; }
+  if (my_strcmp(s, "volatile") == 0) { return 1; }
+  if (my_strcmp(s, "register") == 0) { return 1; }
+  if (my_strcmp(s, "static") == 0) { return 1; }
+  if (my_strcmp(s, "extern") == 0) { return 1; }
+  if (my_strcmp(s, "unsigned") == 0) { return 1; }
+  if (my_strcmp(s, "signed") == 0) { return 1; }
+  if (my_strcmp(s, "long") == 0) { return 1; }
+  if (my_strcmp(s, "short") == 0) { return 1; }
+  if (my_strcmp(s, "enum") == 0) { return 1; }
+  if (my_strcmp(s, "typedef") == 0) { return 1; }
+  if (my_strcmp(s, "switch") == 0) { return 1; }
+  if (my_strcmp(s, "case") == 0) { return 1; }
+  if (my_strcmp(s, "default") == 0) { return 1; }
   return 0;
 }
 
@@ -417,11 +518,18 @@ int lex(int *src, int srclen) {
       continue;
     }
 
-    // Number
+    // Number (decimal or hex)
     if (is_digit(c)) {
       start = i;
-      while (i < len && is_digit(__read_byte(buf, i))) {
-        i = i + 1;
+      if (c == '0' && i + 1 < len && (__read_byte(buf, i + 1) == 'x' || __read_byte(buf, i + 1) == 'X')) {
+        i = i + 2;
+        while (i < len && is_hex_digit(__read_byte(buf, i))) {
+          i = i + 1;
+        }
+      } else {
+        while (i < len && is_digit(__read_byte(buf, i))) {
+          i = i + 1;
+        }
       }
       tok_kind[ntokens] = TK_NUM;
       tok_val[ntokens] = make_str(buf, start, i - start);
@@ -509,13 +617,26 @@ int lex(int *src, int srclen) {
       if (c == '>' && c1 == '=') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup(">="); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 2; continue; }
       if (c == '&' && c1 == '&') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup("&&"); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 2; continue; }
       if (c == '|' && c1 == '|') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup("||"); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 2; continue; }
+      if (c == '+' && c1 == '+') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup("++"); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 2; continue; }
+      if (c == '-' && c1 == '-') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup("--"); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 2; continue; }
+      if (c == '<' && c1 == '<') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup("<<"); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 2; continue; }
+      if (c == '>' && c1 == '>') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup(">>"); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 2; continue; }
+      if (c == '+' && c1 == '=') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup("+="); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 2; continue; }
+      if (c == '-' && c1 == '=') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup("-="); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 2; continue; }
+      if (c == '*' && c1 == '=') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup("*="); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 2; continue; }
+      if (c == '/' && c1 == '=') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup("/="); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 2; continue; }
+      if (c == '%' && c1 == '=') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup("%="); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 2; continue; }
+      if (c == '&' && c1 == '=') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup("&="); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 2; continue; }
+      if (c == '|' && c1 == '=') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup("|="); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 2; continue; }
+      if (c == '^' && c1 == '=') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup("^="); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 2; continue; }
     }
 
     // Single-char operators
     if (c == '+' || c == '-' || c == '*' || c == '/' || c == '%' ||
         c == '<' || c == '>' || c == '=' || c == '!' || c == '&' ||
-        c == '|' || c == '.' || c == ';' || c == ',' || c == '(' || c == ')' ||
-        c == '{' || c == '}' || c == '[' || c == ']') {
+        c == '|' || c == '^' || c == '~' || c == '.' || c == ';' || c == ',' || c == '(' || c == ')' ||
+        c == '{' || c == '}' || c == '[' || c == ']' ||
+        c == '?' || c == ':') {
       tok_kind[ntokens] = TK_OP;
       tok_val[ntokens] = make_str(buf, i, 1);
       tok_pos[ntokens] = i;
@@ -547,7 +668,7 @@ int p_match(int kind, int *val) {
 
 int *p_eat(int kind, int *val) {
   if (tok_kind[cur_pos] != kind) {
-    printf("Expected kind %d, got %d at pos %d\n", kind, tok_kind[cur_pos], tok_pos[cur_pos]);
+    printf("Expected kind %d, got %d at pos %d (val=%s)\n", kind, tok_kind[cur_pos], tok_pos[cur_pos], tok_val[cur_pos]);
     exit(1);
   }
   if (val != 0 && my_strcmp(tok_val[cur_pos], val) != 0) {
@@ -693,15 +814,39 @@ struct Expr *new_assign(struct Expr *target, struct Expr *rhs) {
   return e;
 }
 
+struct Expr *new_postinc(struct Expr *operand) {
+  struct Expr *e = my_malloc(64);
+  e->kind = ND_POSTINC;
+  e->left = operand;
+  return e;
+}
+
+struct Expr *new_postdec(struct Expr *operand) {
+  struct Expr *e = my_malloc(64);
+  e->kind = ND_POSTDEC;
+  e->left = operand;
+  return e;
+}
+
+struct Expr *new_ternary(struct Expr *cond, struct Expr *then_e, struct Expr *else_e) {
+  struct Expr *e = my_malloc(64);
+  e->kind = ND_TERNARY;
+  e->left = cond;
+  e->right = then_e;
+  e->args = my_malloc(8);
+  e->args[0] = else_e;
+  return e;
+}
+
 struct Stmt *new_return_s(struct Expr *e) {
-  struct Stmt *s = my_malloc(80);
+  struct Stmt *s = my_malloc(144);
   s->kind = ST_RETURN;
   s->expr = e;
   return s;
 }
 
 struct Stmt *new_if_s(struct Expr *cond, struct Stmt **body, int nbody, struct Stmt **body2, int nbody2) {
-  struct Stmt *s = my_malloc(80);
+  struct Stmt *s = my_malloc(144);
   s->kind = ST_IF;
   s->expr = cond;
   s->body = body;
@@ -712,7 +857,7 @@ struct Stmt *new_if_s(struct Expr *cond, struct Stmt **body, int nbody, struct S
 }
 
 struct Stmt *new_while_s(struct Expr *cond, struct Stmt **body, int nbody) {
-  struct Stmt *s = my_malloc(80);
+  struct Stmt *s = my_malloc(144);
   s->kind = ST_WHILE;
   s->expr = cond;
   s->body = body;
@@ -721,7 +866,7 @@ struct Stmt *new_while_s(struct Expr *cond, struct Stmt **body, int nbody) {
 }
 
 struct Stmt *new_for_s(struct Stmt *init, struct Expr *cond, struct Expr *post, struct Stmt **body, int nbody) {
-  struct Stmt *s = my_malloc(80);
+  struct Stmt *s = my_malloc(144);
   s->kind = ST_FOR;
   s->init = init;
   s->expr = cond;
@@ -732,45 +877,138 @@ struct Stmt *new_for_s(struct Stmt *init, struct Expr *cond, struct Expr *post, 
 }
 
 struct Stmt *new_break_s() {
-  struct Stmt *s = my_malloc(80);
+  struct Stmt *s = my_malloc(144);
   s->kind = ST_BREAK;
   return s;
 }
 
 struct Stmt *new_continue_s() {
-  struct Stmt *s = my_malloc(80);
+  struct Stmt *s = my_malloc(144);
   s->kind = ST_CONTINUE;
   return s;
 }
 
 struct Stmt *new_expr_s(struct Expr *e) {
-  struct Stmt *s = my_malloc(80);
+  struct Stmt *s = my_malloc(144);
   s->kind = ST_EXPR;
   s->expr = e;
   return s;
 }
 
 struct Stmt *new_vardecl_s(struct VarDecl **decls, int ndecls) {
-  struct Stmt *s = my_malloc(80);
+  struct Stmt *s = my_malloc(144);
   s->kind = ST_VARDECL;
   s->decls = decls;
   s->ndecls = ndecls;
   return s;
 }
 
+struct Stmt *new_dowhile_s(struct Expr *cond, struct Stmt **body, int nbody) {
+  struct Stmt *s = my_malloc(144);
+  s->kind = ST_DOWHILE;
+  s->expr = cond;
+  s->body = body;
+  s->nbody = nbody;
+  return s;
+}
+
+struct Stmt *new_goto_s(int *label) {
+  struct Stmt *s = my_malloc(144);
+  s->kind = ST_GOTO;
+  s->sval = my_strdup(label);
+  return s;
+}
+
+struct Stmt *new_label_s(int *label, struct Stmt *following) {
+  struct Stmt *s = my_malloc(144);
+  s->kind = ST_LABEL;
+  s->sval = my_strdup(label);
+  s->body = my_malloc(8);
+  s->body[0] = following;
+  s->nbody = 1;
+  return s;
+}
+
+struct Stmt *new_switch_s(struct Expr *cond, int *case_vals, struct Stmt ***case_bodies, int *case_nbodies, int ncases, struct Stmt **default_body, int ndefault) {
+  struct Stmt *s = my_malloc(144);
+  s->kind = ST_SWITCH;
+  s->expr = cond;
+  s->case_vals = case_vals;
+  s->case_bodies = case_bodies;
+  s->case_nbodies = case_nbodies;
+  s->ncases = ncases;
+  s->default_body = default_body;
+  s->ndefault = ndefault;
+  return s;
+}
+
 // ---- Parser ----
 
+int skip_qualifiers() {
+  int skipped = 0;
+  while (p_match(TK_KW, "const") || p_match(TK_KW, "volatile") || p_match(TK_KW, "register")) {
+    cur_pos = cur_pos + 1;
+    skipped = 1;
+  }
+  return skipped;
+}
+
 int *parse_base_type() {
+  skip_qualifiers();
   if (p_match(TK_KW, "int")) {
     p_eat(TK_KW, "int");
+    // consume trailing long/short
+    while (p_match(TK_KW, "long") || p_match(TK_KW, "short")) { cur_pos = cur_pos + 1; }
+    skip_qualifiers();
+    return 0;
+  }
+  if (p_match(TK_KW, "char")) {
+    p_eat(TK_KW, "char");
+    skip_qualifiers();
+    return 0;
+  }
+  if (p_match(TK_KW, "void")) {
+    p_eat(TK_KW, "void");
+    skip_qualifiers();
+    return 0;
+  }
+  if (p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) {
+    cur_pos = cur_pos + 1;
+    // optional: int, long, short, char after
+    if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; }
+    else if (p_match(TK_KW, "long")) { cur_pos = cur_pos + 1; if (p_match(TK_KW, "long")) { cur_pos = cur_pos + 1; } if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; } }
+    else if (p_match(TK_KW, "short")) { cur_pos = cur_pos + 1; if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; } }
+    else if (p_match(TK_KW, "char")) { cur_pos = cur_pos + 1; }
+    skip_qualifiers();
+    return 0;
+  }
+  if (p_match(TK_KW, "long")) {
+    cur_pos = cur_pos + 1;
+    if (p_match(TK_KW, "long")) { cur_pos = cur_pos + 1; }
+    if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; }
+    else if (p_match(TK_KW, "unsigned")) { cur_pos = cur_pos + 1; if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; } }
+    skip_qualifiers();
+    return 0;
+  }
+  if (p_match(TK_KW, "short")) {
+    cur_pos = cur_pos + 1;
+    if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; }
+    skip_qualifiers();
     return 0;
   }
   if (p_match(TK_KW, "struct")) {
     p_eat(TK_KW, "struct");
     int *name = p_eat(TK_ID, 0);
+    skip_qualifiers();
     return my_strdup(name);
   }
-  printf("Expected type at pos %d\n", tok_pos[cur_pos]);
+  if (p_match(TK_KW, "enum")) {
+    p_eat(TK_KW, "enum");
+    if (p_match(TK_ID, 0)) { p_eat(TK_ID, 0); }
+    skip_qualifiers();
+    return 0;
+  }
+  printf("Expected type at pos %d (got '%s')\n", tok_pos[cur_pos], tok_val[cur_pos]);
   exit(1);
   return 0;
 }
@@ -843,12 +1081,14 @@ int get_prec(int *op) {
   if (my_strcmp(op, "||") == 0) { return 1; }
   if (my_strcmp(op, "&&") == 0) { return 2; }
   if (my_strcmp(op, "|") == 0) { return 3; }
-  if (my_strcmp(op, "&") == 0) { return 4; }
-  if (my_strcmp(op, "==") == 0 || my_strcmp(op, "!=") == 0) { return 5; }
+  if (my_strcmp(op, "^") == 0) { return 4; }
+  if (my_strcmp(op, "&") == 0) { return 5; }
+  if (my_strcmp(op, "==") == 0 || my_strcmp(op, "!=") == 0) { return 6; }
   if (my_strcmp(op, "<") == 0 || my_strcmp(op, "<=") == 0 ||
-      my_strcmp(op, ">") == 0 || my_strcmp(op, ">=") == 0) { return 6; }
-  if (my_strcmp(op, "+") == 0 || my_strcmp(op, "-") == 0) { return 7; }
-  if (my_strcmp(op, "*") == 0 || my_strcmp(op, "/") == 0 || my_strcmp(op, "%") == 0) { return 8; }
+      my_strcmp(op, ">") == 0 || my_strcmp(op, ">=") == 0) { return 7; }
+  if (my_strcmp(op, "<<") == 0 || my_strcmp(op, ">>") == 0) { return 8; }
+  if (my_strcmp(op, "+") == 0 || my_strcmp(op, "-") == 0) { return 9; }
+  if (my_strcmp(op, "*") == 0 || my_strcmp(op, "/") == 0 || my_strcmp(op, "%") == 0) { return 10; }
   return 0 - 1;
 }
 
@@ -867,6 +1107,34 @@ struct Expr *parse_expr(int min_prec) {
       continue;
     }
 
+    // Compound assignment: +=, -=, *=, /=, %=, &=, |=, ^=
+    if (k == TK_OP && min_prec <= 0) {
+      int *cop = 0;
+      if (my_strcmp(v, "+=") == 0) { cop = "+"; }
+      else if (my_strcmp(v, "-=") == 0) { cop = "-"; }
+      else if (my_strcmp(v, "*=") == 0) { cop = "*"; }
+      else if (my_strcmp(v, "/=") == 0) { cop = "/"; }
+      else if (my_strcmp(v, "%=") == 0) { cop = "%"; }
+      else if (my_strcmp(v, "&=") == 0) { cop = "&"; }
+      else if (my_strcmp(v, "|=") == 0) { cop = "|"; }
+      else if (my_strcmp(v, "^=") == 0) { cop = "^"; }
+      if (cop != 0) {
+        p_eat(TK_OP, 0);
+        rhs = parse_expr(0);
+        e = new_assign(e, new_binary(cop, e, rhs));
+        continue;
+      }
+    }
+
+    // Ternary
+    if (k == TK_OP && my_strcmp(v, "?") == 0 && min_prec <= 0) {
+      p_eat(TK_OP, "?");
+      rhs = parse_expr(0);
+      p_eat(TK_OP, ":");
+      e = new_ternary(e, rhs, parse_expr(0));
+      continue;
+    }
+
     if (k != TK_OP) { break; }
     int prec = get_prec(v);
     if (prec < 0 || prec < min_prec) { break; }
@@ -880,14 +1148,108 @@ struct Expr *parse_expr(int min_prec) {
   return e;
 }
 
+int is_type_keyword(int *s) {
+  if (my_strcmp(s, "int") == 0) { return 1; }
+  if (my_strcmp(s, "char") == 0) { return 1; }
+  if (my_strcmp(s, "void") == 0) { return 1; }
+  if (my_strcmp(s, "struct") == 0) { return 1; }
+  if (my_strcmp(s, "unsigned") == 0) { return 1; }
+  if (my_strcmp(s, "signed") == 0) { return 1; }
+  if (my_strcmp(s, "long") == 0) { return 1; }
+  if (my_strcmp(s, "short") == 0) { return 1; }
+  if (my_strcmp(s, "const") == 0) { return 1; }
+  if (my_strcmp(s, "volatile") == 0) { return 1; }
+  if (my_strcmp(s, "enum") == 0) { return 1; }
+  return 0;
+}
+
 struct Expr *parse_unary() {
-  if (p_match(TK_OP, "-") || p_match(TK_OP, "!") || p_match(TK_OP, "*") || p_match(TK_OP, "&")) {
-    int op = __read_byte(tok_val[cur_pos], 0);
+  struct Expr *operand = 0;
+  int sz_depth = 0;
+  int cast_saved = 0;
+
+  // Pre-increment/decrement
+  if (p_match(TK_OP, "++")) {
+    p_eat(TK_OP, "++");
+    operand = parse_unary();
+    return new_assign(operand, new_binary("+", operand, new_num(1)));
+  }
+  if (p_match(TK_OP, "--")) {
+    p_eat(TK_OP, "--");
+    operand = parse_unary();
+    return new_assign(operand, new_binary("-", operand, new_num(1)));
+  }
+
+  // sizeof
+  if (p_match(TK_KW, "sizeof")) {
+    p_eat(TK_KW, "sizeof");
+    if (p_match(TK_OP, "(")) {
+      p_eat(TK_OP, "(");
+      // Skip everything inside parens (type or expr)
+      sz_depth = 1;
+      while (sz_depth > 0) {
+        if (p_match(TK_OP, "(")) { sz_depth = sz_depth + 1; }
+        else if (p_match(TK_OP, ")")) { sz_depth = sz_depth - 1; if (sz_depth == 0) { break; } }
+        cur_pos = cur_pos + 1;
+      }
+      p_eat(TK_OP, ")");
+    } else {
+      parse_unary();
+    }
+    return new_num(8);
+  }
+
+  // Type cast: (type)expr
+  if (p_match(TK_OP, "(")) {
+    cast_saved = cur_pos;
+    p_eat(TK_OP, "(");
+    if (tok_kind[cur_pos] == TK_KW && is_type_keyword(tok_val[cur_pos])) {
+      // Skip the type
+      while (!p_match(TK_OP, ")")) {
+        cur_pos = cur_pos + 1;
+      }
+      p_eat(TK_OP, ")");
+      return parse_unary();
+    }
+    cur_pos = cast_saved;
+  }
+
+  if (p_match(TK_OP, "-") || p_match(TK_OP, "!") || p_match(TK_OP, "*") || p_match(TK_OP, "&") || p_match(TK_OP, "~")) {
+    int unary_op_ch = __read_byte(tok_val[cur_pos], 0);
     p_eat(TK_OP, 0);
-    struct Expr *rhs = parse_unary();
-    return new_unary(op, rhs);
+    operand = parse_unary();
+    return new_unary(unary_op_ch, operand);
   }
   return parse_primary();
+}
+
+int find_enum_const(int *name) {
+  int i = 0;
+  while (i < nec) {
+    if (my_strcmp(ec_name[i], name) == 0) {
+      return ec_val[i];
+    }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
+int has_enum_const(int *name) {
+  int i = 0;
+  while (i < nec) {
+    if (my_strcmp(ec_name[i], name) == 0) {
+      return 1;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+int add_enum_const(int *name, int val) {
+  ec_name[nec] = my_strdup(name);
+  ec_val[nec] = val;
+  nec = nec + 1;
+  return 0;
 }
 
 struct Expr *parse_primary() {
@@ -905,7 +1267,10 @@ struct Expr *parse_primary() {
     e = new_strlit(v);
   } else if (k == TK_ID) {
     int *name = my_strdup(p_eat(TK_ID, 0));
-    if (p_match(TK_OP, "(")) {
+    // Check if it's an enum constant
+    if (has_enum_const(name) && !p_match(TK_OP, "(")) {
+      e = new_num(find_enum_const(name));
+    } else if (p_match(TK_OP, "(")) {
       p_eat(TK_OP, "(");
       struct Expr **args = my_malloc(64 * 8);
       int nargs = 0;
@@ -935,8 +1300,19 @@ struct Expr *parse_primary() {
     return 0;
   }
 
-  // Postfix: [], ., ->
-  while (p_match(TK_OP, "[") || p_match(TK_OP, ".") || p_match(TK_OP, "->")) {
+  // Postfix: [], ., ->, ++, --
+  while (p_match(TK_OP, "[") || p_match(TK_OP, ".") || p_match(TK_OP, "->") ||
+         p_match(TK_OP, "++") || p_match(TK_OP, "--")) {
+    if (p_match(TK_OP, "++")) {
+      p_eat(TK_OP, "++");
+      e = new_postinc(e);
+      continue;
+    }
+    if (p_match(TK_OP, "--")) {
+      p_eat(TK_OP, "--");
+      e = new_postdec(e);
+      continue;
+    }
     if (p_match(TK_OP, "[")) {
       p_eat(TK_OP, "[");
       struct Expr *idx = parse_expr(0);
@@ -980,6 +1356,21 @@ struct Stmt *parse_stmt() {
   int blen = 0;
   int then_len = 0;
   int else_len = 0;
+  int *ps_label = 0;
+  struct Stmt *following = 0;
+  int *cv = 0;
+  struct Stmt ***cb = 0;
+  int *cnb = 0;
+  int nc = 0;
+  struct Stmt **db = 0;
+  int ndb = 0;
+  int sw_neg = 0;
+  int sw_cval = 0;
+  int *sw_cname = 0;
+  struct Stmt **sw_cstmts = 0;
+  int sw_cns = 0;
+  struct Stmt **sw_dstmts = 0;
+  int sw_dns = 0;
 
   if (p_match(TK_KW, "return")) {
     p_eat(TK_KW, "return");
@@ -999,7 +1390,13 @@ struct Stmt *parse_stmt() {
     else_len = 0;
     if (p_match(TK_KW, "else")) {
       p_eat(TK_KW, "else");
-      else_body = parse_block(&else_len);
+      if (p_match(TK_KW, "if")) {
+        else_body = my_malloc(8);
+        else_body[0] = parse_stmt();
+        else_len = 1;
+      } else {
+        else_body = parse_block(&else_len);
+      }
     }
     return new_if_s(cond, then_body, then_len, else_body, else_len);
   }
@@ -1019,7 +1416,12 @@ struct Stmt *parse_stmt() {
     p_eat(TK_OP, "(");
 
     init = 0;
-    if (p_match(TK_KW, "int") || p_match(TK_KW, "struct")) {
+    if (p_match(TK_KW, "int") || p_match(TK_KW, "struct") ||
+        p_match(TK_KW, "char") || p_match(TK_KW, "void") ||
+        p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed") ||
+        p_match(TK_KW, "long") || p_match(TK_KW, "short") ||
+        p_match(TK_KW, "const") || p_match(TK_KW, "volatile") ||
+        p_match(TK_KW, "register") || p_match(TK_KW, "enum")) {
       init = parse_vardecl_stmt();
     } else if (p_match(TK_OP, ";")) {
       p_eat(TK_OP, ";");
@@ -1058,8 +1460,111 @@ struct Stmt *parse_stmt() {
     return new_continue_s();
   }
 
-  if (p_match(TK_KW, "int") || p_match(TK_KW, "struct")) {
+  // do...while
+  if (p_match(TK_KW, "do")) {
+    p_eat(TK_KW, "do");
+    blen = 0;
+    body = parse_block(&blen);
+    p_eat(TK_KW, "while");
+    p_eat(TK_OP, "(");
+    cond = parse_expr(0);
+    p_eat(TK_OP, ")");
+    p_eat(TK_OP, ";");
+    return new_dowhile_s(cond, body, blen);
+  }
+
+  // goto
+  if (p_match(TK_KW, "goto")) {
+    p_eat(TK_KW, "goto");
+    ps_label = my_strdup(p_eat(TK_ID, 0));
+    p_eat(TK_OP, ";");
+    return new_goto_s(ps_label);
+  }
+
+  // switch
+  if (p_match(TK_KW, "switch")) {
+    p_eat(TK_KW, "switch");
+    p_eat(TK_OP, "(");
+    cond = parse_expr(0);
+    p_eat(TK_OP, ")");
+    p_eat(TK_OP, "{");
+    cv = my_malloc(256 * 8);
+    cb = my_malloc(256 * 8);
+    cnb = my_malloc(256 * 8);
+    nc = 0;
+    db = 0;
+    ndb = 0;
+
+    while (!p_match(TK_OP, "}")) {
+      if (p_match(TK_KW, "case")) {
+        p_eat(TK_KW, "case");
+        sw_neg = 0;
+        if (p_match(TK_OP, "-")) { p_eat(TK_OP, "-"); sw_neg = 1; }
+        sw_cval = 0;
+        if (p_match(TK_NUM, 0)) {
+          sw_cval = my_atoi(p_eat(TK_NUM, 0));
+        } else if (p_match(TK_ID, 0)) {
+          sw_cname = p_eat(TK_ID, 0);
+          if (has_enum_const(sw_cname)) { sw_cval = find_enum_const(sw_cname); }
+          else { my_fatal("unknown case constant"); }
+        } else if (tok_kind[cur_pos] == TK_NUM) {
+          sw_cval = my_atoi(p_eat(TK_NUM, 0));
+        } else {
+          my_fatal("expected case value");
+        }
+        if (sw_neg) { sw_cval = 0 - sw_cval; }
+        p_eat(TK_OP, ":");
+        sw_cstmts = my_malloc(512 * 8);
+        sw_cns = 0;
+        while (!p_match(TK_KW, "case") && !p_match(TK_KW, "default") && !p_match(TK_OP, "}")) {
+          sw_cstmts[sw_cns] = parse_stmt();
+          sw_cns = sw_cns + 1;
+        }
+        cv[nc] = sw_cval;
+        cb[nc] = sw_cstmts;
+        cnb[nc] = sw_cns;
+        nc = nc + 1;
+      } else if (p_match(TK_KW, "default")) {
+        p_eat(TK_KW, "default");
+        p_eat(TK_OP, ":");
+        sw_dstmts = my_malloc(512 * 8);
+        sw_dns = 0;
+        while (!p_match(TK_KW, "case") && !p_match(TK_KW, "default") && !p_match(TK_OP, "}")) {
+          sw_dstmts[sw_dns] = parse_stmt();
+          sw_dns = sw_dns + 1;
+        }
+        db = sw_dstmts;
+        ndb = sw_dns;
+      } else {
+        my_fatal("expected case or default in switch");
+      }
+    }
+    p_eat(TK_OP, "}");
+    return new_switch_s(cond, cv, cb, cnb, nc, db, ndb);
+  }
+
+  // static before vardecl
+  if (p_match(TK_KW, "static")) {
+    p_eat(TK_KW, "static");
     return parse_vardecl_stmt();
+  }
+
+  // type-keyword variable declarations
+  if (p_match(TK_KW, "int") || p_match(TK_KW, "struct") ||
+      p_match(TK_KW, "char") || p_match(TK_KW, "void") ||
+      p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed") ||
+      p_match(TK_KW, "long") || p_match(TK_KW, "short") ||
+      p_match(TK_KW, "const") || p_match(TK_KW, "volatile") ||
+      p_match(TK_KW, "register") || p_match(TK_KW, "enum")) {
+    return parse_vardecl_stmt();
+  }
+
+  // label: identifier followed by ':'
+  if (tok_kind[cur_pos] == TK_ID && tok_kind[cur_pos + 1] == TK_OP && my_strcmp(tok_val[cur_pos + 1], ":") == 0) {
+    ps_label = my_strdup(p_eat(TK_ID, 0));
+    p_eat(TK_OP, ":");
+    following = parse_stmt();
+    return new_label_s(ps_label, following);
   }
 
   e = parse_expr(0);
@@ -1118,8 +1623,10 @@ struct SDef *parse_struct_def() {
 
 struct FuncDef *parse_func() {
   nlv = 0;
+  struct FuncDef *fd = 0;
   parse_base_type();
-  while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); }
+  int ret_is_ptr = 0;
+  while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); ret_is_ptr = 1; }
   int *name = my_strdup(p_eat(TK_ID, 0));
   p_eat(TK_OP, "(");
 
@@ -1128,17 +1635,27 @@ struct FuncDef *parse_func() {
 
   if (!p_match(TK_OP, ")")) {
     while (1) {
+      // Handle ... (variadic)
+      if (p_match(TK_OP, ".")) {
+        p_eat(TK_OP, ".");
+        p_eat(TK_OP, ".");
+        p_eat(TK_OP, ".");
+        break;
+      }
       int *stype = parse_base_type();
       int is_ptr = 0;
       while (p_match(TK_OP, "*")) {
         p_eat(TK_OP, "*");
         is_ptr = 1;
       }
-      int *pname = my_strdup(p_eat(TK_ID, 0));
-      params[np] = my_strdup(pname);
-      np = np + 1;
-      if (stype != 0) {
-        add_lv(pname, stype, is_ptr);
+      // Parameter might be unnamed (in prototypes)
+      if (p_match(TK_ID, 0)) {
+        int *pname = my_strdup(p_eat(TK_ID, 0));
+        params[np] = my_strdup(pname);
+        np = np + 1;
+        if (stype != 0) {
+          add_lv(pname, stype, is_ptr);
+        }
       }
       if (p_match(TK_OP, ",")) {
         p_eat(TK_OP, ",");
@@ -1149,30 +1666,218 @@ struct FuncDef *parse_func() {
   }
   p_eat(TK_OP, ")");
 
+  // Prototype: semicolon after )
+  if (p_match(TK_OP, ";")) {
+    p_eat(TK_OP, ";");
+    // Store proto info: name and ret_is_ptr
+    fd = my_malloc(56);
+    fd->name = name;
+    fd->params = 0;
+    fd->nparams = 0;
+    fd->body = 0;
+    fd->nbody = 0 - 1;
+    fd->ret_is_ptr = ret_is_ptr;
+    return fd;
+  }
+
   int blen = 0;
   struct Stmt **body = parse_block(&blen);
 
-  struct FuncDef *fd = my_malloc(40);
+  fd = my_malloc(56);
   fd->name = name;
   fd->params = params;
   fd->nparams = np;
   fd->body = body;
   fd->nbody = blen;
+  fd->ret_is_ptr = ret_is_ptr;
   return fd;
+}
+
+// Parse global variable declaration: type [*]* name [[ N ]] [= expr] ;
+struct GDecl *parse_global_decl() {
+  parse_base_type();
+  int is_ptr = 0;
+  while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); is_ptr = 1; }
+  int *name = my_strdup(p_eat(TK_ID, 0));
+
+  int array_size = 0 - 1;
+  if (p_match(TK_OP, "[")) {
+    p_eat(TK_OP, "[");
+    array_size = my_atoi(p_eat(TK_NUM, 0));
+    p_eat(TK_OP, "]");
+  }
+
+  int has_init = 0;
+  int init_val = 0;
+  int *init_str = 0;
+  if (p_match(TK_OP, "=")) {
+    p_eat(TK_OP, "=");
+    has_init = 1;
+    if (p_match(TK_STR, 0)) {
+      init_str = my_strdup(p_eat(TK_STR, 0));
+    } else if (p_match(TK_OP, "-")) {
+      p_eat(TK_OP, "-");
+      init_val = 0 - my_atoi(p_eat(TK_NUM, 0));
+    } else {
+      init_val = my_atoi(p_eat(TK_NUM, 0));
+    }
+  }
+  p_eat(TK_OP, ";");
+
+  struct GDecl *gd = my_malloc(48);
+  gd->name = name;
+  gd->is_ptr = is_ptr;
+  gd->array_size = array_size;
+  gd->init_val = init_val;
+  gd->has_init = has_init;
+  gd->init_str = init_str;
+  return gd;
+}
+
+// Check if current position looks like a function (vs global variable)
+// Assumes we're after type [*]* name — check if next is '('
+int is_func_lookahead() {
+  int saved = cur_pos;
+  parse_base_type();
+  while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); }
+  if (p_match(TK_ID, 0)) { p_eat(TK_ID, 0); }
+  int result = p_match(TK_OP, "(");
+  cur_pos = saved;
+  return result;
+}
+
+int parse_enum_def() {
+  p_eat(TK_KW, "enum");
+  // optional enum tag name
+  if (p_match(TK_ID, 0)) { p_eat(TK_ID, 0); }
+  p_eat(TK_OP, "{");
+  int val = 0;
+  while (!p_match(TK_OP, "}")) {
+    int *ename = my_strdup(p_eat(TK_ID, 0));
+    if (p_match(TK_OP, "=")) {
+      p_eat(TK_OP, "=");
+      int neg = 0;
+      if (p_match(TK_OP, "-")) { p_eat(TK_OP, "-"); neg = 1; }
+      val = my_atoi(p_eat(TK_NUM, 0));
+      if (neg) { val = 0 - val; }
+    }
+    add_enum_const(ename, val);
+    val = val + 1;
+    if (p_match(TK_OP, ",")) { p_eat(TK_OP, ","); }
+  }
+  p_eat(TK_OP, "}");
+  p_eat(TK_OP, ";");
+  return 0;
+}
+
+int skip_typedef() {
+  p_eat(TK_KW, "typedef");
+  int depth = 0;
+  while (1) {
+    if (p_match(TK_OP, ";") && depth == 0) {
+      p_eat(TK_OP, ";");
+      return 0;
+    }
+    if (p_match(TK_OP, "{")) { depth = depth + 1; }
+    if (p_match(TK_OP, "}")) { depth = depth - 1; }
+    if (p_match(TK_OP, "(")) { depth = depth + 1; }
+    if (p_match(TK_OP, ")")) { depth = depth - 1; }
+    cur_pos = cur_pos + 1;
+  }
+  return 0;
+}
+
+int skip_extern_decl() {
+  p_eat(TK_KW, "extern");
+  while (!p_match(TK_OP, ";")) {
+    cur_pos = cur_pos + 1;
+  }
+  p_eat(TK_OP, ";");
+  return 0;
+}
+
+int is_type_start() {
+  if (p_match(TK_KW, "int")) { return 1; }
+  if (p_match(TK_KW, "char")) { return 1; }
+  if (p_match(TK_KW, "void")) { return 1; }
+  if (p_match(TK_KW, "struct")) { return 1; }
+  if (p_match(TK_KW, "unsigned")) { return 1; }
+  if (p_match(TK_KW, "signed")) { return 1; }
+  if (p_match(TK_KW, "long")) { return 1; }
+  if (p_match(TK_KW, "short")) { return 1; }
+  if (p_match(TK_KW, "const")) { return 1; }
+  if (p_match(TK_KW, "volatile")) { return 1; }
+  if (p_match(TK_KW, "enum")) { return 1; }
+  return 0;
 }
 
 struct Program *parse_program() {
   cur_pos = 0;
   np_sdefs = 0;
+  nec = 0;
 
   struct SDef **structs = my_malloc(64 * 8);
   int ns = 0;
   struct FuncDef **funcs = my_malloc(256 * 8);
   int nf = 0;
+  int **proto_names = my_malloc(64 * 8);
+  int *proto_rip = my_malloc(64 * 8);
+  int nprotos = 0;
+  struct GDecl **globals = my_malloc(1024 * 8);
+  int ng = 0;
+  struct FuncDef *fd = 0;
+  int saved = 0;
 
   while (!p_match(TK_EOF, 0)) {
+    // typedef — skip entirely
+    if (p_match(TK_KW, "typedef")) {
+      skip_typedef();
+      continue;
+    }
+
+    // extern — skip entire declaration
+    if (p_match(TK_KW, "extern")) {
+      skip_extern_decl();
+      continue;
+    }
+
+    // static — skip keyword, then parse as normal func/global
+    if (p_match(TK_KW, "static")) {
+      p_eat(TK_KW, "static");
+    }
+
+    // enum definition
+    if (p_match(TK_KW, "enum")) {
+      saved = cur_pos;
+      p_eat(TK_KW, "enum");
+      // optional tag
+      if (p_match(TK_ID, 0)) { p_eat(TK_ID, 0); }
+      if (p_match(TK_OP, "{")) {
+        cur_pos = saved;
+        parse_enum_def();
+        continue;
+      }
+      // enum as type in func/global decl
+      cur_pos = saved;
+      if (is_func_lookahead()) {
+        fd = parse_func();
+        if (fd->nbody == 0 - 1) {
+          proto_names[nprotos] = fd->name;
+          proto_rip[nprotos] = fd->ret_is_ptr;
+          nprotos = nprotos + 1;
+        } else {
+          funcs[nf] = fd;
+          nf = nf + 1;
+        }
+      } else {
+        globals[ng] = parse_global_decl();
+        ng = ng + 1;
+      }
+      continue;
+    }
+
     if (p_match(TK_KW, "struct")) {
-      int saved = cur_pos;
+      saved = cur_pos;
       p_eat(TK_KW, "struct");
       p_eat(TK_ID, 0);
       if (p_match(TK_OP, "{")) {
@@ -1181,24 +1886,80 @@ struct Program *parse_program() {
         ns = ns + 1;
       } else {
         cur_pos = saved;
-        funcs[nf] = parse_func();
-        nf = nf + 1;
+        if (is_func_lookahead()) {
+          fd = parse_func();
+          if (fd->nbody == 0 - 1) {
+            proto_names[nprotos] = fd->name;
+            proto_rip[nprotos] = fd->ret_is_ptr;
+            nprotos = nprotos + 1;
+          } else {
+            funcs[nf] = fd;
+            nf = nf + 1;
+          }
+        } else {
+          globals[ng] = parse_global_decl();
+          ng = ng + 1;
+        }
       }
     } else {
-      funcs[nf] = parse_func();
-      nf = nf + 1;
+      if (is_func_lookahead()) {
+        fd = parse_func();
+        if (fd->nbody == 0 - 1) {
+          proto_names[nprotos] = fd->name;
+          proto_rip[nprotos] = fd->ret_is_ptr;
+          nprotos = nprotos + 1;
+        } else {
+          funcs[nf] = fd;
+          nf = nf + 1;
+        }
+      } else {
+        globals[ng] = parse_global_decl();
+        ng = ng + 1;
+      }
     }
   }
 
-  struct Program *p = my_malloc(32);
+  struct Program *p = my_malloc(72);
   p->structs = structs;
   p->nstructs = ns;
   p->funcs = funcs;
   p->nfuncs = nf;
+  p->proto_names = proto_names;
+  p->proto_ret_is_ptr = proto_rip;
+  p->nprotos = nprotos;
+  p->globals = globals;
+  p->nglobals = ng;
   return p;
 }
 
 // ---- Codegen ----
+
+int cg_is_global(int *name) {
+  int i = 0;
+  while (i < ncg_g) {
+    if (my_strcmp(cg_gnames[i], name) == 0) { return 1; }
+    i = i + 1;
+  }
+  return 0;
+}
+
+int cg_global_is_array(int *name) {
+  int i = 0;
+  while (i < ncg_g) {
+    if (my_strcmp(cg_gnames[i], name) == 0) { return cg_gis_array[i]; }
+    i = i + 1;
+  }
+  return 0;
+}
+
+int func_returns_ptr(int *name) {
+  int i = 0;
+  while (i < n_ptr_ret) {
+    if (my_strcmp(ptr_ret_names[i], name) == 0) { return 1; }
+    i = i + 1;
+  }
+  return 0;
+}
 
 int *cg_new_label(int *base) {
   label_id = label_id + 1;
@@ -1220,7 +1981,7 @@ int cg_find_slot(int *name) {
 }
 
 int cg_is_array(int *name) {
-  i = 0;
+  int i = 0;
   while (i < nlay_arr) {
     if (my_strcmp(lay_arr_name[i], name) == 0) { return 1; }
     i = i + 1;
@@ -1229,7 +1990,7 @@ int cg_is_array(int *name) {
 }
 
 int cg_is_structvar(int *name) {
-  i = 0;
+  int i = 0;
   while (i < nlay_sv) {
     if (my_strcmp(lay_sv_name[i], name) == 0) { return 1; }
     i = i + 1;
@@ -1238,7 +1999,7 @@ int cg_is_structvar(int *name) {
 }
 
 int cg_field_index(int *sname, int *fname) {
-  i = 0;
+  int i = 0;
   while (i < ncg_s) {
     if (my_strcmp(cg_sname[i], sname) == 0) {
       int j = 0;
@@ -1257,7 +2018,7 @@ int cg_field_index(int *sname, int *fname) {
 }
 
 int cg_struct_nfields(int *sname) {
-  i = 0;
+  int i = 0;
   while (i < ncg_s) {
     if (my_strcmp(cg_sname[i], sname) == 0) {
       return cg_snfields[i];
@@ -1269,14 +2030,14 @@ int cg_struct_nfields(int *sname) {
 }
 
 int *cg_intern_string(int *decoded) {
-  i = 0;
+  int i = 0;
   while (i < nsp) {
     if (my_strcmp(sp_decoded[i], decoded) == 0) {
       return sp_label[i];
     }
     i = i + 1;
   }
-  num = int_to_str(nsp + 1);
+  int *num = int_to_str(nsp + 1);
   int *lab = build_str2("l_.str_", num);
   sp_decoded[nsp] = my_strdup(decoded);
   sp_label[nsp] = lab;
@@ -1288,8 +2049,8 @@ int *cg_intern_string(int *decoded) {
 int *cg_decode_string(int *lit) {
   int slen = my_strlen(lit);
   int *buf = my_malloc(slen + 1);
-  j = 0;
-  i = 0;
+  int j = 0;
+  int i = 0;
   while (i < slen) {
     int c = __read_byte(lit, i);
     if (c != '\\') {
@@ -1316,9 +2077,9 @@ int *cg_decode_string(int *lit) {
 
 // Escape string for .asciz directive
 int cg_emit_escaped_string(int *s) {
-  i = 0;
+  int i = 0;
   while (1) {
-    c = __read_byte(s, i);
+    int c = __read_byte(s, i);
     if (c == 0) { break; }
     if (c == '\\') { emit_ch('\\'); emit_ch('\\'); }
     else if (c == '"') { emit_ch('\\'); emit_ch('"'); }
@@ -1340,18 +2101,19 @@ int lay_add_slot(int *name, int off) {
 }
 
 int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
-  i = 0;
+  int i = 0;
   while (i < nstmts) {
     struct Stmt *st = stmts[i];
     if (st->kind == ST_VARDECL) {
-      j = 0;
+      int j = 0;
       while (j < st->ndecls) {
         struct VarDecl *vd = st->decls[j];
         if (cg_find_slot(vd->name) >= 0) {
-          my_fatal("duplicate variable");
+          printf("cc: duplicate variable '%s'\n", vd->name);
+          exit(1);
         }
         if (vd->stype != 0) {
-          nf = cg_struct_nfields(vd->stype);
+          int nf = cg_struct_nfields(vd->stype);
           *offset = *offset + nf * 8;
           lay_sv_name[nlay_sv] = my_strdup(vd->name);
           lay_sv_type[nlay_sv] = my_strdup(vd->stype);
@@ -1381,6 +2143,19 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
         lay_walk_stmts(arr, 1, offset);
       }
       lay_walk_stmts(st->body, st->nbody, offset);
+    } else if (st->kind == ST_DOWHILE) {
+      lay_walk_stmts(st->body, st->nbody, offset);
+    } else if (st->kind == ST_LABEL) {
+      lay_walk_stmts(st->body, st->nbody, offset);
+    } else if (st->kind == ST_SWITCH) {
+      int ci = 0;
+      while (ci < st->ncases) {
+        lay_walk_stmts(st->case_bodies[ci], st->case_nbodies[ci], offset);
+        ci = ci + 1;
+      }
+      if (st->default_body != 0) {
+        lay_walk_stmts(st->default_body, st->ndefault, offset);
+      }
     }
     i = i + 1;
   }
@@ -1393,7 +2168,7 @@ int layout_func(struct FuncDef *f) {
   nlay_sv = 0;
   int offset = 0;
 
-  i = 0;
+  int i = 0;
   while (i < f->nparams) {
     offset = offset + 8;
     lay_add_slot(f->params[i], offset);
@@ -1412,12 +2187,29 @@ int gen_addr(struct Expr *e) {
   if (e->kind == ND_VAR) {
     int off = cg_find_slot(e->sval);
     if (off < 0) {
+      // Check if it's a global variable
+      if (cg_is_global(e->sval)) {
+        emit_s("\tadrp\tx0, _");
+        emit_s(e->sval);
+        emit_line("@PAGE");
+        emit_s("\tadd\tx0, x0, _");
+        emit_s(e->sval);
+        emit_line("@PAGEOFF");
+        return 0;
+      }
       printf("Unknown variable: %s\n", e->sval);
       exit(1);
     }
-    emit_s("\tsub\tx0, x29, #");
-    emit_num(off);
-    emit_ch('\n');
+    if (off <= 255) {
+      emit_s("\tsub\tx0, x29, #");
+      emit_num(off);
+      emit_ch('\n');
+    } else {
+      emit_s("\tmov\tx0, #");
+      emit_num(off);
+      emit_ch('\n');
+      emit_line("\tsub\tx0, x29, x0");
+    }
     return 0;
   }
   if (e->kind == ND_UNARY && e->ival == '*') {
@@ -1462,6 +2254,7 @@ int gen_value(struct Expr *e) {
   int *bin_op = 0;
   int *end_l = 0;
   int *rhs_l = 0;
+  int *else_l = 0;
   int var_space = 0;
   if (e->kind == ND_NUM) {
     int val = e->ival;
@@ -1486,7 +2279,7 @@ int gen_value(struct Expr *e) {
 
   if (e->kind == ND_VAR) {
     gen_addr(e);
-    if (cg_is_array(e->sval) == 0 && cg_is_structvar(e->sval) == 0) {
+    if (cg_is_array(e->sval) == 0 && cg_is_structvar(e->sval) == 0 && cg_global_is_array(e->sval) == 0) {
       emit_line("\tldr\tx0, [x0]");
     }
     return 0;
@@ -1513,9 +2306,39 @@ int gen_value(struct Expr *e) {
     return 0;
   }
 
+  if (e->kind == ND_POSTINC || e->kind == ND_POSTDEC) {
+    gen_addr(e->left);
+    emit_line("\tstr\tx0, [sp, #-16]!");
+    emit_line("\tldr\tx0, [x0]");
+    emit_line("\tstr\tx0, [sp, #-16]!");
+    if (e->kind == ND_POSTINC) {
+      emit_line("\tadd\tx0, x0, #1");
+    } else {
+      emit_line("\tsub\tx0, x0, #1");
+    }
+    emit_line("\tldr\tx1, [sp, #16]");
+    emit_line("\tstr\tx0, [x1]");
+    emit_line("\tldr\tx0, [sp], #32");
+    return 0;
+  }
+
+  if (e->kind == ND_TERNARY) {
+    else_l = cg_new_label("tern_else");
+    end_l = cg_new_label("tern_end");
+    gen_value(e->left);
+    emit_line("\tcmp\tx0, #0");
+    emit_s("\tb.eq\t"); emit_line(else_l);
+    gen_value(e->right);
+    emit_s("\tb\t"); emit_line(end_l);
+    emit_s(else_l); emit_line(":");
+    gen_value(e->args[0]);
+    emit_s(end_l); emit_line(":");
+    return 0;
+  }
+
   if (e->kind == ND_STRLIT) {
     int *decoded = cg_decode_string(e->sval);
-    lab = cg_intern_string(decoded);
+    int *lab = cg_intern_string(decoded);
     emit_s("\tadrp\tx0, ");
     emit_s(lab);
     emit_line("@PAGE");
@@ -1542,6 +2365,8 @@ int gen_value(struct Expr *e) {
     } else if (unary_op == '!') {
       emit_line("\tcmp\tx0, #0");
       emit_line("\tcset\tx0, eq");
+    } else if (unary_op == '~') {
+      emit_line("\tmvn\tx0, x0");
     }
     return 0;
   }
@@ -1583,6 +2408,9 @@ int gen_value(struct Expr *e) {
     else if (my_strcmp(bin_op, "/") == 0) { emit_line("\tsdiv\tx0, x1, x0"); }
     else if (my_strcmp(bin_op, "&") == 0) { emit_line("\tand\tx0, x1, x0"); }
     else if (my_strcmp(bin_op, "|") == 0) { emit_line("\torr\tx0, x1, x0"); }
+    else if (my_strcmp(bin_op, "^") == 0) { emit_line("\teor\tx0, x1, x0"); }
+    else if (my_strcmp(bin_op, "<<") == 0) { emit_line("\tlsl\tx0, x1, x0"); }
+    else if (my_strcmp(bin_op, ">>") == 0) { emit_line("\tasr\tx0, x1, x0"); }
     else if (my_strcmp(bin_op, "%") == 0) {
       emit_line("\tsdiv\tx9, x1, x0");
       emit_line("\tmsub\tx0, x9, x0, x1");
@@ -1643,6 +2471,7 @@ int gen_value(struct Expr *e) {
       }
       gen_value(e->args[0]);
       emit_line("\tbl\t_printf");
+      emit_line("\tsxtw\tx0, w0");
       if (n_var > 0) {
         var_space = ((n_var * 8 + 15) / 16) * 16;
         emit_s("\tadd\tsp, sp, #");
@@ -1675,6 +2504,9 @@ int gen_value(struct Expr *e) {
     emit_ch('\n');
     emit_s("\tbl\t_");
     emit_line(name);
+    if (func_returns_ptr(name) == 0) {
+      emit_line("\tsxtw\tx0, w0");
+    }
     return 0;
   }
 
@@ -1683,7 +2515,7 @@ int gen_value(struct Expr *e) {
 }
 
 int gen_block(struct Stmt **stmts, int nstmts, int *ret_label) {
-  i = 0;
+  int i = 0;
   while (i < nstmts) {
     gen_stmt(stmts[i], ret_label);
     i = i + 1;
@@ -1693,9 +2525,19 @@ int gen_block(struct Stmt **stmts, int nstmts, int *ret_label) {
 
 int gen_stmt(struct Stmt *st, int *ret_label) {
   int *else_l = 0;
-  end_l = 0;
+  int *end_l = 0;
   int *start_l = 0;
   int *post_l = 0;
+  int *cont_l = 0;
+  int *goto_tmp1 = 0;
+  int *goto_tmp2 = 0;
+  int *goto_lbl = 0;
+  int **tramp_labels = 0;
+  int **body_labels = 0;
+  int *tl = 0;
+  int *bl = 0;
+  int *def_label = 0;
+  int ci = 0;
   if (st->kind == ST_RETURN) {
     gen_value(st->expr);
     emit_s("\tb\t"); emit_line(ret_label);
@@ -1708,20 +2550,28 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
   }
 
   if (st->kind == ST_VARDECL) {
-    i = 0;
+    int i = 0;
     while (i < st->ndecls) {
-      vd = st->decls[i];
+      struct VarDecl *vd = st->decls[i];
       if (vd->stype != 0) { i = i + 1; continue; }
       if (vd->arr_size >= 0) { i = i + 1; continue; }
-      off = cg_find_slot(vd->name);
+      int off = cg_find_slot(vd->name);
       if (vd->init != 0) {
         gen_value(vd->init);
       } else {
         emit_line("\tmov\tx0, #0");
       }
-      emit_s("\tstr\tx0, [x29, #-");
-      emit_num(off);
-      emit_line("]");
+      if (off <= 255) {
+        emit_s("\tstr\tx0, [x29, #-");
+        emit_num(off);
+        emit_line("]");
+      } else {
+        emit_s("\tmov\tx9, #");
+        emit_num(off);
+        emit_ch('\n');
+        emit_line("\tsub\tx9, x29, x9");
+        emit_line("\tstr\tx0, [x9]");
+      }
       i = i + 1;
     }
     return 0;
@@ -1810,12 +2660,118 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
     return 0;
   }
 
+  if (st->kind == ST_DOWHILE) {
+    start_l = cg_new_label("dowhile_start");
+    end_l = cg_new_label("dowhile_end");
+    cont_l = cg_new_label("dowhile_cont");
+    loop_brk[nloop] = end_l;
+    loop_cont[nloop] = cont_l;
+    nloop = nloop + 1;
+
+    emit_s(start_l); emit_line(":");
+    gen_block(st->body, st->nbody, ret_label);
+    emit_s(cont_l); emit_line(":");
+    gen_value(st->expr);
+    emit_line("\tcmp\tx0, #0");
+    emit_s("\tb.ne\t"); emit_line(start_l);
+    emit_s(end_l); emit_line(":");
+
+    nloop = nloop - 1;
+    return 0;
+  }
+
+  if (st->kind == ST_GOTO) {
+    goto_tmp1 = build_str2("L_usr_", cg_cur_func_name);
+    goto_tmp2 = build_str2(goto_tmp1, "_");
+    goto_lbl = build_str2(goto_tmp2, st->sval);
+    emit_s("\tb\t"); emit_line(goto_lbl);
+    return 0;
+  }
+
+  if (st->kind == ST_LABEL) {
+    goto_tmp1 = build_str2("L_usr_", cg_cur_func_name);
+    goto_tmp2 = build_str2(goto_tmp1, "_");
+    goto_lbl = build_str2(goto_tmp2, st->sval);
+    emit_s(goto_lbl); emit_line(":");
+    gen_block(st->body, st->nbody, ret_label);
+    return 0;
+  }
+
+  if (st->kind == ST_SWITCH) {
+    end_l = cg_new_label("sw_end");
+    loop_brk[nloop] = end_l;
+    nloop = nloop + 1;
+
+    // Evaluate condition, push to stack
+    gen_value(st->expr);
+    emit_line("\tstr\tx0, [sp, #-16]!");
+
+    // Generate comparisons for each case
+    tramp_labels = my_malloc(256 * 8);
+    ci = 0;
+    while (ci < st->ncases) {
+      tl = cg_new_label("sw_tramp");
+      tramp_labels[ci] = tl;
+      emit_line("\tldr\tx0, [sp]");
+      emit_s("\tmov\tx1, #");
+      emit_num(st->case_vals[ci]);
+      emit_ch('\n');
+      emit_line("\tcmp\tx0, x1");
+      emit_s("\tb.eq\t"); emit_line(tl);
+      ci = ci + 1;
+    }
+
+    // After all comparisons: jump to default or end
+    def_label = 0;
+    if (st->default_body != 0 && st->ndefault > 0) {
+      def_label = cg_new_label("sw_def");
+      // Pop condition and jump to default
+      emit_line("\tadd\tsp, sp, #16");
+      emit_s("\tb\t"); emit_line(def_label);
+    } else {
+      // Pop condition and jump to end
+      emit_line("\tadd\tsp, sp, #16");
+      emit_s("\tb\t"); emit_line(end_l);
+    }
+
+    // Trampolines: pop condition, jump to body
+    body_labels = my_malloc(256 * 8);
+    ci = 0;
+    while (ci < st->ncases) {
+      bl = cg_new_label("sw_body");
+      body_labels[ci] = bl;
+      emit_s(tramp_labels[ci]); emit_line(":");
+      emit_line("\tadd\tsp, sp, #16");
+      emit_s("\tb\t"); emit_line(bl);
+      ci = ci + 1;
+    }
+
+    // Case bodies (with fall-through)
+    ci = 0;
+    while (ci < st->ncases) {
+      emit_s(body_labels[ci]); emit_line(":");
+      gen_block(st->case_bodies[ci], st->case_nbodies[ci], ret_label);
+      ci = ci + 1;
+    }
+
+    // Default body
+    if (def_label != 0) {
+      emit_s(def_label); emit_line(":");
+      gen_block(st->default_body, st->ndefault, ret_label);
+    }
+
+    emit_s(end_l); emit_line(":");
+    nloop = nloop - 1;
+    return 0;
+  }
+
   my_fatal("unsupported statement");
   return 0;
 }
 
 int gen_func(struct FuncDef *f) {
   layout_func(f);
+  cg_cur_func_name = f->name;
   int *ret_label = cg_new_label("ret");
 
   emit_ch('\n');
@@ -1825,19 +2781,36 @@ int gen_func(struct FuncDef *f) {
   emit_line("\tstp\tx29, x30, [sp, #-16]!");
   emit_line("\tmov\tx29, sp");
   if (lay_stack_size > 0) {
-    emit_s("\tsub\tsp, sp, #");
-    emit_num(lay_stack_size);
-    emit_ch('\n');
+    if (lay_stack_size <= 4095) {
+      emit_s("\tsub\tsp, sp, #");
+      emit_num(lay_stack_size);
+      emit_ch('\n');
+    } else {
+      emit_s("\tmov\tx9, #");
+      emit_num(lay_stack_size);
+      emit_ch('\n');
+      emit_line("\tsub\tsp, sp, x9");
+    }
   }
 
-  i = 0;
+  int i = 0;
   while (i < f->nparams) {
-    off = cg_find_slot(f->params[i]);
-    emit_s("\tstr\tx");
-    emit_num(i);
-    emit_s(", [x29, #-");
-    emit_num(off);
-    emit_line("]");
+    int off = cg_find_slot(f->params[i]);
+    if (off <= 255) {
+      emit_s("\tstr\tx");
+      emit_num(i);
+      emit_s(", [x29, #-");
+      emit_num(off);
+      emit_line("]");
+    } else {
+      emit_s("\tmov\tx9, #");
+      emit_num(off);
+      emit_ch('\n');
+      emit_line("\tsub\tx9, x29, x9");
+      emit_s("\tstr\tx");
+      emit_num(i);
+      emit_line(", [x9]");
+    }
     i = i + 1;
   }
 
@@ -1846,9 +2819,16 @@ int gen_func(struct FuncDef *f) {
   emit_line("\tmov\tw0, #0");
   emit_s(ret_label); emit_line(":");
   if (lay_stack_size > 0) {
-    emit_s("\tadd\tsp, sp, #");
-    emit_num(lay_stack_size);
-    emit_ch('\n');
+    if (lay_stack_size <= 4095) {
+      emit_s("\tadd\tsp, sp, #");
+      emit_num(lay_stack_size);
+      emit_ch('\n');
+    } else {
+      emit_s("\tmov\tx9, #");
+      emit_num(lay_stack_size);
+      emit_ch('\n');
+      emit_line("\tadd\tsp, sp, x9");
+    }
   }
   emit_line("\tldp\tx29, x30, [sp], #16");
   emit_line("\tret");
@@ -1856,13 +2836,48 @@ int gen_func(struct FuncDef *f) {
 }
 
 int codegen(struct Program *prog) {
+  struct FuncDef *fd = 0;
+  struct GDecl *gd = 0;
   label_id = 0;
   nsp = 0;
   nloop = 0;
   ncg_s = 0;
+  n_ptr_ret = 0;
+
+  // Register ptr-returning functions from prototypes
+  int pi = 0;
+  while (pi < prog->nprotos) {
+    if (prog->proto_ret_is_ptr[pi] != 0) {
+      ptr_ret_names[n_ptr_ret] = prog->proto_names[pi];
+      n_ptr_ret = n_ptr_ret + 1;
+    }
+    pi = pi + 1;
+  }
+  // Register ptr-returning functions from definitions
+  pi = 0;
+  while (pi < prog->nfuncs) {
+    fd = prog->funcs[pi];
+    if (fd->ret_is_ptr != 0) {
+      ptr_ret_names[n_ptr_ret] = fd->name;
+      n_ptr_ret = n_ptr_ret + 1;
+    }
+    pi = pi + 1;
+  }
+
+  // Register global variables
+  ncg_g = 0;
+  int gi = 0;
+  while (gi < prog->nglobals) {
+    gd = prog->globals[gi];
+    cg_gnames[ncg_g] = gd->name;
+    cg_gis_array[ncg_g] = 0;
+    if (gd->array_size >= 0) { cg_gis_array[ncg_g] = 1; }
+    ncg_g = ncg_g + 1;
+    gi = gi + 1;
+  }
 
   // Register struct definitions
-  i = 0;
+  int i = 0;
   while (i < prog->nstructs) {
     struct SDef *sd = prog->structs[i];
     cg_sname[ncg_s] = sd->name;
@@ -1894,6 +2909,45 @@ int codegen(struct Program *prog) {
     }
   }
 
+  // Emit global variables
+  if (prog->nglobals > 0) {
+    int has_data = 0;
+    i = 0;
+    while (i < prog->nglobals) {
+      gd = prog->globals[i];
+      if (gd->array_size >= 0) {
+        // Array: use .comm
+        int sz = gd->array_size * 8;
+        emit_s("\t.comm\t_");
+        emit_s(gd->name);
+        emit_s(", ");
+        emit_num(sz);
+        emit_line(", 3");
+      } else if (gd->has_init != 0 && gd->init_str != 0) {
+        // String initialized
+        if (has_data == 0) { emit_ch('\n'); emit_line("\t.data"); has_data = 1; }
+        emit_s("\t.globl\t_"); emit_line(gd->name);
+        emit_line("\t.p2align\t3");
+        emit_s("_"); emit_s(gd->name); emit_line(":");
+        int *slabel = cg_intern_string(gd->init_str);
+        emit_s("\t.quad\t"); emit_line(slabel);
+      } else if (gd->has_init != 0) {
+        // Integer initialized
+        if (has_data == 0) { emit_ch('\n'); emit_line("\t.data"); has_data = 1; }
+        emit_s("\t.globl\t_"); emit_line(gd->name);
+        emit_line("\t.p2align\t3");
+        emit_s("_"); emit_s(gd->name); emit_line(":");
+        emit_s("\t.quad\t"); emit_num(gd->init_val); emit_ch('\n');
+      } else {
+        // Uninitialized: use .comm
+        emit_s("\t.comm\t_");
+        emit_s(gd->name);
+        emit_line(", 8, 3");
+      }
+      i = i + 1;
+    }
+  }
+
   return 0;
 }
 
@@ -1903,7 +2957,7 @@ int main(int argc, int *argv) {
   int *out_path = "a.out";
   int *c_path = 0;
 
-  i = 1;
+  int i = 1;
   while (i < argc) {
     int *arg = argv[i];
     if (my_strcmp(arg, "-o") == 0) {

@@ -7,7 +7,12 @@
 
 static const char *keywords[] = {
     "int", "return", "if", "else", "while", "for",
-    "break", "continue", "struct", "extern", NULL,
+    "break", "continue", "struct", "extern",
+    "do", "switch", "case", "default",
+    "enum", "const", "volatile", "register", "static",
+    "goto", "char", "unsigned", "void", "long", "short",
+    "signed", "typedef", "sizeof",
+    NULL,
 };
 
 static int is_keyword(const char *s) {
@@ -69,10 +74,32 @@ TokArray lex(const char *src) {
             continue;
         }
 
+        /* hex number */
+        if (buf[i] == '0' && i + 1 < len && (buf[i+1] == 'x' || buf[i+1] == 'X')) {
+            int start = i;
+            i += 2;
+            while (i < len && (isdigit((unsigned char)buf[i]) ||
+                   (buf[i] >= 'a' && buf[i] <= 'f') ||
+                   (buf[i] >= 'A' && buf[i] <= 'F'))) i++;
+            /* skip integer suffixes: u, l, ll, ul, ull, etc. */
+            while (i < len && (buf[i] == 'u' || buf[i] == 'U' ||
+                   buf[i] == 'l' || buf[i] == 'L')) i++;
+            char *hex_str = substr(buf, start, i);
+            long val = strtol(hex_str, NULL, 16);
+            char dec_str[32];
+            snprintf(dec_str, sizeof(dec_str), "%ld", val);
+            Tok t = { TK_NUMBER, xstrdup(dec_str), start };
+            tokarr_push(&toks, t);
+            continue;
+        }
+
         /* number */
         if (isdigit((unsigned char)buf[i])) {
             int start = i;
             while (i < len && isdigit((unsigned char)buf[i])) i++;
+            /* skip integer suffixes: u, l, ll, ul, ull, etc. */
+            while (i < len && (buf[i] == 'u' || buf[i] == 'U' ||
+                   buf[i] == 'l' || buf[i] == 'L')) i++;
             Tok t = { TK_NUMBER, substr(buf, start, i), start };
             tokarr_push(&toks, t);
             continue;
@@ -102,12 +129,34 @@ TokArray lex(const char *src) {
                 else if (buf[i] == '\\') ch = 92;
                 else if (buf[i] == '\'') ch = 39;
                 else if (buf[i] == '0') ch = 0;
+                else if (buf[i] == '"') ch = 34;
+                else if (buf[i] == 'a') ch = 7;
+                else if (buf[i] == 'b') ch = 8;
+                else if (buf[i] == 'f') ch = 12;
+                else if (buf[i] == 'v') ch = 11;
+                else if (buf[i] == 'x') {
+                    /* hex escape */
+                    i++;
+                    ch = 0;
+                    while (i < len && (isdigit((unsigned char)buf[i]) ||
+                           (buf[i] >= 'a' && buf[i] <= 'f') ||
+                           (buf[i] >= 'A' && buf[i] <= 'F'))) {
+                        int d = 0;
+                        if (buf[i] >= '0' && buf[i] <= '9') d = buf[i] - '0';
+                        else if (buf[i] >= 'a' && buf[i] <= 'f') d = buf[i] - 'a' + 10;
+                        else d = buf[i] - 'A' + 10;
+                        ch = ch * 16 + d;
+                        i++;
+                    }
+                    goto char_done;
+                }
                 else fatal("Bad char escape: \\%c", buf[i]);
                 i++;
             } else {
                 ch = (unsigned char)buf[i];
                 i++;
             }
+            char_done:
             if (i < len && buf[i] == '\'') i++; /* skip closing quote */
             char val[16];
             snprintf(val, sizeof(val), "%d", ch);
@@ -132,6 +181,19 @@ TokArray lex(const char *src) {
             continue;
         }
 
+        /* three-character operators */
+        if (i + 2 < len) {
+            char c0 = buf[i], c1 = buf[i+1], c2 = buf[i+2];
+            if ((c0 == '<' && c1 == '<' && c2 == '=') ||
+                (c0 == '>' && c1 == '>' && c2 == '=')) {
+                char *val = substr(buf, i, i + 3);
+                Tok t = { TK_OP, val, i };
+                tokarr_push(&toks, t);
+                i += 3;
+                continue;
+            }
+        }
+
         /* two-character operators */
         if (i + 1 < len) {
             char c0 = buf[i], c1 = buf[i+1];
@@ -141,7 +203,19 @@ TokArray lex(const char *src) {
                 (c0 == '<' && c1 == '=') ||
                 (c0 == '>' && c1 == '=') ||
                 (c0 == '&' && c1 == '&') ||
-                (c0 == '|' && c1 == '|')) {
+                (c0 == '|' && c1 == '|') ||
+                (c0 == '+' && c1 == '+') ||
+                (c0 == '-' && c1 == '-') ||
+                (c0 == '+' && c1 == '=') ||
+                (c0 == '-' && c1 == '=') ||
+                (c0 == '*' && c1 == '=') ||
+                (c0 == '/' && c1 == '=') ||
+                (c0 == '%' && c1 == '=') ||
+                (c0 == '&' && c1 == '=') ||
+                (c0 == '|' && c1 == '=') ||
+                (c0 == '^' && c1 == '=') ||
+                (c0 == '<' && c1 == '<') ||
+                (c0 == '>' && c1 == '>')) {
                 char *val = substr(buf, i, i + 2);
                 Tok t = { TK_OP, val, i };
                 tokarr_push(&toks, t);
@@ -151,7 +225,7 @@ TokArray lex(const char *src) {
         }
 
         /* single-character operators */
-        if (strchr("+-*/%<>=!&.;,(){}[]", buf[i])) {
+        if (strchr("+-*/%<>=!&.|;,(){}[]?:~^", buf[i])) {
             char *val = substr(buf, i, i + 1);
             Tok t = { TK_OP, val, i };
             tokarr_push(&toks, t);
@@ -160,6 +234,24 @@ TokArray lex(const char *src) {
         }
 
         fatal("Unexpected character '%c' at position %d", buf[i], i);
+    }
+
+    /* String concatenation: merge adjacent string tokens */
+    for (int k = 0; k < toks.len - 1; ) {
+        if (toks.data[k].kind == TK_STRING && toks.data[k+1].kind == TK_STRING) {
+            int len1 = strlen(toks.data[k].value);
+            int len2 = strlen(toks.data[k+1].value);
+            char *merged = xmalloc(len1 + len2 + 1);
+            memcpy(merged, toks.data[k].value, len1);
+            memcpy(merged + len1, toks.data[k+1].value, len2);
+            merged[len1 + len2] = '\0';
+            toks.data[k].value = merged;
+            for (int m = k+1; m < toks.len - 1; m++)
+                toks.data[m] = toks.data[m+1];
+            toks.len--;
+        } else {
+            k++;
+        }
     }
 
     Tok eof = { TK_EOF, xstrdup(""), len };
