@@ -114,6 +114,7 @@ typedef struct {
     char *name;
     char **fields;
     int nfields;
+    int is_union;
 } StructDef;
 
 typedef struct {

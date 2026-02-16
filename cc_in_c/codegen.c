@@ -35,6 +35,7 @@ typedef struct {
     char *name;
     char **fields;
     int nfields;
+    int is_union;
 } CgStructDef;
 
 static CgStructDef cg_structs[64];
@@ -137,11 +138,21 @@ static CgStructDef *find_cg_struct(const char *name) {
 static int field_index(const char *struct_name, const char *field_name) {
     CgStructDef *sd = find_cg_struct(struct_name);
     if (!sd) fatal("Unknown struct '%s' in codegen", struct_name);
+    /* For unions, all fields are at offset 0 */
+    if (sd->is_union) return 0;
     for (int i = 0; i < sd->nfields; i++)
         if (strcmp(sd->fields[i], field_name) == 0)
             return i;
     fatal("Struct '%s' has no field '%s'", struct_name, field_name);
     return -1;
+}
+
+static int cg_struct_nfields(const char *name) {
+    CgStructDef *sd = find_cg_struct(name);
+    if (!sd) fatal("Unknown struct '%s' for nfields", name);
+    /* Unions: all fields overlap, allocate 1 slot */
+    if (sd->is_union) return 1;
+    return sd->nfields;
 }
 
 static GlobalVarEntry *find_global(const char *name) {
@@ -265,9 +276,8 @@ static void walk_stmts_for_layout(StmtArray *stmts, FuncLayout *layout, int *off
                 if (find_slot(layout, e->name) >= 0)
                     continue; /* already laid out (e.g. redecl in nested scope) */
                 if (e->struct_type) {
-                    CgStructDef *sd = find_cg_struct(e->struct_type);
-                    if (!sd) fatal("Unknown struct '%s'", e->struct_type);
-                    *offset += sd->nfields * 8;
+                    int nf = cg_struct_nfields(e->struct_type);
+                    *offset += nf * 8;
                     if (layout->nstructvars >= 64) fatal("Too many struct vars");
                     layout->structvars[layout->nstructvars].name = xstrdup(e->name);
                     layout->structvars[layout->nstructvars].struct_type = xstrdup(e->struct_type);
@@ -1231,12 +1241,13 @@ char *codegen_generate(Program *prog) {
             ptr_ret_funcs[nptr_ret_funcs++] = prog->funcs[i].name;
     }
 
-    /* Register struct definitions */
+    /* Register struct/union definitions */
     for (int i = 0; i < prog->nstructs; i++) {
         if (ncg_structs >= 64) fatal("Too many structs");
         cg_structs[ncg_structs].name = prog->structs[i].name;
         cg_structs[ncg_structs].fields = prog->structs[i].fields;
         cg_structs[ncg_structs].nfields = prog->structs[i].nfields;
+        cg_structs[ncg_structs].is_union = prog->structs[i].is_union;
         ncg_structs++;
     }
 
@@ -1295,8 +1306,7 @@ char *codegen_generate(Program *prog) {
             } else {
                 /* Uninitialized scalar or struct */
                 if (gd->struct_type != NULL && !gd->is_ptr && gd->array_size < 0) {
-                    CgStructDef *sd = find_cg_struct(gd->struct_type);
-                    int size = sd ? sd->nfields * 8 : 8;
+                    int size = cg_struct_nfields(gd->struct_type) * 8;
                     emit("\t.comm\t_%s, %d, 3", gd->name, size);
                 } else {
                     emit("\t.comm\t_%s, 8, 3", gd->name);

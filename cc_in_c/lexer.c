@@ -12,7 +12,7 @@ static const char *keywords[] = {
     "enum", "const", "volatile", "register", "static",
     "goto", "char", "unsigned", "void", "long", "short",
     "signed", "typedef", "sizeof",
-    "inline", "_Bool", "bool",
+    "inline", "_Bool", "bool", "union",
     NULL,
 };
 

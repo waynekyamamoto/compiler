@@ -130,7 +130,7 @@ static int is_type_start(void) {
     if (match(TK_KW, "int") || match(TK_KW, "char") || match(TK_KW, "void") ||
         match(TK_KW, "unsigned") || match(TK_KW, "signed") ||
         match(TK_KW, "long") || match(TK_KW, "short") ||
-        match(TK_KW, "struct") || match(TK_KW, "enum") ||
+        match(TK_KW, "struct") || match(TK_KW, "union") || match(TK_KW, "enum") ||
         match(TK_KW, "const") || match(TK_KW, "volatile") || match(TK_KW, "register") ||
         match(TK_KW, "static") || match(TK_KW, "extern") || match(TK_KW, "typedef") ||
         match(TK_KW, "_Bool") || match(TK_KW, "bool") || match(TK_KW, "inline"))
@@ -144,6 +144,11 @@ static char *parse_base_type(void) {
 
     if (match(TK_KW, "struct")) {
         eat(TK_KW, "struct");
+        Tok *name = eat(TK_ID, NULL);
+        return xstrdup(name->value);
+    }
+    if (match(TK_KW, "union")) {
+        eat(TK_KW, "union");
         Tok *name = eat(TK_ID, NULL);
         return xstrdup(name->value);
     }
@@ -178,8 +183,11 @@ static Block parse_block(void);
 
 /* ---- Struct definition ---- */
 
-static StructDef parse_struct_def(void) {
-    eat(TK_KW, "struct");
+static StructDef parse_struct_or_union_def(int is_union) {
+    if (is_union)
+        eat(TK_KW, "union");
+    else
+        eat(TK_KW, "struct");
     Tok *name_tok = eat(TK_ID, NULL);
     char *name = xstrdup(name_tok->value);
     eat(TK_OP, "{");
@@ -231,6 +239,7 @@ static StructDef parse_struct_def(void) {
     sd.name = name;
     sd.fields = fields;
     sd.nfields = nfields;
+    sd.is_union = is_union;
     return sd;
 }
 
@@ -349,12 +358,6 @@ static int is_compound_assign(const char *op) {
             strcmp(op, "%=") == 0 || strcmp(op, "&=") == 0 ||
             strcmp(op, "|=") == 0 || strcmp(op, "^=") == 0 ||
             strcmp(op, "<<=") == 0 || strcmp(op, ">>=") == 0);
-}
-
-/* Extract base operator from compound assignment: "+=" -> "+" */
-static char *compound_base_op(const char *op) {
-    int len = strlen(op);
-    return xstrdup(op);  /* We'll just use the string minus the last char */
 }
 
 static Expr *parse_unary(void);
@@ -582,7 +585,7 @@ static int starts_type(void) {
     return (match(TK_KW, "int") || match(TK_KW, "char") || match(TK_KW, "void") ||
             match(TK_KW, "unsigned") || match(TK_KW, "signed") ||
             match(TK_KW, "long") || match(TK_KW, "short") ||
-            match(TK_KW, "struct") || match(TK_KW, "const") ||
+            match(TK_KW, "struct") || match(TK_KW, "union") || match(TK_KW, "const") ||
             match(TK_KW, "volatile") || match(TK_KW, "register") ||
             match(TK_KW, "static") || match(TK_KW, "enum") ||
             match(TK_KW, "_Bool") || match(TK_KW, "bool"));
@@ -1139,9 +1142,13 @@ Program *parse_program(TokArray tokarr) {
             continue;
         }
 
-        if (match(TK_KW, "struct")) {
+        if (match(TK_KW, "struct") || match(TK_KW, "union")) {
+            int is_union_kw = match(TK_KW, "union");
             int saved = pos;
-            eat(TK_KW, "struct");
+            if (is_union_kw)
+                eat(TK_KW, "union");
+            else
+                eat(TK_KW, "struct");
             eat(TK_ID, NULL);
             if (match(TK_OP, "{")) {
                 pos = saved;
@@ -1149,9 +1156,9 @@ Program *parse_program(TokArray tokarr) {
                     scap = scap ? scap * 2 : 4;
                     structs = realloc(structs, scap * sizeof(StructDef));
                 }
-                structs[nstructs++] = parse_struct_def();
+                structs[nstructs++] = parse_struct_or_union_def(is_union_kw);
             } else {
-                /* struct return type: could be function, prototype, or global */
+                /* struct/union return type: could be function, prototype, or global */
                 pos = saved;
                 parse_func_or_global(0, &funcs, &nfuncs, &fcap, &globals, &nglobals, &gcap, &protos, &nprotos, &pcap2);
             }

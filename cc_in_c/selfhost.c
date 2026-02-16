@@ -4,7 +4,8 @@
 // Supported: const/volatile/register/static/extern(skip), type casts(no-op), hex literals
 // Supported: ^, <<, >>, ++x/--x, +=/-=/*=//=/%=/&=/|=/^=, ~, ternary, comma operator
 // Supported: _Bool/bool, inline(skip), \a\b\f\v, \xHH, \ooo escapes
-// No: union, floating point
+// Supported: union
+// No: floating point
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -111,6 +112,7 @@ struct SDef {
   int *name;
   int **fields;
   int nfields;
+  int is_union;
 };
 
 struct SFieldInfo {
@@ -174,10 +176,11 @@ int *cg_gnames[1024];
 int cg_gis_array[1024];
 int ncg_g;
 
-// Struct defs for codegen
+// Struct/union defs for codegen
 int *cg_sname[64];
 int **cg_sfields[64];
 int cg_snfields[64];
+int cg_s_is_union[64];
 int ncg_s;
 
 // Token arrays
@@ -473,6 +476,7 @@ int is_keyword(int *s) {
   if (my_strcmp(s, "inline") == 0) { return 1; }
   if (my_strcmp(s, "_Bool") == 0) { return 1; }
   if (my_strcmp(s, "bool") == 0) { return 1; }
+  if (my_strcmp(s, "union") == 0) { return 1; }
   return 0;
 }
 
@@ -1038,6 +1042,12 @@ int *parse_base_type() {
     skip_qualifiers();
     return my_strdup(name);
   }
+  if (p_match(TK_KW, "union")) {
+    p_eat(TK_KW, "union");
+    name = p_eat(TK_ID, 0);
+    skip_qualifiers();
+    return my_strdup(name);
+  }
   if (p_match(TK_KW, "enum")) {
     p_eat(TK_KW, "enum");
     if (p_match(TK_ID, 0)) { p_eat(TK_ID, 0); }
@@ -1211,6 +1221,7 @@ int is_type_keyword(int *s) {
   if (my_strcmp(s, "enum") == 0) { return 1; }
   if (my_strcmp(s, "_Bool") == 0) { return 1; }
   if (my_strcmp(s, "bool") == 0) { return 1; }
+  if (my_strcmp(s, "union") == 0) { return 1; }
   return 0;
 }
 
@@ -1467,7 +1478,7 @@ struct Stmt *parse_stmt() {
     p_eat(TK_OP, "(");
 
     init = 0;
-    if (p_match(TK_KW, "int") || p_match(TK_KW, "struct") ||
+    if (p_match(TK_KW, "int") || p_match(TK_KW, "struct") || p_match(TK_KW, "union") ||
         p_match(TK_KW, "char") || p_match(TK_KW, "void") ||
         p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed") ||
         p_match(TK_KW, "long") || p_match(TK_KW, "short") ||
@@ -1602,7 +1613,7 @@ struct Stmt *parse_stmt() {
   }
 
   // type-keyword variable declarations
-  if (p_match(TK_KW, "int") || p_match(TK_KW, "struct") ||
+  if (p_match(TK_KW, "int") || p_match(TK_KW, "struct") || p_match(TK_KW, "union") ||
       p_match(TK_KW, "char") || p_match(TK_KW, "void") ||
       p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed") ||
       p_match(TK_KW, "long") || p_match(TK_KW, "short") ||
@@ -1625,8 +1636,12 @@ struct Stmt *parse_stmt() {
   return new_expr_s(e);
 }
 
-struct SDef *parse_struct_def() {
-  p_eat(TK_KW, "struct");
+struct SDef *parse_struct_or_union_def(int is_union) {
+  if (is_union) {
+    p_eat(TK_KW, "union");
+  } else {
+    p_eat(TK_KW, "struct");
+  }
   int *name = my_strdup(p_eat(TK_ID, 0));
   p_eat(TK_OP, "{");
 
@@ -1667,10 +1682,11 @@ struct SDef *parse_struct_def() {
   p_sdefs[np_sdefs] = sdi;
   np_sdefs = np_sdefs + 1;
 
-  struct SDef *sd = my_malloc(24);
+  struct SDef *sd = my_malloc(40);
   sd->name = name;
   sd->fields = fields;
   sd->nfields = nf;
+  sd->is_union = is_union;
   return sd;
 }
 
@@ -1854,6 +1870,7 @@ int is_type_start() {
   if (p_match(TK_KW, "char")) { return 1; }
   if (p_match(TK_KW, "void")) { return 1; }
   if (p_match(TK_KW, "struct")) { return 1; }
+  if (p_match(TK_KW, "union")) { return 1; }
   if (p_match(TK_KW, "unsigned")) { return 1; }
   if (p_match(TK_KW, "signed")) { return 1; }
   if (p_match(TK_KW, "long")) { return 1; }
@@ -1932,13 +1949,14 @@ struct Program *parse_program() {
       continue;
     }
 
-    if (p_match(TK_KW, "struct")) {
+    if (p_match(TK_KW, "struct") || p_match(TK_KW, "union")) {
+      int is_union_kw = p_match(TK_KW, "union");
       saved = cur_pos;
-      p_eat(TK_KW, "struct");
+      if (is_union_kw) { p_eat(TK_KW, "union"); } else { p_eat(TK_KW, "struct"); }
       p_eat(TK_ID, 0);
       if (p_match(TK_OP, "{")) {
         cur_pos = saved;
-        structs[ns] = parse_struct_def();
+        structs[ns] = parse_struct_or_union_def(is_union_kw);
         ns = ns + 1;
       } else {
         cur_pos = saved;
@@ -2058,6 +2076,8 @@ int cg_field_index(int *sname, int *fname) {
   int i = 0;
   while (i < ncg_s) {
     if (my_strcmp(cg_sname[i], sname) == 0) {
+      // For unions, all fields are at offset 0
+      if (cg_s_is_union[i]) { return 0; }
       int j = 0;
       while (j < cg_snfields[i]) {
         if (my_strcmp(cg_sfields[i][j], fname) == 0) {
@@ -2077,6 +2097,8 @@ int cg_struct_nfields(int *sname) {
   int i = 0;
   while (i < ncg_s) {
     if (my_strcmp(cg_sname[i], sname) == 0) {
+      // Unions: all fields overlap, allocate 1 slot
+      if (cg_s_is_union[i]) { return 1; }
       return cg_snfields[i];
     }
     i = i + 1;
@@ -2976,13 +2998,14 @@ int codegen(struct Program *prog) {
     gi = gi + 1;
   }
 
-  // Register struct definitions
+  // Register struct/union definitions
   int i = 0;
   while (i < prog->nstructs) {
     struct SDef *sd = prog->structs[i];
     cg_sname[ncg_s] = sd->name;
     cg_sfields[ncg_s] = sd->fields;
     cg_snfields[ncg_s] = sd->nfields;
+    cg_s_is_union[ncg_s] = sd->is_union;
     ncg_s = ncg_s + 1;
     i = i + 1;
   }
