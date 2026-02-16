@@ -266,7 +266,7 @@ int *my_strdup(int *s) {
   int i = 0;
   while (i <= len) {
     __write_byte(p, i, __read_byte(s, i));
-    i = i + 1;
+    i++;
   }
   return p;
 }
@@ -305,12 +305,12 @@ int my_atoi(int *s) {
     i = i + 2;
     while (is_hex_digit(__read_byte(s, i))) {
       val = val * 16 + hex_digit_val(__read_byte(s, i));
-      i = i + 1;
+      i++;
     }
   } else {
     while (__read_byte(s, i) >= '0' && __read_byte(s, i) <= '9') {
       val = val * 10 + __read_byte(s, i) - '0';
-      i = i + 1;
+      i++;
     }
   }
   if (neg) {
@@ -328,12 +328,12 @@ int emit_ch(int c) {
     int i = 0;
     while (i < outlen) {
       __write_byte(newbuf, i, __read_byte(outbuf, i));
-      i = i + 1;
+      i++;
     }
     outbuf = newbuf;
   }
   __write_byte(outbuf, outlen, c);
-  outlen = outlen + 1;
+  outlen++;
   return 0;
 }
 
@@ -341,7 +341,7 @@ int emit_s(int *s) {
   int i = 0;
   while (__read_byte(s, i) != 0) {
     emit_ch(__read_byte(s, i));
-    i = i + 1;
+    i++;
   }
   return 0;
 }
@@ -381,12 +381,12 @@ int *build_str2(int *a, int *b) {
   int i = 0;
   while (i < la) {
     __write_byte(buf, i, __read_byte(a, i));
-    i = i + 1;
+    i++;
   }
   int j = 0;
   while (j < lb) {
     __write_byte(buf, i + j, __read_byte(b, j));
-    j = j + 1;
+    j++;
   }
   __write_byte(buf, la + lb, 0);
   return buf;
@@ -407,12 +407,12 @@ int *int_to_str(int n) {
   }
   while (n > 0) {
     buf[len] = '0' + n % 10;
-    len = len + 1;
+    len++;
     n = n / 10;
   }
   int total = len;
   if (neg) {
-    total = total + 1;
+    total++;
   }
   int *result = my_malloc(total + 1);
   int pos = 0;
@@ -423,7 +423,7 @@ int *int_to_str(int n) {
   int k = 0;
   while (k < len) {
     __write_byte(result, pos + k, buf[len - 1 - k]);
-    k = k + 1;
+    k++;
   }
   __write_byte(result, total, 0);
   return result;
@@ -435,7 +435,7 @@ int *make_str(int *src, int start, int len) {
   int i = 0;
   while (i < len) {
     __write_byte(buf, i, __read_byte(src, start + i));
-    i = i + 1;
+    i++;
   }
   __write_byte(buf, len, 0);
   return buf;
@@ -511,7 +511,7 @@ int lex(int *src, int srclen) {
     if (__read_byte(src, i) == '/' && i + 1 < srclen && __read_byte(src, i + 1) == '/') {
       i = i + 2;
       while (i < srclen && __read_byte(src, i) != '\n') {
-        i = i + 1;
+        i++;
       }
     } else if (__read_byte(src, i) == '/' && i + 1 < srclen && __read_byte(src, i + 1) == '*') {
       i = i + 2;
@@ -519,15 +519,15 @@ int lex(int *src, int srclen) {
         if (__read_byte(src, i) == '*' && __read_byte(src, i + 1) == '/') {
           break;
         }
-        i = i + 1;
+        i++;
       }
       if (i + 1 < srclen) {
         i = i + 2;
       }
     } else {
       __write_byte(buf, j, __read_byte(src, i));
-      j = j + 1;
-      i = i + 1;
+      j++;
+      i++;
     }
   }
   __write_byte(buf, j, 0);
@@ -544,7 +544,7 @@ int lex(int *src, int srclen) {
     int c = __read_byte(buf, i);
 
     if (is_space(c)) {
-      i = i + 1;
+      i++;
       continue;
     }
 
@@ -554,17 +554,17 @@ int lex(int *src, int srclen) {
       if (c == '0' && i + 1 < len && (__read_byte(buf, i + 1) == 'x' || __read_byte(buf, i + 1) == 'X')) {
         i = i + 2;
         while (i < len && is_hex_digit(__read_byte(buf, i))) {
-          i = i + 1;
+          i++;
         }
       } else {
         while (i < len && is_digit(__read_byte(buf, i))) {
-          i = i + 1;
+          i++;
         }
       }
       tok_kind[ntokens] = TK_NUM;
       tok_val[ntokens] = make_str(buf, start, i - start);
       tok_pos[ntokens] = start;
-      ntokens = ntokens + 1;
+      ntokens++;
       continue;
     }
 
@@ -572,7 +572,7 @@ int lex(int *src, int srclen) {
     if (is_alpha(c)) {
       start = i;
       while (i < len && is_alnum(__read_byte(buf, i))) {
-        i = i + 1;
+        i++;
       }
       id_val = make_str(buf, start, i - start);
       if (is_keyword(id_val)) {
@@ -582,17 +582,17 @@ int lex(int *src, int srclen) {
       }
       tok_val[ntokens] = id_val;
       tok_pos[ntokens] = start;
-      ntokens = ntokens + 1;
+      ntokens++;
       continue;
     }
 
     // Character literal
     if (c == 39) {
       start = i;
-      i = i + 1;
+      i++;
       ch = 0;
       if (__read_byte(buf, i) == '\\') {
-        i = i + 1;
+        i++;
         ec = __read_byte(buf, i);
         if (ec == 'n') { ch = 10; }
         else if (ec == 't') { ch = 9; }
@@ -606,7 +606,7 @@ int lex(int *src, int srclen) {
         else if (ec == '0') { ch = 0; }
         else if (ec == 'x') {
           // hex escape \xHH
-          i = i + 1;
+          i++;
           ch = 0;
           while (i < len) {
             ec = __read_byte(buf, i);
@@ -614,58 +614,58 @@ int lex(int *src, int srclen) {
             else if (ec >= 'a' && ec <= 'f') { ch = ch * 16 + (ec - 'a' + 10); }
             else if (ec >= 'A' && ec <= 'F') { ch = ch * 16 + (ec - 'A' + 10); }
             else { break; }
-            i = i + 1;
+            i++;
           }
-          i = i - 1;
+          i--;
         }
         else if (ec >= '0' && ec <= '7') {
           // octal escape \ooo
           ch = ec - '0';
-          i = i + 1;
+          i++;
           if (i < len && __read_byte(buf, i) >= '0' && __read_byte(buf, i) <= '7') {
             ch = ch * 8 + (__read_byte(buf, i) - '0');
-            i = i + 1;
+            i++;
             if (i < len && __read_byte(buf, i) >= '0' && __read_byte(buf, i) <= '7') {
               ch = ch * 8 + (__read_byte(buf, i) - '0');
-              i = i + 1;
+              i++;
             }
           }
-          i = i - 1;
+          i--;
         }
         else { my_fatal("bad char escape"); }
-        i = i + 1;
+        i++;
       } else {
         ch = __read_byte(buf, i);
-        i = i + 1;
+        i++;
       }
       if (i < len && __read_byte(buf, i) == 39) {
-        i = i + 1;
+        i++;
       }
       tok_kind[ntokens] = TK_NUM;
       tok_val[ntokens] = int_to_str(ch);
       tok_pos[ntokens] = start;
-      ntokens = ntokens + 1;
+      ntokens++;
       continue;
     }
 
     // String literal
     if (c == '"') {
       start = i;
-      i = i + 1;
+      i++;
       while (i < len && __read_byte(buf, i) != '"') {
         if (__read_byte(buf, i) == '\\') {
-          i = i + 1;
+          i++;
         }
-        i = i + 1;
+        i++;
       }
       if (i < len) {
-        i = i + 1;
+        i++;
       }
       // Store without quotes
       tok_kind[ntokens] = TK_STR;
       tok_val[ntokens] = make_str(buf, start + 1, i - start - 2);
       tok_pos[ntokens] = start;
-      ntokens = ntokens + 1;
+      ntokens++;
       continue;
     }
 
@@ -702,8 +702,8 @@ int lex(int *src, int srclen) {
       tok_kind[ntokens] = TK_OP;
       tok_val[ntokens] = make_str(buf, i, 1);
       tok_pos[ntokens] = i;
-      ntokens = ntokens + 1;
-      i = i + 1;
+      ntokens++;
+      i++;
       continue;
     }
 
@@ -714,7 +714,7 @@ int lex(int *src, int srclen) {
   tok_kind[ntokens] = TK_EOF;
   tok_val[ntokens] = my_strdup("");
   tok_pos[ntokens] = len;
-  ntokens = ntokens + 1;
+  ntokens++;
   return 0;
 }
 
@@ -738,7 +738,7 @@ int *p_eat(int kind, int *val) {
     exit(1);
   }
   int *v = tok_val[cur_pos];
-  cur_pos = cur_pos + 1;
+  cur_pos++;
   return v;
 }
 
@@ -748,7 +748,7 @@ int *find_lv_stype(int *name) {
     if (my_strcmp(lv_name[i], name) == 0) {
       return lv_stype[i];
     }
-    i = i + 1;
+    i++;
   }
   return 0;
 }
@@ -761,7 +761,7 @@ int add_lv(int *name, int *stype, int is_ptr) {
     lv_stype[nlv] = 0;
   }
   lv_isptr[nlv] = is_ptr;
-  nlv = nlv + 1;
+  nlv++;
   return 0;
 }
 
@@ -772,7 +772,7 @@ struct SDefInfo *find_sdef(int *name) {
     if (my_strcmp(sdi->name, name) == 0) {
       return sdi;
     }
-    i = i + 1;
+    i++;
   }
   return 0;
 }
@@ -787,7 +787,7 @@ int *field_stype(int *sname, int *fname) {
       if (fi->stype != 0) { return fi->stype; }
       my_fatal("field is not a struct type");
     }
-    i = i + 1;
+    i++;
   }
   my_fatal("struct has no such field");
   return 0;
@@ -1022,7 +1022,7 @@ struct Stmt *new_switch_s(struct Expr *cond, int *case_vals, struct Stmt ***case
 int skip_qualifiers() {
   int skipped = 0;
   while (p_match(TK_KW, "const") || p_match(TK_KW, "volatile") || p_match(TK_KW, "register")) {
-    cur_pos = cur_pos + 1;
+    cur_pos++;
     skipped = 1;
   }
   return skipped;
@@ -1053,7 +1053,7 @@ int *find_typedef(int *name) {
     if (my_strcmp(td_name[i], name) == 0) {
       return td_stype[i];
     }
-    i = i + 1;
+    i++;
   }
   return 0;
 }
@@ -1064,7 +1064,7 @@ int has_typedef(int *name) {
     if (my_strcmp(td_name[i], name) == 0) {
       return 1;
     }
-    i = i + 1;
+    i++;
   }
   return 0;
 }
@@ -1076,7 +1076,7 @@ int add_typedef(int *name, int *stype) {
   } else {
     td_stype[ntd] = 0;
   }
-  ntd = ntd + 1;
+  ntd++;
   return 0;
 }
 
@@ -1100,7 +1100,7 @@ int *parse_base_type() {
     return 0;
   }
   if (p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) {
-    cur_pos = cur_pos + 1;
+    cur_pos++;
     // optional: int, long, short, char after
     if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; }
     else if (p_match(TK_KW, "long")) { cur_pos = cur_pos + 1; if (p_match(TK_KW, "long")) { cur_pos = cur_pos + 1; } if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; } }
@@ -1110,7 +1110,7 @@ int *parse_base_type() {
     return 0;
   }
   if (p_match(TK_KW, "long")) {
-    cur_pos = cur_pos + 1;
+    cur_pos++;
     if (p_match(TK_KW, "long")) { cur_pos = cur_pos + 1; }
     if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; }
     else if (p_match(TK_KW, "unsigned")) { cur_pos = cur_pos + 1; if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; } }
@@ -1118,7 +1118,7 @@ int *parse_base_type() {
     return 0;
   }
   if (p_match(TK_KW, "short")) {
-    cur_pos = cur_pos + 1;
+    cur_pos++;
     if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; }
     skip_qualifiers();
     return 0;
@@ -1142,14 +1142,14 @@ int *parse_base_type() {
     return 0;
   }
   if (p_match(TK_KW, "_Bool") || p_match(TK_KW, "bool")) {
-    cur_pos = cur_pos + 1;
+    cur_pos++;
     skip_qualifiers();
     return 0;
   }
   // Check if it's a typedef name
   if (tok_kind[cur_pos] == TK_ID && has_typedef(tok_val[cur_pos])) {
     int *td_st = find_typedef(tok_val[cur_pos]);
-    cur_pos = cur_pos + 1;
+    cur_pos++;
     skip_qualifiers();
     if (td_st != 0) {
       return my_strdup(td_st);
@@ -1167,7 +1167,7 @@ struct Stmt **parse_block(int *out_len) {
   int n = 0;
   while (!p_match(TK_OP, "}")) {
     stmts[n] = parse_stmt();
-    n = n + 1;
+    n++;
   }
   p_eat(TK_OP, "}");
   *out_len = n;
@@ -1203,7 +1203,7 @@ struct Expr *parse_init_list() {
   p_eat(TK_OP, "{");
   while (!p_match(TK_OP, "}")) {
     elems[nelems] = parse_expr(0);
-    nelems = nelems + 1;
+    nelems++;
     if (p_match(TK_OP, ",")) { p_eat(TK_OP, ","); continue; }
     break;
   }
@@ -1232,13 +1232,13 @@ struct Stmt *parse_vardecl_stmt() {
     }
     while (p_match(TK_OP, "*")) {
       p_eat(TK_OP, "*");
-      is_ptr = is_ptr + 1;
+      is_ptr++;
     }
     // Check again after consuming stars: type * (*name)(params)
     if (is_funcptr == 0 && is_funcptr_decl()) {
       p_eat(TK_OP, "(");
       p_eat(TK_OP, "*");
-      is_ptr = is_ptr + 1;
+      is_ptr++;
       is_funcptr = 1;
     }
     skip_qualifiers();
@@ -1284,7 +1284,7 @@ struct Stmt *parse_vardecl_stmt() {
       init = parse_expr(0);
     }
     decls[ndecls] = make_vd(my_strdup(name), decl_stype, arr_size, is_ptr, init);
-    ndecls = ndecls + 1;
+    ndecls++;
     if (stype != 0) {
       add_lv(name, stype, is_ptr);
     }
@@ -1422,7 +1422,7 @@ struct Expr *parse_unary() {
       while (sz_depth > 0) {
         if (p_match(TK_OP, "(")) { sz_depth = sz_depth + 1; }
         else if (p_match(TK_OP, ")")) { sz_depth = sz_depth - 1; if (sz_depth == 0) { break; } }
-        cur_pos = cur_pos + 1;
+        cur_pos++;
       }
       p_eat(TK_OP, ")");
     } else {
@@ -1464,7 +1464,7 @@ int find_enum_const(int *name) {
     if (my_strcmp(ec_name[i], name) == 0) {
       return ec_val[i];
     }
-    i = i + 1;
+    i++;
   }
   return 0 - 1;
 }
@@ -1475,7 +1475,7 @@ int has_enum_const(int *name) {
     if (my_strcmp(ec_name[i], name) == 0) {
       return 1;
     }
-    i = i + 1;
+    i++;
   }
   return 0;
 }
@@ -1483,7 +1483,7 @@ int has_enum_const(int *name) {
 int add_enum_const(int *name, int val) {
   ec_name[nec] = my_strdup(name);
   ec_val[nec] = val;
-  nec = nec + 1;
+  nec++;
   return 0;
 }
 
@@ -1512,7 +1512,7 @@ struct Expr *parse_primary() {
       if (!p_match(TK_OP, ")")) {
         while (1) {
           args[nargs] = parse_expr(0);
-          nargs = nargs + 1;
+          nargs++;
           if (p_match(TK_OP, ",")) {
             p_eat(TK_OP, ",");
             continue;
@@ -1546,7 +1546,7 @@ struct Expr *parse_primary() {
       if (!p_match(TK_OP, ")")) {
         while (1) {
           ic_args[ic_nargs] = parse_expr(0);
-          ic_nargs = ic_nargs + 1;
+          ic_nargs++;
           if (p_match(TK_OP, ",")) { p_eat(TK_OP, ","); continue; }
           break;
         }
@@ -1563,8 +1563,8 @@ struct Expr *parse_primary() {
         int ai = 0;
         while (ai < ic_nargs) {
           new_args[na] = ic_args[ai];
-          na = na + 1;
-          ai = ai + 1;
+          na++;
+          ai++;
         }
         e = new_call("__indirect_call", new_args, na);
       }
@@ -1776,12 +1776,12 @@ struct Stmt *parse_stmt() {
         sw_cns = 0;
         while (!p_match(TK_KW, "case") && !p_match(TK_KW, "default") && !p_match(TK_OP, "}")) {
           sw_cstmts[sw_cns] = parse_stmt();
-          sw_cns = sw_cns + 1;
+          sw_cns++;
         }
         cv[nc] = sw_cval;
         cb[nc] = sw_cstmts;
         cnb[nc] = sw_cns;
-        nc = nc + 1;
+        nc++;
       } else if (p_match(TK_KW, "default")) {
         p_eat(TK_KW, "default");
         p_eat(TK_OP, ":");
@@ -1789,7 +1789,7 @@ struct Stmt *parse_stmt() {
         sw_dns = 0;
         while (!p_match(TK_KW, "case") && !p_match(TK_KW, "default") && !p_match(TK_OP, "}")) {
           sw_dstmts[sw_dns] = parse_stmt();
-          sw_dns = sw_dns + 1;
+          sw_dns++;
         }
         db = sw_dstmts;
         ndb = sw_dns;
@@ -1883,7 +1883,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     }
     fi->is_ptr = is_ptr;
     finfo[nf] = fi;
-    nf = nf + 1;
+    nf++;
   }
   p_eat(TK_OP, "}");
   p_eat(TK_OP, ";");
@@ -1894,7 +1894,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
   sdi->flds = finfo;
   sdi->nflds = nf;
   p_sdefs[np_sdefs] = sdi;
-  np_sdefs = np_sdefs + 1;
+  np_sdefs++;
 
   // Build field_types array
   int **ftypes = my_malloc(64 * 8);
@@ -1905,7 +1905,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     } else {
       ftypes[fti] = 0;
     }
-    fti = fti + 1;
+    fti++;
   }
 
   struct SDef *sd = my_malloc(48);
@@ -1968,7 +1968,7 @@ struct FuncDef *parse_func() {
           skip_param_list();
         }
         params[np] = my_strdup(pname);
-        np = np + 1;
+        np++;
         if (stype != 0) {
           add_lv(pname, stype, is_ptr);
         }
@@ -2109,7 +2109,7 @@ int parse_enum_def() {
       if (neg) { val = 0 - val; }
     }
     add_enum_const(ename, val);
-    val = val + 1;
+    val++;
     if (p_match(TK_OP, ",")) { p_eat(TK_OP, ","); }
   }
   p_eat(TK_OP, "}");
@@ -2120,7 +2120,7 @@ int parse_enum_def() {
 int skip_extern_decl() {
   p_eat(TK_KW, "extern");
   while (!p_match(TK_OP, ";")) {
-    cur_pos = cur_pos + 1;
+    cur_pos++;
   }
   p_eat(TK_OP, ";");
   return 0;
@@ -2179,7 +2179,7 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
         if (ftype != 0) { fi->stype = my_strdup(ftype); } else { fi->stype = 0; }
         fi->is_ptr = fis_ptr;
         td_finfo[td_nf] = fi;
-        td_nf = td_nf + 1;
+        td_nf++;
       }
       p_eat(TK_OP, "}");
 
@@ -2190,7 +2190,7 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
         sdi->flds = td_finfo;
         sdi->nflds = td_nf;
         p_sdefs[np_sdefs] = sdi;
-        np_sdefs = np_sdefs + 1;
+        np_sdefs++;
 
         // Also add to program structs
         ftypes = my_malloc(64 * 8);
@@ -2201,7 +2201,7 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
           } else {
             ftypes[fti] = 0;
           }
-          fti = fti + 1;
+          fti++;
         }
         sd = my_malloc(48);
         sd->name = my_strdup(tag_name);
@@ -2242,7 +2242,7 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
           if (neg) { td_eval = 0 - td_eval; }
         }
         add_enum_const(ename, td_eval);
-        td_eval = td_eval + 1;
+        td_eval++;
         if (p_match(TK_OP, ",")) { p_eat(TK_OP, ","); }
       }
       p_eat(TK_OP, "}");
@@ -2382,14 +2382,14 @@ struct Program *parse_program() {
         if (fd->nbody == 0 - 1) {
           proto_names[nprotos] = fd->name;
           proto_rip[nprotos] = fd->ret_is_ptr;
-          nprotos = nprotos + 1;
+          nprotos++;
         } else {
           funcs[nf] = fd;
-          nf = nf + 1;
+          nf++;
         }
       } else {
         globals[ng] = parse_global_decl();
-        ng = ng + 1;
+        ng++;
       }
       continue;
     }
@@ -2402,7 +2402,7 @@ struct Program *parse_program() {
       if (p_match(TK_OP, "{")) {
         cur_pos = saved;
         structs[ns] = parse_struct_or_union_def(is_union_kw);
-        ns = ns + 1;
+        ns++;
       } else if (p_match(TK_OP, ";")) {
         // Forward declaration: struct Foo; — just skip
         p_eat(TK_OP, ";");
@@ -2413,14 +2413,14 @@ struct Program *parse_program() {
           if (fd->nbody == 0 - 1) {
             proto_names[nprotos] = fd->name;
             proto_rip[nprotos] = fd->ret_is_ptr;
-            nprotos = nprotos + 1;
+            nprotos++;
           } else {
             funcs[nf] = fd;
-            nf = nf + 1;
+            nf++;
           }
         } else {
           globals[ng] = parse_global_decl();
-          ng = ng + 1;
+          ng++;
         }
       }
     } else {
@@ -2429,14 +2429,14 @@ struct Program *parse_program() {
         if (fd->nbody == 0 - 1) {
           proto_names[nprotos] = fd->name;
           proto_rip[nprotos] = fd->ret_is_ptr;
-          nprotos = nprotos + 1;
+          nprotos++;
         } else {
           funcs[nf] = fd;
-          nf = nf + 1;
+          nf++;
         }
       } else {
         globals[ng] = parse_global_decl();
-        ng = ng + 1;
+        ng++;
       }
     }
   }
@@ -2460,7 +2460,7 @@ int cg_is_global(int *name) {
   int i = 0;
   while (i < ncg_g) {
     if (my_strcmp(cg_gnames[i], name) == 0) { return 1; }
-    i = i + 1;
+    i++;
   }
   return 0;
 }
@@ -2469,7 +2469,7 @@ int cg_global_is_array(int *name) {
   int i = 0;
   while (i < ncg_g) {
     if (my_strcmp(cg_gnames[i], name) == 0) { return cg_gis_array[i]; }
-    i = i + 1;
+    i++;
   }
   return 0;
 }
@@ -2478,7 +2478,7 @@ int func_returns_ptr(int *name) {
   int i = 0;
   while (i < n_ptr_ret) {
     if (my_strcmp(ptr_ret_names[i], name) == 0) { return 1; }
-    i = i + 1;
+    i++;
   }
   return 0;
 }
@@ -2487,13 +2487,13 @@ int is_known_func(int *name) {
   int i = 0;
   while (i < nknown_funcs) {
     if (my_strcmp(known_funcs[i], name) == 0) { return 1; }
-    i = i + 1;
+    i++;
   }
   return 0;
 }
 
 int *cg_new_label(int *base) {
-  label_id = label_id + 1;
+  label_id++;
   int *num = int_to_str(label_id);
   int *tmp = build_str2("L_", base);
   int *tmp2 = build_str2(tmp, "_");
@@ -2506,7 +2506,7 @@ int cg_find_slot(int *name) {
     if (my_strcmp(lay_name[i], name) == 0) {
       return lay_off[i];
     }
-    i = i + 1;
+    i++;
   }
   return 0 - 1;
 }
@@ -2515,7 +2515,7 @@ int cg_is_array(int *name) {
   int i = 0;
   while (i < nlay_arr) {
     if (my_strcmp(lay_arr_name[i], name) == 0) { return 1; }
-    i = i + 1;
+    i++;
   }
   return 0;
 }
@@ -2524,7 +2524,7 @@ int cg_is_structvar(int *name) {
   int i = 0;
   while (i < nlay_sv) {
     if (my_strcmp(lay_sv_name[i], name) == 0) { return 1; }
-    i = i + 1;
+    i++;
   }
   return 0;
 }
@@ -2533,7 +2533,7 @@ int *cg_structvar_type(int *name) {
   int i = 0;
   while (i < nlay_sv) {
     if (my_strcmp(lay_sv_name[i], name) == 0) { return lay_sv_type[i]; }
-    i = i + 1;
+    i++;
   }
   return 0;
 }
@@ -2542,7 +2542,7 @@ int *cg_ptr_structvar_type(int *name) {
   int i = 0;
   while (i < nlay_psv) {
     if (my_strcmp(lay_psv_name[i], name) == 0) { return lay_psv_type[i]; }
-    i = i + 1;
+    i++;
   }
   return 0;
 }
@@ -2564,13 +2564,13 @@ int cg_field_index(int *sname, int *fname) {
         if (cg_sfield_types[i][j] != 0) {
           slot = slot + cg_struct_nfields(cg_sfield_types[i][j]);
         } else {
-          slot = slot + 1;
+          slot++;
         }
-        j = j + 1;
+        j++;
       }
       my_fatal("field not found in codegen");
     }
-    i = i + 1;
+    i++;
   }
   my_fatal("struct not found in codegen");
   return 0 - 1;
@@ -2588,13 +2588,13 @@ int cg_struct_nfields(int *sname) {
         if (cg_sfield_types[i][j] != 0) {
           total = total + cg_struct_nfields(cg_sfield_types[i][j]);
         } else {
-          total = total + 1;
+          total++;
         }
-        j = j + 1;
+        j++;
       }
       return total;
     }
-    i = i + 1;
+    i++;
   }
   my_fatal("struct not found for nfields");
   return 0;
@@ -2606,13 +2606,13 @@ int *cg_intern_string(int *decoded) {
     if (my_strcmp(sp_decoded[i], decoded) == 0) {
       return sp_label[i];
     }
-    i = i + 1;
+    i++;
   }
   int *num = int_to_str(nsp + 1);
   int *lab = build_str2("l_.str_", num);
   sp_decoded[nsp] = my_strdup(decoded);
   sp_label[nsp] = lab;
-  nsp = nsp + 1;
+  nsp++;
   return lab;
 }
 
@@ -2627,11 +2627,11 @@ int *cg_decode_string(int *lit) {
     int c = __read_byte(lit, i);
     if (c != '\\') {
       __write_byte(buf, j, c);
-      j = j + 1;
-      i = i + 1;
+      j++;
+      i++;
       continue;
     }
-    i = i + 1;
+    i++;
     int ec = __read_byte(lit, i);
     if (ec == 'n') { __write_byte(buf, j, 10); }
     else if (ec == 't') { __write_byte(buf, j, 9); }
@@ -2646,38 +2646,38 @@ int *cg_decode_string(int *lit) {
     else if (ec == 'x') {
       // hex escape \xHH
       val = 0;
-      i = i + 1;
+      i++;
       while (i < slen) {
         ec = __read_byte(lit, i);
         if (ec >= '0' && ec <= '9') { val = val * 16 + (ec - '0'); }
         else if (ec >= 'a' && ec <= 'f') { val = val * 16 + (ec - 'a' + 10); }
         else if (ec >= 'A' && ec <= 'F') { val = val * 16 + (ec - 'A' + 10); }
         else { break; }
-        i = i + 1;
+        i++;
       }
       __write_byte(buf, j, val);
-      j = j + 1;
+      j++;
       continue;
     }
     else if (ec >= '0' && ec <= '7') {
       // octal escape \ooo
       val = ec - '0';
-      i = i + 1;
+      i++;
       if (i < slen && __read_byte(lit, i) >= '0' && __read_byte(lit, i) <= '7') {
         val = val * 8 + (__read_byte(lit, i) - '0');
-        i = i + 1;
+        i++;
         if (i < slen && __read_byte(lit, i) >= '0' && __read_byte(lit, i) <= '7') {
           val = val * 8 + (__read_byte(lit, i) - '0');
-          i = i + 1;
+          i++;
         }
       }
       __write_byte(buf, j, val);
-      j = j + 1;
+      j++;
       continue;
     }
     else { my_fatal("bad escape in string literal"); }
-    j = j + 1;
-    i = i + 1;
+    j++;
+    i++;
   }
   __write_byte(buf, j, 0);
   return buf;
@@ -2695,7 +2695,7 @@ int cg_emit_escaped_string(int *s) {
     else if (c == 9) { emit_ch('\\'); emit_ch('t'); }
     else if (c == 13) { emit_ch('\\'); emit_ch('r'); }
     else { emit_ch(c); }
-    i = i + 1;
+    i++;
   }
   return 0;
 }
@@ -2704,7 +2704,7 @@ int cg_emit_escaped_string(int *s) {
 int lay_add_slot(int *name, int off) {
   lay_name[nlay] = my_strdup(name);
   lay_off[nlay] = off;
-  nlay = nlay + 1;
+  nlay++;
   return 0;
 }
 
@@ -2727,31 +2727,31 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
           *offset = *offset + vd->arr_size * nf * 8;
           lay_sv_name[nlay_sv] = my_strdup(vd->name);
           lay_sv_type[nlay_sv] = my_strdup(vd->stype);
-          nlay_sv = nlay_sv + 1;
+          nlay_sv++;
           lay_arr_name[nlay_arr] = my_strdup(vd->name);
           lay_arr_count[nlay_arr] = vd->arr_size;
-          nlay_arr = nlay_arr + 1;
+          nlay_arr++;
         } else if (vd->stype != 0 && vd->is_ptr == 0) {
           nf = cg_struct_nfields(vd->stype);
           *offset = *offset + nf * 8;
           lay_sv_name[nlay_sv] = my_strdup(vd->name);
           lay_sv_type[nlay_sv] = my_strdup(vd->stype);
-          nlay_sv = nlay_sv + 1;
+          nlay_sv++;
         } else if (vd->arr_size >= 0) {
           *offset = *offset + vd->arr_size * 8;
           lay_arr_name[nlay_arr] = my_strdup(vd->name);
           lay_arr_count[nlay_arr] = vd->arr_size;
-          nlay_arr = nlay_arr + 1;
+          nlay_arr++;
         } else {
           *offset = *offset + 8;
           if (vd->stype != 0 && vd->is_ptr == 1) {
             lay_psv_name[nlay_psv] = my_strdup(vd->name);
             lay_psv_type[nlay_psv] = my_strdup(vd->stype);
-            nlay_psv = nlay_psv + 1;
+            nlay_psv++;
           }
         }
         lay_add_slot(vd->name, *offset);
-        j = j + 1;
+        j++;
       }
     } else if (st->kind == ST_IF) {
       lay_walk_stmts(st->body, st->nbody, offset);
@@ -2775,13 +2775,13 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
       int ci = 0;
       while (ci < st->ncases) {
         lay_walk_stmts(st->case_bodies[ci], st->case_nbodies[ci], offset);
-        ci = ci + 1;
+        ci++;
       }
       if (st->default_body != 0) {
         lay_walk_stmts(st->default_body, st->ndefault, offset);
       }
     }
-    i = i + 1;
+    i++;
   }
   return 0;
 }
@@ -2797,7 +2797,7 @@ int layout_func(struct FuncDef *f) {
   while (i < f->nparams) {
     offset = offset + 8;
     lay_add_slot(f->params[i], offset);
-    i = i + 1;
+    i++;
   }
 
   lay_walk_stmts(f->body, f->nbody, &offset);
@@ -3162,7 +3162,7 @@ int gen_value(struct Expr *e) {
           emit_s("\tstr\tx0, [sp, #");
           emit_num(vi * 8);
           emit_line("]");
-          vi = vi + 1;
+          vi++;
         }
       }
       gen_value(e->args[0]);
@@ -3195,7 +3195,7 @@ int gen_value(struct Expr *e) {
       while (ai < real_nargs) {
         gen_value(e->args[1 + ai]);
         emit_line("\tstr\tx0, [sp, #-16]!");
-        ai = ai + 1;
+        ai++;
       }
       // Load function pointer from bottom of stack into x8
       emit_s("\tldr\tx8, [sp, #");
@@ -3210,7 +3210,7 @@ int gen_value(struct Expr *e) {
         emit_s(", [sp, #");
         emit_num(disp);
         emit_line("]");
-        ai = ai + 1;
+        ai++;
       }
       // Pop all (args + function pointer)
       emit_s("\tadd\tsp, sp, #");
@@ -3230,7 +3230,7 @@ int gen_value(struct Expr *e) {
       while (ai < nargs) {
         gen_value(e->args[ai]);
         emit_line("\tstr\tx0, [sp, #-16]!");
-        ai = ai + 1;
+        ai++;
       }
       // Load function pointer from bottom of our stack into x8
       emit_s("\tldr\tx8, [sp, #");
@@ -3245,7 +3245,7 @@ int gen_value(struct Expr *e) {
         emit_s(", [sp, #");
         emit_num(disp);
         emit_line("]");
-        ai = ai + 1;
+        ai++;
       }
       // Pop all (args + function pointer)
       emit_s("\tadd\tsp, sp, #");
@@ -3260,7 +3260,7 @@ int gen_value(struct Expr *e) {
     while (ai < nargs) {
       gen_value(e->args[ai]);
       emit_line("\tstr\tx0, [sp, #-16]!");
-      ai = ai + 1;
+      ai++;
     }
     ai = 0;
     while (ai < nargs) {
@@ -3270,7 +3270,7 @@ int gen_value(struct Expr *e) {
       emit_s(", [sp, #");
       emit_num(disp);
       emit_line("]");
-      ai = ai + 1;
+      ai++;
     }
     emit_s("\tadd\tsp, sp, #");
     emit_num(nargs * 16);
@@ -3291,7 +3291,7 @@ int gen_block(struct Stmt **stmts, int nstmts, int *ret_label) {
   int i = 0;
   while (i < nstmts) {
     gen_stmt(stmts[i], ret_label);
-    i = i + 1;
+    i++;
   }
   return 0;
 }
@@ -3347,10 +3347,10 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
               emit_ch('\n');
               emit_line("\tstr\tx0, [x9]");
             }
-            k = k + 1;
+            k++;
           }
         }
-        i = i + 1;
+        i++;
         continue;
       }
       // Array with initializer list or string
@@ -3371,7 +3371,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
               emit_ch('\n');
               emit_line("\tstr\tx0, [x9]");
             }
-            k = k + 1;
+            k++;
           }
         } else if (vd->init != 0 && vd->init->kind == ND_STRLIT) {
           // String initializer: char s[] = "hello";
@@ -3395,10 +3395,10 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
               emit_ch('\n');
               emit_line("\tstr\tx0, [x9]");
             }
-            k = k + 1;
+            k++;
           }
         }
-        i = i + 1;
+        i++;
         continue;
       }
       int off = cg_find_slot(vd->name);
@@ -3418,7 +3418,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
         emit_line("\tsub\tx9, x29, x9");
         emit_line("\tstr\tx0, [x9]");
       }
-      i = i + 1;
+      i++;
     }
     return 0;
   }
@@ -3448,7 +3448,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
     end_l = cg_new_label("while_end");
     loop_brk[nloop] = end_l;
     loop_cont[nloop] = start_l;
-    nloop = nloop + 1;
+    nloop++;
 
     emit_s(start_l); emit_line(":");
     gen_value(st->expr);
@@ -3458,7 +3458,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
     emit_s("\tb\t"); emit_line(start_l);
     emit_s(end_l); emit_line(":");
 
-    nloop = nloop - 1;
+    nloop--;
     return 0;
   }
 
@@ -3473,7 +3473,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
 
     loop_brk[nloop] = end_l;
     loop_cont[nloop] = post_l;
-    nloop = nloop + 1;
+    nloop++;
 
     emit_s(start_l); emit_line(":");
     if (st->expr != 0) {
@@ -3492,7 +3492,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
     emit_s("\tb\t"); emit_line(start_l);
     emit_s(end_l); emit_line(":");
 
-    nloop = nloop - 1;
+    nloop--;
     return 0;
   }
 
@@ -3512,7 +3512,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
     cont_l = cg_new_label("dowhile_cont");
     loop_brk[nloop] = end_l;
     loop_cont[nloop] = cont_l;
-    nloop = nloop + 1;
+    nloop++;
 
     emit_s(start_l); emit_line(":");
     gen_block(st->body, st->nbody, ret_label);
@@ -3522,7 +3522,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
     emit_s("\tb.ne\t"); emit_line(start_l);
     emit_s(end_l); emit_line(":");
 
-    nloop = nloop - 1;
+    nloop--;
     return 0;
   }
 
@@ -3546,7 +3546,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
   if (st->kind == ST_SWITCH) {
     end_l = cg_new_label("sw_end");
     loop_brk[nloop] = end_l;
-    nloop = nloop + 1;
+    nloop++;
 
     // Evaluate condition, push to stack
     gen_value(st->expr);
@@ -3564,7 +3564,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
       emit_ch('\n');
       emit_line("\tcmp\tx0, x1");
       emit_s("\tb.eq\t"); emit_line(tl);
-      ci = ci + 1;
+      ci++;
     }
 
     // After all comparisons: jump to default or end
@@ -3589,7 +3589,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
       emit_s(tramp_labels[ci]); emit_line(":");
       emit_line("\tadd\tsp, sp, #16");
       emit_s("\tb\t"); emit_line(bl);
-      ci = ci + 1;
+      ci++;
     }
 
     // Case bodies (with fall-through)
@@ -3597,7 +3597,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
     while (ci < st->ncases) {
       emit_s(body_labels[ci]); emit_line(":");
       gen_block(st->case_bodies[ci], st->case_nbodies[ci], ret_label);
-      ci = ci + 1;
+      ci++;
     }
 
     // Default body
@@ -3607,7 +3607,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
     }
 
     emit_s(end_l); emit_line(":");
-    nloop = nloop - 1;
+    nloop--;
     return 0;
   }
 
@@ -3657,7 +3657,7 @@ int gen_func(struct FuncDef *f) {
       emit_num(i);
       emit_line(", [x9]");
     }
-    i = i + 1;
+    i++;
   }
 
   gen_block(f->body, f->nbody, ret_label);
@@ -3697,9 +3697,9 @@ int codegen(struct Program *prog) {
   while (pi < prog->nprotos) {
     if (prog->proto_ret_is_ptr[pi] != 0) {
       ptr_ret_names[n_ptr_ret] = prog->proto_names[pi];
-      n_ptr_ret = n_ptr_ret + 1;
+      n_ptr_ret++;
     }
-    pi = pi + 1;
+    pi++;
   }
   // Register ptr-returning functions from definitions
   pi = 0;
@@ -3707,9 +3707,9 @@ int codegen(struct Program *prog) {
     fd = prog->funcs[pi];
     if (fd->ret_is_ptr != 0) {
       ptr_ret_names[n_ptr_ret] = fd->name;
-      n_ptr_ret = n_ptr_ret + 1;
+      n_ptr_ret++;
     }
-    pi = pi + 1;
+    pi++;
   }
 
   // Register all known function names (for function pointer support)
@@ -3717,15 +3717,15 @@ int codegen(struct Program *prog) {
   pi = 0;
   while (pi < prog->nprotos) {
     known_funcs[nknown_funcs] = prog->proto_names[pi];
-    nknown_funcs = nknown_funcs + 1;
-    pi = pi + 1;
+    nknown_funcs++;
+    pi++;
   }
   pi = 0;
   while (pi < prog->nfuncs) {
     fd = prog->funcs[pi];
     known_funcs[nknown_funcs] = fd->name;
-    nknown_funcs = nknown_funcs + 1;
-    pi = pi + 1;
+    nknown_funcs++;
+    pi++;
   }
 
   // Register global variables
@@ -3736,8 +3736,8 @@ int codegen(struct Program *prog) {
     cg_gnames[ncg_g] = gd->name;
     cg_gis_array[ncg_g] = 0;
     if (gd->array_size >= 0) { cg_gis_array[ncg_g] = 1; }
-    ncg_g = ncg_g + 1;
-    gi = gi + 1;
+    ncg_g++;
+    gi++;
   }
 
   // Register struct/union definitions
@@ -3749,8 +3749,8 @@ int codegen(struct Program *prog) {
     cg_sfield_types[ncg_s] = sd->field_types;
     cg_snfields[ncg_s] = sd->nfields;
     cg_s_is_union[ncg_s] = sd->is_union;
-    ncg_s = ncg_s + 1;
-    i = i + 1;
+    ncg_s++;
+    i++;
   }
 
   emit_line("\t.text");
@@ -3758,7 +3758,7 @@ int codegen(struct Program *prog) {
   i = 0;
   while (i < prog->nfuncs) {
     gen_func(prog->funcs[i]);
-    i = i + 1;
+    i++;
   }
 
   // String pool
@@ -3771,7 +3771,7 @@ int codegen(struct Program *prog) {
       emit_s("\t.asciz\t\"");
       cg_emit_escaped_string(sp_decoded[i]);
       emit_line("\"");
-      i = i + 1;
+      i++;
     }
   }
 
@@ -3797,7 +3797,7 @@ int codegen(struct Program *prog) {
           } else {
             emit_line("\t.quad\t0");
           }
-          k = k + 1;
+          k++;
         }
       } else if (gd->array_size >= 0 && gd->init_str != 0) {
         // String-initialized array: emit .quad per character
@@ -3811,7 +3811,7 @@ int codegen(struct Program *prog) {
         while (k < slen && k < gd->array_size) {
           ch = __read_byte(decoded, k);
           emit_s("\t.quad\t"); emit_num(ch); emit_ch('\n');
-          k = k + 1;
+          k++;
         }
       } else if (gd->array_size >= 0) {
         // Uninitialized array: use .comm
@@ -3842,7 +3842,7 @@ int codegen(struct Program *prog) {
         emit_s(gd->name);
         emit_line(", 8, 3");
       }
-      i = i + 1;
+      i++;
     }
   }
 
@@ -3860,7 +3860,7 @@ int main(int argc, int *argv) {
     int *arg = argv[i];
     if (my_strcmp(arg, "-o") == 0) {
       if (i + 1 >= argc) { my_fatal("missing arg for -o"); }
-      i = i + 1;
+      i++;
       out_path = argv[i];
     } else if (__read_byte(arg, 0) == '-') {
       printf("Unknown option: %s\n", arg);
@@ -3869,7 +3869,7 @@ int main(int argc, int *argv) {
       if (c_path != 0) { my_fatal("multiple input files"); }
       c_path = arg;
     }
-    i = i + 1;
+    i++;
   }
 
   if (c_path == 0) {
@@ -3888,7 +3888,7 @@ int main(int argc, int *argv) {
   int ch = fgetc(f);
   while (ch != 0 - 1) {
     __write_byte(srcbuf, srclen, ch);
-    srclen = srclen + 1;
+    srclen++;
     ch = fgetc(f);
   }
   __write_byte(srcbuf, srclen, 0);
@@ -3909,13 +3909,13 @@ int main(int argc, int *argv) {
     // Skip leading whitespace to check for #
     si = ci;
     while (si < srclen && (__read_byte(srcbuf, si) == ' ' || __read_byte(srcbuf, si) == '\t')) {
-      si = si + 1;
+      si++;
     }
     if (si < srclen && __read_byte(srcbuf, si) == '#') {
-      si = si + 1;
+      si++;
       // skip whitespace after #
       while (si < srclen && (__read_byte(srcbuf, si) == ' ' || __read_byte(srcbuf, si) == '\t')) {
-        si = si + 1;
+        si++;
       }
       // Check for "define"
       if (si + 6 <= srclen &&
@@ -3925,13 +3925,13 @@ int main(int argc, int *argv) {
           (__read_byte(srcbuf, si + 6) == ' ' || __read_byte(srcbuf, si + 6) == '\t')) {
         si = si + 6;
         while (si < srclen && (__read_byte(srcbuf, si) == ' ' || __read_byte(srcbuf, si) == '\t')) {
-          si = si + 1;
+          si++;
         }
         // Read macro name
         nstart = si;
         while (si < srclen && __read_byte(srcbuf, si) != ' ' && __read_byte(srcbuf, si) != '\t' &&
                __read_byte(srcbuf, si) != '\n' && __read_byte(srcbuf, si) != '(') {
-          si = si + 1;
+          si++;
         }
         nend = si;
         // Skip function-like macros
@@ -3940,43 +3940,43 @@ int main(int argc, int *argv) {
         } else {
           // skip whitespace
           while (si < srclen && (__read_byte(srcbuf, si) == ' ' || __read_byte(srcbuf, si) == '\t')) {
-            si = si + 1;
+            si++;
           }
           // Read value until end of line
           vstart = si;
           while (si < srclen && __read_byte(srcbuf, si) != '\n') {
-            si = si + 1;
+            si++;
           }
           // Trim trailing whitespace
           vend = si;
           while (vend > vstart && (__read_byte(srcbuf, vend - 1) == ' ' || __read_byte(srcbuf, vend - 1) == '\t')) {
-            vend = vend - 1;
+            vend--;
           }
           macro_names[nmacros] = make_str(srcbuf, nstart, nend - nstart);
           macro_values[nmacros] = make_str(srcbuf, vstart, vend - vstart);
-          nmacros = nmacros + 1;
+          nmacros++;
         }
       }
       // Skip entire line
       while (ci < srclen && __read_byte(srcbuf, ci) != '\n') {
-        ci = ci + 1;
+        ci++;
       }
       if (ci < srclen) {
         __write_byte(cleaned, co, '\n');
-        co = co + 1;
-        ci = ci + 1;
+        co++;
+        ci++;
       }
     } else {
       // Copy line
       while (ci < srclen && __read_byte(srcbuf, ci) != '\n') {
         __write_byte(cleaned, co, __read_byte(srcbuf, ci));
-        co = co + 1;
-        ci = ci + 1;
+        co++;
+        ci++;
       }
       if (ci < srclen) {
         __write_byte(cleaned, co, '\n');
-        co = co + 1;
-        ci = ci + 1;
+        co++;
+        ci++;
       }
     }
   }
@@ -4000,48 +4000,48 @@ int main(int argc, int *argv) {
       // Skip string literals
       if (__read_byte(cleaned, ei) == '"') {
         __write_byte(expanded, eo, __read_byte(cleaned, ei));
-        ei = ei + 1;
-        eo = eo + 1;
+        ei++;
+        eo++;
         while (ei < co && __read_byte(cleaned, ei) != '"') {
           if (__read_byte(cleaned, ei) == '\\' && ei + 1 < co) {
             __write_byte(expanded, eo, __read_byte(cleaned, ei));
-            ei = ei + 1;
-            eo = eo + 1;
+            ei++;
+            eo++;
           }
           __write_byte(expanded, eo, __read_byte(cleaned, ei));
-          ei = ei + 1;
-          eo = eo + 1;
+          ei++;
+          eo++;
         }
         if (ei < co) {
           __write_byte(expanded, eo, __read_byte(cleaned, ei));
-          ei = ei + 1;
-          eo = eo + 1;
+          ei++;
+          eo++;
         }
       } else if (__read_byte(cleaned, ei) == '\'') {
         // Skip char literals
         __write_byte(expanded, eo, __read_byte(cleaned, ei));
-        ei = ei + 1;
-        eo = eo + 1;
+        ei++;
+        eo++;
         while (ei < co && __read_byte(cleaned, ei) != '\'') {
           if (__read_byte(cleaned, ei) == '\\' && ei + 1 < co) {
             __write_byte(expanded, eo, __read_byte(cleaned, ei));
-            ei = ei + 1;
-            eo = eo + 1;
+            ei++;
+            eo++;
           }
           __write_byte(expanded, eo, __read_byte(cleaned, ei));
-          ei = ei + 1;
-          eo = eo + 1;
+          ei++;
+          eo++;
         }
         if (ei < co) {
           __write_byte(expanded, eo, __read_byte(cleaned, ei));
-          ei = ei + 1;
-          eo = eo + 1;
+          ei++;
+          eo++;
         }
       } else if (is_alpha(__read_byte(cleaned, ei))) {
         // Identifier — check against macros
         istart = ei;
         while (ei < co && is_alnum(__read_byte(cleaned, ei))) {
-          ei = ei + 1;
+          ei++;
         }
         ilen = ei - istart;
         found = 0;
@@ -4054,27 +4054,27 @@ int main(int argc, int *argv) {
             vi = 0;
             while (vi < vlen) {
               __write_byte(expanded, eo, __read_byte(macro_values[mc], vi));
-              eo = eo + 1;
-              vi = vi + 1;
+              eo++;
+              vi++;
             }
             found = 1;
             mc = nmacros; // break
           }
-          mc = mc + 1;
+          mc++;
         }
         if (found == 0) {
           // Copy identifier as-is
           ki = istart;
           while (ki < ei) {
             __write_byte(expanded, eo, __read_byte(cleaned, ki));
-            eo = eo + 1;
-            ki = ki + 1;
+            eo++;
+            ki++;
           }
         }
       } else {
         __write_byte(expanded, eo, __read_byte(cleaned, ei));
-        ei = ei + 1;
-        eo = eo + 1;
+        ei++;
+        eo++;
       }
     }
     __write_byte(expanded, eo, 0);
@@ -4106,14 +4106,14 @@ int main(int argc, int *argv) {
       break;
     }
     if (__read_byte(c_path, pi) == '/') { break; }
-    pi = pi - 1;
+    pi--;
   }
   int k = 0;
   if (dot >= 0) {
     k = 0;
     while (k < dot) {
       __write_byte(s_path, k, __read_byte(c_path, k));
-      k = k + 1;
+      k++;
     }
     __write_byte(s_path, dot, '.');
     __write_byte(s_path, dot + 1, 's');
@@ -4122,7 +4122,7 @@ int main(int argc, int *argv) {
     k = 0;
     while (k < pathlen) {
       __write_byte(s_path, k, __read_byte(c_path, k));
-      k = k + 1;
+      k++;
     }
     __write_byte(s_path, pathlen, '.');
     __write_byte(s_path, pathlen + 1, 's');
@@ -4134,7 +4134,7 @@ int main(int argc, int *argv) {
   int wi = 0;
   while (wi < outlen) {
     fputc(__read_byte(outbuf, wi), sf);
-    wi = wi + 1;
+    wi++;
   }
   fclose(sf);
 
@@ -4145,27 +4145,27 @@ int main(int argc, int *argv) {
   int ci2 = 0;
   while (__read_byte(clang_str, ci2) != 0) {
     __write_byte(cmd, cpos, __read_byte(clang_str, ci2));
-    cpos = cpos + 1;
-    ci2 = ci2 + 1;
+    cpos++;
+    ci2++;
   }
   ci2 = 0;
   while (__read_byte(s_path, ci2) != 0) {
     __write_byte(cmd, cpos, __read_byte(s_path, ci2));
-    cpos = cpos + 1;
-    ci2 = ci2 + 1;
+    cpos++;
+    ci2++;
   }
   int *o_str = " -o ";
   ci2 = 0;
   while (__read_byte(o_str, ci2) != 0) {
     __write_byte(cmd, cpos, __read_byte(o_str, ci2));
-    cpos = cpos + 1;
-    ci2 = ci2 + 1;
+    cpos++;
+    ci2++;
   }
   ci2 = 0;
   while (__read_byte(out_path, ci2) != 0) {
     __write_byte(cmd, cpos, __read_byte(out_path, ci2));
-    cpos = cpos + 1;
-    ci2 = ci2 + 1;
+    cpos++;
+    ci2++;
   }
   __write_byte(cmd, cpos, 0);
 
