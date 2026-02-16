@@ -263,10 +263,8 @@ int *my_malloc(int size) {
 int *my_strdup(int *s) {
   int len = strlen(s);
   int *p = my_malloc(len + 1);
-  int i = 0;
-  while (i <= len) {
+  for (int i = 0; i <= len; i++) {
     __write_byte(p, i, __read_byte(s, i));
-    i++;
   }
   return p;
 }
@@ -383,10 +381,8 @@ int *build_str2(int *a, int *b) {
     __write_byte(buf, i, __read_byte(a, i));
     i++;
   }
-  int j = 0;
-  while (j < lb) {
+  for (int j = 0; j < lb; j++) {
     __write_byte(buf, i + j, __read_byte(b, j));
-    j++;
   }
   __write_byte(buf, la + lb, 0);
   return buf;
@@ -420,10 +416,8 @@ int *int_to_str(int n) {
     __write_byte(result, 0, '-');
     pos = 1;
   }
-  int k = 0;
-  while (k < len) {
+  for (int k = 0; k < len; k++) {
     __write_byte(result, pos + k, buf[len - 1 - k]);
-    k++;
   }
   __write_byte(result, total, 0);
   return result;
@@ -432,10 +426,8 @@ int *int_to_str(int n) {
 // Make a substring as a proper char* string
 int *make_str(int *src, int start, int len) {
   int *buf = my_malloc(len + 1);
-  int i = 0;
-  while (i < len) {
+  for (int i = 0; i < len; i++) {
     __write_byte(buf, i, __read_byte(src, start + i));
-    i++;
   }
   __write_byte(buf, len, 0);
   return buf;
@@ -780,14 +772,12 @@ struct SDefInfo *find_sdef(int *name) {
 int *field_stype(int *sname, int *fname) {
   struct SDefInfo *sd = find_sdef(sname);
   if (sd == 0) { my_fatal("unknown struct in field_stype"); }
-  int i = 0;
-  while (i < sd->nflds) {
+  for (int i = 0; i < sd->nflds; i++) {
     struct SFieldInfo *fi = sd->flds[i];
     if (my_strcmp(fi->name, fname) == 0) {
       if (fi->stype != 0) { return fi->stype; }
       my_fatal("field is not a struct type");
     }
-    i++;
   }
   my_fatal("struct has no such field");
   return 0;
@@ -1059,12 +1049,10 @@ int *find_typedef(int *name) {
 }
 
 int has_typedef(int *name) {
-  int i = 0;
-  while (i < ntd) {
+  for (int i = 0; i < ntd; i++) {
     if (my_strcmp(td_name[i], name) == 0) {
       return 1;
     }
-    i++;
   }
   return 0;
 }
@@ -1470,12 +1458,10 @@ int find_enum_const(int *name) {
 }
 
 int has_enum_const(int *name) {
-  int i = 0;
-  while (i < nec) {
+  for (int i = 0; i < nec; i++) {
     if (my_strcmp(ec_name[i], name) == 0) {
       return 1;
     }
-    i++;
   }
   return 0;
 }
@@ -1560,11 +1546,9 @@ struct Expr *parse_primary() {
         int na = 0;
         new_args[0] = e;
         na = 1;
-        int ai = 0;
-        while (ai < ic_nargs) {
+        for (int ai = 0; ai < ic_nargs; ai++) {
           new_args[na] = ic_args[ai];
           na++;
-          ai++;
         }
         e = new_call("__indirect_call", new_args, na);
       }
@@ -1898,14 +1882,12 @@ struct SDef *parse_struct_or_union_def(int is_union) {
 
   // Build field_types array
   int **ftypes = my_malloc(64 * 8);
-  int fti = 0;
-  while (fti < nf) {
+  for (int fti = 0; fti < nf; fti++) {
     if (finfo[fti]->stype != 0 && finfo[fti]->is_ptr == 0) {
       ftypes[fti] = my_strdup(finfo[fti]->stype);
     } else {
       ftypes[fti] = 0;
     }
-    fti++;
   }
 
   struct SDef *sd = my_malloc(48);
@@ -2583,14 +2565,12 @@ int cg_struct_nfields(int *sname) {
       // Unions: all fields overlap, allocate 1 slot
       if (cg_s_is_union[i]) { return 1; }
       int total = 0;
-      int j = 0;
-      while (j < cg_snfields[i]) {
+      for (int j = 0; j < cg_snfields[i]; j++) {
         if (cg_sfield_types[i][j] != 0) {
           total += cg_struct_nfields(cg_sfield_types[i][j]);
         } else {
           total++;
         }
-        j++;
       }
       return total;
     }
@@ -2714,8 +2694,7 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
   while (i < nstmts) {
     struct Stmt *st = stmts[i];
     if (st->kind == ST_VARDECL) {
-      int j = 0;
-      while (j < st->ndecls) {
+      for (int j = 0; j < st->ndecls; j++) {
         struct VarDecl *vd = st->decls[j];
         if (cg_find_slot(vd->name) >= 0) {
           printf("cc: duplicate variable '%s'\n", vd->name);
@@ -2751,7 +2730,6 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
           }
         }
         lay_add_slot(vd->name, *offset);
-        j++;
       }
     } else if (st->kind == ST_IF) {
       lay_walk_stmts(st->body, st->nbody, offset);
@@ -2772,10 +2750,8 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
     } else if (st->kind == ST_LABEL) {
       lay_walk_stmts(st->body, st->nbody, offset);
     } else if (st->kind == ST_SWITCH) {
-      int ci = 0;
-      while (ci < st->ncases) {
+      for (int ci = 0; ci < st->ncases; ci++) {
         lay_walk_stmts(st->case_bodies[ci], st->case_nbodies[ci], offset);
-        ci++;
       }
       if (st->default_body != 0) {
         lay_walk_stmts(st->default_body, st->ndefault, offset);
@@ -2793,11 +2769,9 @@ int layout_func(struct FuncDef *f) {
   nlay_psv = 0;
   int offset = 0;
 
-  int i = 0;
-  while (i < f->nparams) {
+  for (int i = 0; i < f->nparams; i++) {
     offset += 8;
     lay_add_slot(f->params[i], offset);
-    i++;
   }
 
   lay_walk_stmts(f->body, f->nbody, &offset);
@@ -3156,13 +3130,11 @@ int gen_value(struct Expr *e) {
         emit_s("\tsub\tsp, sp, #");
         emit_num(var_space);
         emit_ch('\n');
-        int vi = 0;
-        while (vi < n_var) {
+        for (int vi = 0; vi < n_var; vi++) {
           gen_value(e->args[vi + 1]);
           emit_s("\tstr\tx0, [sp, #");
           emit_num(vi * 8);
           emit_line("]");
-          vi++;
         }
       }
       gen_value(e->args[0]);
@@ -3288,10 +3260,8 @@ int gen_value(struct Expr *e) {
 }
 
 int gen_block(struct Stmt **stmts, int nstmts, int *ret_label) {
-  int i = 0;
-  while (i < nstmts) {
+  for (int i = 0; i < nstmts; i++) {
     gen_stmt(stmts[i], ret_label);
-    i++;
   }
   return 0;
 }
@@ -3639,8 +3609,7 @@ int gen_func(struct FuncDef *f) {
     }
   }
 
-  int i = 0;
-  while (i < f->nparams) {
+  for (int i = 0; i < f->nparams; i++) {
     int off = cg_find_slot(f->params[i]);
     if (off <= 255) {
       emit_s("\tstr\tx");
@@ -3657,7 +3626,6 @@ int gen_func(struct FuncDef *f) {
       emit_num(i);
       emit_line(", [x9]");
     }
-    i++;
   }
 
   gen_block(f->body, f->nbody, ret_label);
@@ -3730,14 +3698,12 @@ int codegen(struct Program *prog) {
 
   // Register global variables
   ncg_g = 0;
-  int gi = 0;
-  while (gi < prog->nglobals) {
+  for (int gi = 0; gi < prog->nglobals; gi++) {
     gd = prog->globals[gi];
     cg_gnames[ncg_g] = gd->name;
     cg_gis_array[ncg_g] = 0;
     if (gd->array_size >= 0) { cg_gis_array[ncg_g] = 1; }
     ncg_g++;
-    gi++;
   }
 
   // Register struct/union definitions
@@ -4131,10 +4097,8 @@ int main(int argc, int *argv) {
 
   int *sf = fopen(s_path, "w");
   if (sf == 0) { my_fatal("cannot write .s file"); }
-  int wi = 0;
-  while (wi < outlen) {
+  for (int wi = 0; wi < outlen; wi++) {
     fputc(__read_byte(outbuf, wi), sf);
-    wi++;
   }
   fclose(sf);
 
