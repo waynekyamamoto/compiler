@@ -20,7 +20,92 @@ static char *read_file(const char *path) {
     return buf;
 }
 
+/* Simple #define macro table */
+typedef struct {
+    char *name;
+    char *value;
+} Macro;
+
+static Macro macros[256];
+static int nmacros;
+
+static void add_macro(const char *name, const char *value) {
+    /* Overwrite if exists */
+    for (int i = 0; i < nmacros; i++) {
+        if (strcmp(macros[i].name, name) == 0) {
+            free(macros[i].value);
+            macros[i].value = xstrdup(value);
+            return;
+        }
+    }
+    macros[nmacros].name = xstrdup(name);
+    macros[nmacros].value = xstrdup(value);
+    nmacros++;
+}
+
+static int is_ident_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+static char *expand_macros(const char *src) {
+    if (nmacros == 0) return xstrdup(src);
+    Buf b;
+    buf_init(&b);
+    int len = strlen(src);
+    int i = 0;
+    while (i < len) {
+        /* Skip string literals */
+        if (src[i] == '"') {
+            buf_push(&b, src[i++]);
+            while (i < len && src[i] != '"') {
+                if (src[i] == '\\' && i + 1 < len) {
+                    buf_push(&b, src[i++]);
+                }
+                buf_push(&b, src[i++]);
+            }
+            if (i < len) buf_push(&b, src[i++]);
+            continue;
+        }
+        /* Skip char literals */
+        if (src[i] == '\'') {
+            buf_push(&b, src[i++]);
+            while (i < len && src[i] != '\'') {
+                if (src[i] == '\\' && i + 1 < len) {
+                    buf_push(&b, src[i++]);
+                }
+                buf_push(&b, src[i++]);
+            }
+            if (i < len) buf_push(&b, src[i++]);
+            continue;
+        }
+        /* Try to match an identifier */
+        if ((src[i] >= 'a' && src[i] <= 'z') || (src[i] >= 'A' && src[i] <= 'Z') || src[i] == '_') {
+            int start = i;
+            while (i < len && is_ident_char(src[i])) i++;
+            int ilen = i - start;
+            /* Check against macros */
+            int found = 0;
+            for (int m = 0; m < nmacros; m++) {
+                if ((int)strlen(macros[m].name) == ilen &&
+                    strncmp(src + start, macros[m].name, ilen) == 0) {
+                    buf_append(&b, macros[m].value);
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                for (int k = start; k < i; k++) buf_push(&b, src[k]);
+            }
+            continue;
+        }
+        buf_push(&b, src[i++]);
+    }
+    return buf_detach(&b);
+}
+
 static char *strip_preprocessor(const char *src) {
+    nmacros = 0;
     Buf b;
     buf_init(&b);
     const char *p = src;
@@ -30,8 +115,44 @@ static char *strip_preprocessor(const char *src) {
         /* Skip leading whitespace */
         while (*p == ' ' || *p == '\t') p++;
         if (*p == '#') {
-            /* Skip entire line */
-            while (*p && *p != '\n') p++;
+            p++; /* skip '#' */
+            while (*p == ' ' || *p == '\t') p++;
+            /* Check for #define */
+            if (strncmp(p, "define", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
+                p += 6;
+                while (*p == ' ' || *p == '\t') p++;
+                /* Read macro name */
+                const char *name_start = p;
+                while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '(') p++;
+                int name_len = p - name_start;
+                char *name = xmalloc(name_len + 1);
+                memcpy(name, name_start, name_len);
+                name[name_len] = '\0';
+                /* Skip function-like macros (with parentheses) */
+                if (*p == '(') {
+                    /* Skip entire line */
+                    while (*p && *p != '\n') p++;
+                    free(name);
+                } else {
+                    /* Read value (rest of line, trimmed) */
+                    while (*p == ' ' || *p == '\t') p++;
+                    const char *val_start = p;
+                    while (*p && *p != '\n') p++;
+                    /* Trim trailing whitespace */
+                    const char *val_end = p;
+                    while (val_end > val_start && (val_end[-1] == ' ' || val_end[-1] == '\t')) val_end--;
+                    int val_len = val_end - val_start;
+                    char *value = xmalloc(val_len + 1);
+                    memcpy(value, val_start, val_len);
+                    value[val_len] = '\0';
+                    add_macro(name, value);
+                    free(name);
+                    free(value);
+                }
+            } else {
+                /* Skip entire line (other preprocessor directives) */
+                while (*p && *p != '\n') p++;
+            }
             if (*p == '\n') {
                 buf_push(&b, '\n');
                 p++;
@@ -49,7 +170,10 @@ static char *strip_preprocessor(const char *src) {
             }
         }
     }
-    return buf_detach(&b);
+    char *stripped = buf_detach(&b);
+    char *expanded = expand_macros(stripped);
+    free(stripped);
+    return expanded;
 }
 
 static char *change_extension(const char *path, const char *new_ext) {

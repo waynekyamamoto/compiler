@@ -222,6 +222,11 @@ int nec;
 // Current function name for goto label mangling
 int *cg_cur_func_name;
 
+// Macro table for #define
+int *macro_names[256];
+int *macro_values[256];
+int nmacros;
+
 // ---- Utility functions ----
 
 int my_fatal(int *msg) {
@@ -3119,17 +3124,69 @@ int main(int argc, int *argv) {
   __write_byte(srcbuf, srclen, 0);
   fclose(f);
 
-  // Strip preprocessor lines
+  // Strip preprocessor lines and collect #define macros
+  nmacros = 0;
   int *cleaned = my_malloc(srclen + 1);
   int ci = 0;
   int co = 0;
+  int si = 0;
+  int mc = 0;
+  int nstart = 0;
+  int nend = 0;
+  int vstart = 0;
+  int vend = 0;
   while (ci < srclen) {
     // Skip leading whitespace to check for #
-    int si = ci;
+    si = ci;
     while (si < srclen && (__read_byte(srcbuf, si) == ' ' || __read_byte(srcbuf, si) == '\t')) {
       si = si + 1;
     }
     if (si < srclen && __read_byte(srcbuf, si) == '#') {
+      si = si + 1;
+      // skip whitespace after #
+      while (si < srclen && (__read_byte(srcbuf, si) == ' ' || __read_byte(srcbuf, si) == '\t')) {
+        si = si + 1;
+      }
+      // Check for "define"
+      if (si + 6 <= srclen &&
+          __read_byte(srcbuf, si) == 'd' && __read_byte(srcbuf, si + 1) == 'e' &&
+          __read_byte(srcbuf, si + 2) == 'f' && __read_byte(srcbuf, si + 3) == 'i' &&
+          __read_byte(srcbuf, si + 4) == 'n' && __read_byte(srcbuf, si + 5) == 'e' &&
+          (__read_byte(srcbuf, si + 6) == ' ' || __read_byte(srcbuf, si + 6) == '\t')) {
+        si = si + 6;
+        while (si < srclen && (__read_byte(srcbuf, si) == ' ' || __read_byte(srcbuf, si) == '\t')) {
+          si = si + 1;
+        }
+        // Read macro name
+        nstart = si;
+        while (si < srclen && __read_byte(srcbuf, si) != ' ' && __read_byte(srcbuf, si) != '\t' &&
+               __read_byte(srcbuf, si) != '\n' && __read_byte(srcbuf, si) != '(') {
+          si = si + 1;
+        }
+        nend = si;
+        // Skip function-like macros
+        if (si < srclen && __read_byte(srcbuf, si) == '(') {
+          // skip line
+        } else {
+          // skip whitespace
+          while (si < srclen && (__read_byte(srcbuf, si) == ' ' || __read_byte(srcbuf, si) == '\t')) {
+            si = si + 1;
+          }
+          // Read value until end of line
+          vstart = si;
+          while (si < srclen && __read_byte(srcbuf, si) != '\n') {
+            si = si + 1;
+          }
+          // Trim trailing whitespace
+          vend = si;
+          while (vend > vstart && (__read_byte(srcbuf, vend - 1) == ' ' || __read_byte(srcbuf, vend - 1) == '\t')) {
+            vend = vend - 1;
+          }
+          macro_names[nmacros] = make_str(srcbuf, nstart, nend - nstart);
+          macro_values[nmacros] = make_str(srcbuf, vstart, vend - vstart);
+          nmacros = nmacros + 1;
+        }
+      }
       // Skip entire line
       while (ci < srclen && __read_byte(srcbuf, ci) != '\n') {
         ci = ci + 1;
@@ -3154,6 +3211,106 @@ int main(int argc, int *argv) {
     }
   }
   __write_byte(cleaned, co, 0);
+
+  // Expand macros if any were defined
+  int *expanded = 0;
+  int ei = 0;
+  int eo = 0;
+  int istart = 0;
+  int ilen = 0;
+  int found = 0;
+  int vlen = 0;
+  int vi = 0;
+  int ki = 0;
+  if (nmacros > 0) {
+    expanded = my_malloc(co * 4 + 1);
+    ei = 0;
+    eo = 0;
+    while (ei < co) {
+      // Skip string literals
+      if (__read_byte(cleaned, ei) == '"') {
+        __write_byte(expanded, eo, __read_byte(cleaned, ei));
+        ei = ei + 1;
+        eo = eo + 1;
+        while (ei < co && __read_byte(cleaned, ei) != '"') {
+          if (__read_byte(cleaned, ei) == '\\' && ei + 1 < co) {
+            __write_byte(expanded, eo, __read_byte(cleaned, ei));
+            ei = ei + 1;
+            eo = eo + 1;
+          }
+          __write_byte(expanded, eo, __read_byte(cleaned, ei));
+          ei = ei + 1;
+          eo = eo + 1;
+        }
+        if (ei < co) {
+          __write_byte(expanded, eo, __read_byte(cleaned, ei));
+          ei = ei + 1;
+          eo = eo + 1;
+        }
+      } else if (__read_byte(cleaned, ei) == '\'') {
+        // Skip char literals
+        __write_byte(expanded, eo, __read_byte(cleaned, ei));
+        ei = ei + 1;
+        eo = eo + 1;
+        while (ei < co && __read_byte(cleaned, ei) != '\'') {
+          if (__read_byte(cleaned, ei) == '\\' && ei + 1 < co) {
+            __write_byte(expanded, eo, __read_byte(cleaned, ei));
+            ei = ei + 1;
+            eo = eo + 1;
+          }
+          __write_byte(expanded, eo, __read_byte(cleaned, ei));
+          ei = ei + 1;
+          eo = eo + 1;
+        }
+        if (ei < co) {
+          __write_byte(expanded, eo, __read_byte(cleaned, ei));
+          ei = ei + 1;
+          eo = eo + 1;
+        }
+      } else if (is_alpha(__read_byte(cleaned, ei))) {
+        // Identifier — check against macros
+        istart = ei;
+        while (ei < co && is_alnum(__read_byte(cleaned, ei))) {
+          ei = ei + 1;
+        }
+        ilen = ei - istart;
+        found = 0;
+        mc = 0;
+        while (mc < nmacros) {
+          if (my_strlen(macro_names[mc]) == ilen &&
+              my_strcmp(make_str(cleaned, istart, ilen), macro_names[mc]) == 0) {
+            // Copy macro value
+            vlen = my_strlen(macro_values[mc]);
+            vi = 0;
+            while (vi < vlen) {
+              __write_byte(expanded, eo, __read_byte(macro_values[mc], vi));
+              eo = eo + 1;
+              vi = vi + 1;
+            }
+            found = 1;
+            mc = nmacros; // break
+          }
+          mc = mc + 1;
+        }
+        if (found == 0) {
+          // Copy identifier as-is
+          ki = istart;
+          while (ki < ei) {
+            __write_byte(expanded, eo, __read_byte(cleaned, ki));
+            eo = eo + 1;
+            ki = ki + 1;
+          }
+        }
+      } else {
+        __write_byte(expanded, eo, __read_byte(cleaned, ei));
+        ei = ei + 1;
+        eo = eo + 1;
+      }
+    }
+    __write_byte(expanded, eo, 0);
+    cleaned = expanded;
+    co = eo;
+  }
 
   // Lex
   lex(cleaned, co);
