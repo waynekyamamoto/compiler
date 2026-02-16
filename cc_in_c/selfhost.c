@@ -2,7 +2,8 @@
 // Supported: int, int *, struct, if/else/while/for/do-while/switch/break/continue/return
 // Supported: enum, typedef(skip), sizeof, goto/labels, char/void/unsigned/signed/long/short(as int)
 // Supported: const/volatile/register/static/extern(skip), type casts(no-op), hex literals
-// Supported: ^, <<, >>, ++x/--x, +=/-=/*=//=/%=/&=/|=/^=, ~, ternary
+// Supported: ^, <<, >>, ++x/--x, +=/-=/*=//=/%=/&=/|=/^=, ~, ternary, comma operator
+// Supported: _Bool/bool, inline(skip), \a\b\f\v, \xHH, \ooo escapes
 // No: union, floating point
 
 #include <stdio.h>
@@ -469,6 +470,9 @@ int is_keyword(int *s) {
   if (my_strcmp(s, "switch") == 0) { return 1; }
   if (my_strcmp(s, "case") == 0) { return 1; }
   if (my_strcmp(s, "default") == 0) { return 1; }
+  if (my_strcmp(s, "inline") == 0) { return 1; }
+  if (my_strcmp(s, "_Bool") == 0) { return 1; }
+  if (my_strcmp(s, "bool") == 0) { return 1; }
   return 0;
 }
 
@@ -567,9 +571,41 @@ int lex(int *src, int srclen) {
         if (ec == 'n') { ch = 10; }
         else if (ec == 't') { ch = 9; }
         else if (ec == 'r') { ch = 13; }
+        else if (ec == 'a') { ch = 7; }
+        else if (ec == 'b') { ch = 8; }
+        else if (ec == 'f') { ch = 12; }
+        else if (ec == 'v') { ch = 11; }
         else if (ec == '\\') { ch = 92; }
         else if (ec == 39) { ch = 39; }
         else if (ec == '0') { ch = 0; }
+        else if (ec == 'x') {
+          // hex escape \xHH
+          i = i + 1;
+          ch = 0;
+          while (i < len) {
+            ec = __read_byte(buf, i);
+            if (ec >= '0' && ec <= '9') { ch = ch * 16 + (ec - '0'); }
+            else if (ec >= 'a' && ec <= 'f') { ch = ch * 16 + (ec - 'a' + 10); }
+            else if (ec >= 'A' && ec <= 'F') { ch = ch * 16 + (ec - 'A' + 10); }
+            else { break; }
+            i = i + 1;
+          }
+          i = i - 1;
+        }
+        else if (ec >= '0' && ec <= '7') {
+          // octal escape \ooo
+          ch = ec - '0';
+          i = i + 1;
+          if (i < len && __read_byte(buf, i) >= '0' && __read_byte(buf, i) <= '7') {
+            ch = ch * 8 + (__read_byte(buf, i) - '0');
+            i = i + 1;
+            if (i < len && __read_byte(buf, i) >= '0' && __read_byte(buf, i) <= '7') {
+              ch = ch * 8 + (__read_byte(buf, i) - '0');
+              i = i + 1;
+            }
+          }
+          i = i - 1;
+        }
         else { my_fatal("bad char escape"); }
         i = i + 1;
       } else {
@@ -1008,6 +1044,11 @@ int *parse_base_type() {
     skip_qualifiers();
     return 0;
   }
+  if (p_match(TK_KW, "_Bool") || p_match(TK_KW, "bool")) {
+    cur_pos = cur_pos + 1;
+    skip_qualifiers();
+    return 0;
+  }
   printf("Expected type at pos %d (got '%s')\n", tok_pos[cur_pos], tok_val[cur_pos]);
   exit(1);
   return 0;
@@ -1126,6 +1167,14 @@ struct Expr *parse_expr(int min_prec) {
       }
     }
 
+    // Comma operator (lowest precedence, only in expression-statement context)
+    if (k == TK_OP && my_strcmp(v, ",") == 0 && min_prec < 0) {
+      p_eat(TK_OP, ",");
+      rhs = parse_expr(0);
+      e = new_binary(",", e, rhs);
+      continue;
+    }
+
     // Ternary
     if (k == TK_OP && my_strcmp(v, "?") == 0 && min_prec <= 0) {
       p_eat(TK_OP, "?");
@@ -1160,6 +1209,8 @@ int is_type_keyword(int *s) {
   if (my_strcmp(s, "const") == 0) { return 1; }
   if (my_strcmp(s, "volatile") == 0) { return 1; }
   if (my_strcmp(s, "enum") == 0) { return 1; }
+  if (my_strcmp(s, "_Bool") == 0) { return 1; }
+  if (my_strcmp(s, "bool") == 0) { return 1; }
   return 0;
 }
 
@@ -1292,7 +1343,7 @@ struct Expr *parse_primary() {
     }
   } else if (p_match(TK_OP, "(")) {
     p_eat(TK_OP, "(");
-    e = parse_expr(0);
+    e = parse_expr(-1);
     p_eat(TK_OP, ")");
   } else {
     printf("Unexpected token '%s' at %d\n", v, tok_pos[cur_pos]);
@@ -1421,7 +1472,8 @@ struct Stmt *parse_stmt() {
         p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed") ||
         p_match(TK_KW, "long") || p_match(TK_KW, "short") ||
         p_match(TK_KW, "const") || p_match(TK_KW, "volatile") ||
-        p_match(TK_KW, "register") || p_match(TK_KW, "enum")) {
+        p_match(TK_KW, "register") || p_match(TK_KW, "enum") ||
+        p_match(TK_KW, "_Bool") || p_match(TK_KW, "bool")) {
       init = parse_vardecl_stmt();
     } else if (p_match(TK_OP, ";")) {
       p_eat(TK_OP, ";");
@@ -1439,7 +1491,7 @@ struct Stmt *parse_stmt() {
 
     post = 0;
     if (!p_match(TK_OP, ")")) {
-      post = parse_expr(0);
+      post = parse_expr(-1);
     }
     p_eat(TK_OP, ")");
 
@@ -1555,7 +1607,8 @@ struct Stmt *parse_stmt() {
       p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed") ||
       p_match(TK_KW, "long") || p_match(TK_KW, "short") ||
       p_match(TK_KW, "const") || p_match(TK_KW, "volatile") ||
-      p_match(TK_KW, "register") || p_match(TK_KW, "enum")) {
+      p_match(TK_KW, "register") || p_match(TK_KW, "enum") ||
+      p_match(TK_KW, "_Bool") || p_match(TK_KW, "bool")) {
     return parse_vardecl_stmt();
   }
 
@@ -1567,7 +1620,7 @@ struct Stmt *parse_stmt() {
     return new_label_s(ps_label, following);
   }
 
-  e = parse_expr(0);
+  e = parse_expr(-1);
   p_eat(TK_OP, ";");
   return new_expr_s(e);
 }
@@ -1841,9 +1894,12 @@ struct Program *parse_program() {
       continue;
     }
 
-    // static — skip keyword, then parse as normal func/global
+    // static/inline — skip keyword, then parse as normal func/global
     if (p_match(TK_KW, "static")) {
       p_eat(TK_KW, "static");
+    }
+    if (p_match(TK_KW, "inline")) {
+      p_eat(TK_KW, "inline");
     }
 
     // enum definition
@@ -2051,6 +2107,7 @@ int *cg_decode_string(int *lit) {
   int *buf = my_malloc(slen + 1);
   int j = 0;
   int i = 0;
+  int val = 0;
   while (i < slen) {
     int c = __read_byte(lit, i);
     if (c != '\\') {
@@ -2064,9 +2121,45 @@ int *cg_decode_string(int *lit) {
     if (ec == 'n') { __write_byte(buf, j, 10); }
     else if (ec == 't') { __write_byte(buf, j, 9); }
     else if (ec == 'r') { __write_byte(buf, j, 13); }
+    else if (ec == 'a') { __write_byte(buf, j, 7); }
+    else if (ec == 'b') { __write_byte(buf, j, 8); }
+    else if (ec == 'f') { __write_byte(buf, j, 12); }
+    else if (ec == 'v') { __write_byte(buf, j, 11); }
     else if (ec == '\\') { __write_byte(buf, j, 92); }
     else if (ec == '"') { __write_byte(buf, j, 34); }
     else if (ec == '0') { __write_byte(buf, j, 0); }
+    else if (ec == 'x') {
+      // hex escape \xHH
+      val = 0;
+      i = i + 1;
+      while (i < slen) {
+        ec = __read_byte(lit, i);
+        if (ec >= '0' && ec <= '9') { val = val * 16 + (ec - '0'); }
+        else if (ec >= 'a' && ec <= 'f') { val = val * 16 + (ec - 'a' + 10); }
+        else if (ec >= 'A' && ec <= 'F') { val = val * 16 + (ec - 'A' + 10); }
+        else { break; }
+        i = i + 1;
+      }
+      __write_byte(buf, j, val);
+      j = j + 1;
+      continue;
+    }
+    else if (ec >= '0' && ec <= '7') {
+      // octal escape \ooo
+      val = ec - '0';
+      i = i + 1;
+      if (i < slen && __read_byte(lit, i) >= '0' && __read_byte(lit, i) <= '7') {
+        val = val * 8 + (__read_byte(lit, i) - '0');
+        i = i + 1;
+        if (i < slen && __read_byte(lit, i) >= '0' && __read_byte(lit, i) <= '7') {
+          val = val * 8 + (__read_byte(lit, i) - '0');
+          i = i + 1;
+        }
+      }
+      __write_byte(buf, j, val);
+      j = j + 1;
+      continue;
+    }
     else { my_fatal("bad escape in string literal"); }
     j = j + 1;
     i = i + 1;
@@ -2373,6 +2466,13 @@ int gen_value(struct Expr *e) {
 
   if (e->kind == ND_BINARY) {
     bin_op = e->sval2;
+
+    // Comma operator: evaluate left (discard), evaluate right (keep)
+    if (my_strcmp(bin_op, ",") == 0) {
+      gen_value(e->left);
+      gen_value(e->right);
+      return 0;
+    }
 
     if (my_strcmp(bin_op, "&&") == 0 || my_strcmp(bin_op, "||") == 0) {
       end_l = cg_new_label("sc_end");

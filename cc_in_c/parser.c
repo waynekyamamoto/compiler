@@ -132,7 +132,8 @@ static int is_type_start(void) {
         match(TK_KW, "long") || match(TK_KW, "short") ||
         match(TK_KW, "struct") || match(TK_KW, "enum") ||
         match(TK_KW, "const") || match(TK_KW, "volatile") || match(TK_KW, "register") ||
-        match(TK_KW, "static") || match(TK_KW, "extern") || match(TK_KW, "typedef"))
+        match(TK_KW, "static") || match(TK_KW, "extern") || match(TK_KW, "typedef") ||
+        match(TK_KW, "_Bool") || match(TK_KW, "bool") || match(TK_KW, "inline"))
         return 1;
     return 0;
 }
@@ -157,7 +158,8 @@ static char *parse_base_type(void) {
     int got_type = 0;
     while (match(TK_KW, "int") || match(TK_KW, "char") || match(TK_KW, "void") ||
            match(TK_KW, "unsigned") || match(TK_KW, "signed") ||
-           match(TK_KW, "long") || match(TK_KW, "short")) {
+           match(TK_KW, "long") || match(TK_KW, "short") ||
+           match(TK_KW, "_Bool") || match(TK_KW, "bool")) {
         eat(TK_KW, NULL);
         got_type = 1;
     }
@@ -364,6 +366,14 @@ static Expr *parse_expr(int min_prec) {
     while (1) {
         Tok *t = cur();
 
+        /* comma operator: lowest precedence, only in expression-statement context */
+        if (t->kind == TK_OP && strcmp(t->value, ",") == 0 && min_prec < 0) {
+            eat(TK_OP, ",");
+            Expr *rhs = parse_expr(0);
+            e = new_binary(",", e, rhs);
+            continue;
+        }
+
         /* ternary: lower precedence than all binary ops */
         if (t->kind == TK_OP && strcmp(t->value, "?") == 0 && min_prec <= 0) {
             eat(TK_OP, "?");
@@ -486,7 +496,7 @@ static Expr *parse_primary(void) {
         }
     } else if (match(TK_OP, "(")) {
         eat(TK_OP, "(");
-        e = parse_expr(0);
+        e = parse_expr(-1);
         eat(TK_OP, ")");
     } else if (match(TK_KW, "sizeof")) {
         /* Parse sizeof and return 8 (all our types are 8 bytes) */
@@ -574,7 +584,8 @@ static int starts_type(void) {
             match(TK_KW, "long") || match(TK_KW, "short") ||
             match(TK_KW, "struct") || match(TK_KW, "const") ||
             match(TK_KW, "volatile") || match(TK_KW, "register") ||
-            match(TK_KW, "static") || match(TK_KW, "enum"));
+            match(TK_KW, "static") || match(TK_KW, "enum") ||
+            match(TK_KW, "_Bool") || match(TK_KW, "bool"));
 }
 
 static Stmt *parse_stmt(void) {
@@ -685,7 +696,7 @@ static Stmt *parse_stmt(void) {
 
         Expr *post = NULL;
         if (!match(TK_OP, ")"))
-            post = parse_expr(0);
+            post = parse_expr(-1);
         eat(TK_OP, ")");
 
         Block body;
@@ -813,7 +824,7 @@ static Stmt *parse_stmt(void) {
         return new_exprstmt(new_num(0));
     }
 
-    Expr *e = parse_expr(0);
+    Expr *e = parse_expr(-1);
     eat(TK_OP, ";");
     return new_exprstmt(e);
 }
@@ -1115,6 +1126,15 @@ Program *parse_program(TokArray tokarr) {
         /* static */
         if (match(TK_KW, "static")) {
             eat(TK_KW, "static");
+            if (match(TK_KW, "inline")) eat(TK_KW, "inline");
+            parse_func_or_global(1, &funcs, &nfuncs, &fcap, &globals, &nglobals, &gcap, &protos, &nprotos, &pcap2);
+            continue;
+        }
+
+        /* inline */
+        if (match(TK_KW, "inline")) {
+            eat(TK_KW, "inline");
+            if (match(TK_KW, "static")) eat(TK_KW, "static");
             parse_func_or_global(1, &funcs, &nfuncs, &fcap, &globals, &nglobals, &gcap, &protos, &nprotos, &pcap2);
             continue;
         }

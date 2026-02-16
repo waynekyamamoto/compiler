@@ -205,7 +205,23 @@ static char *decode_c_string(const char *lit) {
             buf_push(&b, (char)val);
             continue; /* skip the i++ below */
         }
-        default: fatal("Unsupported escape: \\%c", lit[i]);
+        default:
+            if (lit[i] >= '0' && lit[i] <= '7') {
+                /* octal escape */
+                int val = lit[i] - '0';
+                i++;
+                if (lit[i] >= '0' && lit[i] <= '7') {
+                    val = val * 8 + (lit[i] - '0');
+                    i++;
+                    if (lit[i] >= '0' && lit[i] <= '7') {
+                        val = val * 8 + (lit[i] - '0');
+                        i++;
+                    }
+                }
+                buf_push(&b, (char)val);
+                continue; /* skip the i++ below */
+            }
+            fatal("Unsupported escape: \\%c", lit[i]);
         }
         i++;
     }

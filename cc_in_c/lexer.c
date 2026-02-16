@@ -12,6 +12,7 @@ static const char *keywords[] = {
     "enum", "const", "volatile", "register", "static",
     "goto", "char", "unsigned", "void", "long", "short",
     "signed", "typedef", "sizeof",
+    "inline", "_Bool", "bool",
     NULL,
 };
 
@@ -147,6 +148,20 @@ TokArray lex(const char *src) {
                         else d = buf[i] - 'A' + 10;
                         ch = ch * 16 + d;
                         i++;
+                    }
+                    goto char_done;
+                }
+                else if (buf[i] >= '0' && buf[i] <= '7') {
+                    /* octal escape */
+                    ch = buf[i] - '0';
+                    i++;
+                    if (i < len && buf[i] >= '0' && buf[i] <= '7') {
+                        ch = ch * 8 + (buf[i] - '0');
+                        i++;
+                        if (i < len && buf[i] >= '0' && buf[i] <= '7') {
+                            ch = ch * 8 + (buf[i] - '0');
+                            i++;
+                        }
                     }
                     goto char_done;
                 }
