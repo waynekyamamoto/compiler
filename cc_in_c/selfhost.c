@@ -302,7 +302,7 @@ int my_atoi(int *s) {
     i = 1;
   }
   if (__read_byte(s, i) == '0' && (__read_byte(s, i + 1) == 'x' || __read_byte(s, i + 1) == 'X')) {
-    i = i + 2;
+    i += 2;
     while (is_hex_digit(__read_byte(s, i))) {
       val = val * 16 + hex_digit_val(__read_byte(s, i));
       i++;
@@ -323,7 +323,7 @@ int my_atoi(int *s) {
 
 int emit_ch(int c) {
   if (outlen >= outcap) {
-    outcap = outcap * 2;
+    outcap *= 2;
     int *newbuf = my_malloc(outcap);
     int i = 0;
     while (i < outlen) {
@@ -408,7 +408,7 @@ int *int_to_str(int n) {
   while (n > 0) {
     buf[len] = '0' + n % 10;
     len++;
-    n = n / 10;
+    n /= 10;
   }
   int total = len;
   if (neg) {
@@ -509,12 +509,12 @@ int lex(int *src, int srclen) {
   int i = 0;
   while (i < srclen) {
     if (__read_byte(src, i) == '/' && i + 1 < srclen && __read_byte(src, i + 1) == '/') {
-      i = i + 2;
+      i += 2;
       while (i < srclen && __read_byte(src, i) != '\n') {
         i++;
       }
     } else if (__read_byte(src, i) == '/' && i + 1 < srclen && __read_byte(src, i + 1) == '*') {
-      i = i + 2;
+      i += 2;
       while (i + 1 < srclen) {
         if (__read_byte(src, i) == '*' && __read_byte(src, i + 1) == '/') {
           break;
@@ -522,7 +522,7 @@ int lex(int *src, int srclen) {
         i++;
       }
       if (i + 1 < srclen) {
-        i = i + 2;
+        i += 2;
       }
     } else {
       __write_byte(buf, j, __read_byte(src, i));
@@ -552,7 +552,7 @@ int lex(int *src, int srclen) {
     if (is_digit(c)) {
       start = i;
       if (c == '0' && i + 1 < len && (__read_byte(buf, i + 1) == 'x' || __read_byte(buf, i + 1) == 'X')) {
-        i = i + 2;
+        i += 2;
         while (i < len && is_hex_digit(__read_byte(buf, i))) {
           i++;
         }
@@ -2562,7 +2562,7 @@ int cg_field_index(int *sname, int *fname) {
           return slot;
         }
         if (cg_sfield_types[i][j] != 0) {
-          slot = slot + cg_struct_nfields(cg_sfield_types[i][j]);
+          slot += cg_struct_nfields(cg_sfield_types[i][j]);
         } else {
           slot++;
         }
@@ -2586,7 +2586,7 @@ int cg_struct_nfields(int *sname) {
       int j = 0;
       while (j < cg_snfields[i]) {
         if (cg_sfield_types[i][j] != 0) {
-          total = total + cg_struct_nfields(cg_sfield_types[i][j]);
+          total += cg_struct_nfields(cg_sfield_types[i][j]);
         } else {
           total++;
         }
@@ -2795,7 +2795,7 @@ int layout_func(struct FuncDef *f) {
 
   int i = 0;
   while (i < f->nparams) {
-    offset = offset + 8;
+    offset += 8;
     lay_add_slot(f->params[i], offset);
     i++;
   }
@@ -3923,7 +3923,7 @@ int main(int argc, int *argv) {
           __read_byte(srcbuf, si + 2) == 'f' && __read_byte(srcbuf, si + 3) == 'i' &&
           __read_byte(srcbuf, si + 4) == 'n' && __read_byte(srcbuf, si + 5) == 'e' &&
           (__read_byte(srcbuf, si + 6) == ' ' || __read_byte(srcbuf, si + 6) == '\t')) {
-        si = si + 6;
+        si += 6;
         while (si < srclen && (__read_byte(srcbuf, si) == ' ' || __read_byte(srcbuf, si) == '\t')) {
           si++;
         }
