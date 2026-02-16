@@ -38,6 +38,24 @@ test-selfhost: $(TARGET)
 	@rm -f gen1 /tmp/test_batch*_out
 	@echo "All selfhost batch tests passed."
 
-test-all: test test-new test-selfhost
+test-bootstrap: $(TARGET)
+	@echo "=== Bootstrap: gen1 (cc compiles selfhost) ==="
+	./cc selfhost.c -o gen1
+	@echo "=== Bootstrap: gen2 (gen1 compiles selfhost) ==="
+	./gen1 selfhost.c -o gen2
+	@echo "=== Bootstrap: gen3 (gen2 compiles selfhost) ==="
+	./gen2 selfhost.c -o gen3
+	@echo "=== Verifying gen2 produces working compiler ==="
+	./gen2 tests/test_batch1.c -o /tmp/bootstrap_test && /tmp/bootstrap_test
+	@echo "=== Verifying gen3 produces working compiler ==="
+	./gen3 tests/test_batch1.c -o /tmp/bootstrap_test && /tmp/bootstrap_test
+	@echo "=== Comparing gen2 and gen3 assembly output ==="
+	./gen2 selfhost.c -o /tmp/bootstrap_gen2 && mv selfhost.s selfhost_gen2.s
+	./gen3 selfhost.c -o /tmp/bootstrap_gen3 && mv selfhost.s selfhost_gen3.s
+	diff selfhost_gen2.s selfhost_gen3.s
+	@rm -f gen1 gen2 gen3 /tmp/bootstrap_test /tmp/bootstrap_gen2 /tmp/bootstrap_gen3 selfhost_gen2.s selfhost_gen3.s
+	@echo "Bootstrap test passed."
 
-.PHONY: all clean test test-new test-selfhost test-all
+test-all: test test-new test-selfhost test-bootstrap
+
+.PHONY: all clean test test-new test-selfhost test-bootstrap test-all
