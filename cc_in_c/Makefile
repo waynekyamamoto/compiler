@@ -24,16 +24,16 @@ test: $(TARGET)
 test-new: $(TARGET)
 	@for n in 1 2 3 4 5; do \
 		echo "=== test_batch$$n ==="; \
-		./cc test_batch$$n.c -o test_batch$${n}_out && ./test_batch$${n}_out || exit 1; \
+		./cc tests/test_batch$$n.c -o tests/test_batch$${n}_out && ./tests/test_batch$${n}_out || exit 1; \
 	done
-	@rm -f test_batch*_out test_batch*.s test_batch*.o
+	@rm -f tests/test_batch*_out tests/test_batch*.s tests/test_batch*.o
 	@echo "All batch tests passed."
 
 test-selfhost: $(TARGET)
 	./cc selfhost.c -o gen1
 	@for n in 1 2 3 4 5; do \
 		echo "=== test_batch$$n (selfhost) ==="; \
-		./gen1 test_batch$$n.c -o /tmp/test_batch$${n}_out && /tmp/test_batch$${n}_out || exit 1; \
+		./gen1 tests/test_batch$$n.c -o /tmp/test_batch$${n}_out && /tmp/test_batch$${n}_out || exit 1; \
 	done
 	@rm -f gen1 /tmp/test_batch*_out
 	@echo "All selfhost batch tests passed."

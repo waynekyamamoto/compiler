@@ -18,5 +18,6 @@ cc_in_c/test_fgetc_loop.c
 cc_in_c/test_eof.c
 cc_in_c/test_ptr_sxtw.c
 cc_in_c/test_argv_fopen.c
+cc_in_c/tests/*_out
 cc_in_c/one_more_time/
 cc_in_c/sqlite/
