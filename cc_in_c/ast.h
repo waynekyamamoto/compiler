@@ -17,6 +17,7 @@ typedef enum {
     ND_POSTINC,
     ND_POSTDEC,
     ND_TERNARY,
+    ND_INITLIST,
 } ExprKind;
 
 typedef struct Expr Expr;

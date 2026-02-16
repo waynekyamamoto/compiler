@@ -45,6 +45,7 @@ int ND_ASSIGN = 9;
 int ND_POSTINC = 10;
 int ND_POSTDEC = 11;
 int ND_TERNARY = 12;
+int ND_INITLIST = 13;
 
 // Stmt kinds
 int ST_RETURN = 0;
@@ -136,6 +137,7 @@ struct GDecl {
   int init_val;
   int has_init;
   int *init_str;
+  struct Expr *init_list;  // ND_INITLIST node for array init (NULL if no array init)
 };
 
 struct Program {
@@ -1194,6 +1196,25 @@ struct VarDecl *make_vd(int *name, int *stype, int arr_size, int is_ptr, struct 
   return vd;
 }
 
+// Parse brace initializer list: { expr, expr, ... }
+struct Expr *parse_init_list() {
+  struct Expr **elems = my_malloc(64 * 8);
+  int nelems = 0;
+  p_eat(TK_OP, "{");
+  while (!p_match(TK_OP, "}")) {
+    elems[nelems] = parse_expr(0);
+    nelems = nelems + 1;
+    if (p_match(TK_OP, ",")) { p_eat(TK_OP, ","); continue; }
+    break;
+  }
+  p_eat(TK_OP, "}");
+  struct Expr *e = my_malloc(64);
+  e->kind = ND_INITLIST;
+  e->args = elems;
+  e->nargs = nelems;
+  return e;
+}
+
 struct Stmt *parse_vardecl_stmt() {
   int *stype = parse_base_type();
   struct VarDecl **decls = my_malloc(64 * 8);
@@ -1229,7 +1250,11 @@ struct Stmt *parse_vardecl_stmt() {
     int arr_size = 0 - 1;
     if (p_match(TK_OP, "[")) {
       p_eat(TK_OP, "[");
-      arr_size = my_atoi(p_eat(TK_NUM, 0));
+      if (p_match(TK_OP, "]")) {
+        arr_size = 0; // infer from initializer
+      } else {
+        arr_size = my_atoi(p_eat(TK_NUM, 0));
+      }
       p_eat(TK_OP, "]");
     }
     struct Expr *init = 0;
@@ -1237,7 +1262,12 @@ struct Stmt *parse_vardecl_stmt() {
     if (stype != 0) {
       decl_stype = my_strdup(stype);
     }
-    if ((decl_stype == 0 || is_ptr != 0) && arr_size < 0 && p_match(TK_OP, "=")) {
+    if (arr_size >= 0 && p_match(TK_OP, "=")) {
+      // Array initializer
+      p_eat(TK_OP, "=");
+      init = parse_init_list();
+      if (arr_size == 0) { arr_size = init->nargs; }
+    } else if ((decl_stype == 0 || is_ptr != 0) && arr_size < 0 && p_match(TK_OP, "=")) {
       p_eat(TK_OP, "=");
       init = parse_expr(0);
     }
@@ -1990,14 +2020,25 @@ struct GDecl *parse_global_decl() {
   int array_size = 0 - 1;
   if (p_match(TK_OP, "[")) {
     p_eat(TK_OP, "[");
-    array_size = my_atoi(p_eat(TK_NUM, 0));
+    if (p_match(TK_OP, "]")) {
+      array_size = 0; // infer from initializer
+    } else {
+      array_size = my_atoi(p_eat(TK_NUM, 0));
+    }
     p_eat(TK_OP, "]");
   }
 
   int has_init = 0;
   int init_val = 0;
   int *init_str = 0;
-  if (p_match(TK_OP, "=")) {
+  struct Expr *init_list = 0;
+  if (array_size >= 0 && p_match(TK_OP, "=")) {
+    // Array initializer
+    p_eat(TK_OP, "=");
+    has_init = 1;
+    init_list = parse_init_list();
+    if (array_size == 0) { array_size = init_list->nargs; }
+  } else if (p_match(TK_OP, "=")) {
     p_eat(TK_OP, "=");
     has_init = 1;
     if (p_match(TK_STR, 0)) {
@@ -2011,13 +2052,14 @@ struct GDecl *parse_global_decl() {
   }
   p_eat(TK_OP, ";");
 
-  struct GDecl *gd = my_malloc(48);
+  struct GDecl *gd = my_malloc(64);
   gd->name = name;
   gd->is_ptr = is_ptr;
   gd->array_size = array_size;
   gd->init_val = init_val;
   gd->has_init = has_init;
   gd->init_str = init_str;
+  gd->init_list = init_list;
   return gd;
 }
 
@@ -3264,10 +3306,36 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
 
   if (st->kind == ST_VARDECL) {
     int i = 0;
+    int base_off = 0;
+    int elem_off = 0;
+    int k = 0;
     while (i < st->ndecls) {
       struct VarDecl *vd = st->decls[i];
       if (vd->stype != 0 && vd->is_ptr == 0) { i = i + 1; continue; }
-      if (vd->arr_size >= 0) { i = i + 1; continue; }
+      // Array with initializer list
+      if (vd->arr_size >= 0) {
+        if (vd->init != 0 && vd->init->kind == ND_INITLIST) {
+          base_off = cg_find_slot(vd->name);
+          k = 0;
+          while (k < vd->init->nargs) {
+            gen_value(vd->init->args[k]);
+            elem_off = base_off - k * 8;
+            if (elem_off <= 255) {
+              emit_s("\tstr\tx0, [x29, #-");
+              emit_num(elem_off);
+              emit_line("]");
+            } else {
+              emit_s("\tsub\tx9, x29, #");
+              emit_num(elem_off);
+              emit_ch('\n');
+              emit_line("\tstr\tx0, [x9]");
+            }
+            k = k + 1;
+          }
+        }
+        i = i + 1;
+        continue;
+      }
       int off = cg_find_slot(vd->name);
       if (vd->init != 0) {
         gen_value(vd->init);
@@ -3646,8 +3714,26 @@ int codegen(struct Program *prog) {
     i = 0;
     while (i < prog->nglobals) {
       gd = prog->globals[i];
-      if (gd->array_size >= 0) {
-        // Array: use .comm
+      if (gd->array_size >= 0 && gd->init_list != 0 && gd->init_list->kind == ND_INITLIST) {
+        // Initialized array: emit .data with .quad per element
+        if (has_data == 0) { emit_ch('\n'); emit_line("\t.data"); has_data = 1; }
+        emit_s("\t.globl\t_"); emit_line(gd->name);
+        emit_line("\t.p2align\t3");
+        emit_s("_"); emit_s(gd->name); emit_line(":");
+        int k = 0;
+        while (k < gd->init_list->nargs) {
+          struct Expr *elem = gd->init_list->args[k];
+          if (elem->kind == ND_NUM) {
+            emit_s("\t.quad\t"); emit_num(elem->ival); emit_ch('\n');
+          } else if (elem->kind == ND_UNARY && elem->ival == '-' && elem->left->kind == ND_NUM) {
+            emit_s("\t.quad\t-"); emit_num(elem->left->ival); emit_ch('\n');
+          } else {
+            emit_line("\t.quad\t0");
+          }
+          k = k + 1;
+        }
+      } else if (gd->array_size >= 0) {
+        // Uninitialized array: use .comm
         int sz = gd->array_size * 8;
         emit_s("\t.comm\t_");
         emit_s(gd->name);

@@ -841,7 +841,24 @@ static void gen_stmt(Stmt *st, FuncLayout *layout, const char *ret_label) {
         for (int i = 0; i < st->u.vardecl.count; i++) {
             VarDeclEntry *e = &st->u.vardecl.entries[i];
             if (e->struct_type && !e->is_ptr) continue;
-            if (e->array_size >= 0) continue;
+            /* Array with initializer list */
+            if (e->array_size >= 0) {
+                if (e->init && e->init->kind == ND_INITLIST) {
+                    int base_off = find_slot(layout, e->name);
+                    int nelem = e->init->u.call.args.len;
+                    for (int k = 0; k < nelem; k++) {
+                        gen_value(e->init->u.call.args.data[k], layout);
+                        int elem_off = base_off - k * 8;
+                        if (elem_off <= 255) {
+                            emit("\tstr\tx0, [x29, #-%d]", elem_off);
+                        } else {
+                            emit("\tsub\tx9, x29, #%d", elem_off);
+                            emit("\tstr\tx0, [x9]");
+                        }
+                    }
+                }
+                continue;
+            }
             int off = find_slot(layout, e->name);
             if (off < 0) fatal("Internal: var missing from layout");
             if (e->init)
@@ -1465,8 +1482,26 @@ char *codegen_generate(Program *prog) {
         for (int i = 0; i < prog->nglobals; i++) {
             GlobalDecl *gd = &prog->globals[i];
             if (gd->is_extern) continue;
-            if (gd->array_size >= 0) {
-                /* Array: use .comm */
+            if (gd->array_size >= 0 && gd->init && gd->init->kind == ND_INITLIST) {
+                /* Initialized array: emit .data with .quad per element */
+                if (!has_data) { emit(""); emit("\t.data"); has_data = 1; }
+                if (!gd->is_static)
+                    emit("\t.globl\t_%s", gd->name);
+                emit("\t.p2align\t3");
+                emit("_%s:", gd->name);
+                for (int k = 0; k < gd->init->u.call.args.len; k++) {
+                    Expr *elem = gd->init->u.call.args.data[k];
+                    if (elem->kind == ND_NUM) {
+                        emit("\t.quad\t%d", elem->u.num);
+                    } else if (elem->kind == ND_UNARY && elem->u.unary.op == '-' &&
+                               elem->u.unary.rhs->kind == ND_NUM) {
+                        emit("\t.quad\t%d", -elem->u.unary.rhs->u.num);
+                    } else {
+                        emit("\t.quad\t0"); /* fallback for non-constant */
+                    }
+                }
+            } else if (gd->array_size >= 0) {
+                /* Uninitialized array: use .comm */
                 int size = gd->array_size * 8;
                 emit("\t.comm\t_%s, %d, 3", gd->name, size);
             } else if (gd->init != NULL && gd->init->kind == ND_NUM) {

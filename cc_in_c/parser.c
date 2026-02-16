@@ -353,6 +353,22 @@ static void parse_enum_def(void) {
 
 /* ---- VarDecl ---- */
 
+/* Parse brace initializer list: { expr, expr, ... } */
+static Expr *parse_init_list(void) {
+    eat(TK_OP, "{");
+    ExprArray elems = {NULL, 0, 0};
+    while (!match(TK_OP, "}")) {
+        exprarray_push(&elems, parse_expr(0));
+        if (match(TK_OP, ",")) { eat(TK_OP, ","); continue; }
+        break;
+    }
+    eat(TK_OP, "}");
+    Expr *e = calloc(1, sizeof(Expr));
+    e->kind = ND_INITLIST;
+    e->u.call.args = elems;
+    return e;
+}
+
 static Stmt *parse_vardecl_stmt(void) {
     char *stype = parse_base_type();
     VarDeclEntry *entries = NULL;
@@ -391,14 +407,23 @@ static Stmt *parse_vardecl_stmt(void) {
         int arr_size = -1;
         if (match(TK_OP, "[")) {
             eat(TK_OP, "[");
-            Tok *num = eat(TK_NUMBER, NULL);
-            arr_size = atoi(num->value);
+            if (match(TK_OP, "]")) {
+                arr_size = 0; /* infer from initializer */
+            } else {
+                arr_size = atoi(eat(TK_NUMBER, NULL)->value);
+            }
             eat(TK_OP, "]");
         }
         Expr *init = NULL;
         /* struct_type in decl: for struct variables, struct arrays, and pointer-to-struct */
         char *decl_stype = stype ? xstrdup(stype) : NULL;
-        if ((!decl_stype || is_ptr) && arr_size < 0 && match(TK_OP, "=")) {
+        if (arr_size >= 0 && match(TK_OP, "=")) {
+            /* Array initializer: int arr[3] = {1, 2, 3}; or int arr[] = {1, 2, 3}; */
+            eat(TK_OP, "=");
+            init = parse_init_list();
+            if (arr_size == 0)
+                arr_size = init->u.call.args.len; /* infer size */
+        } else if ((!decl_stype || is_ptr) && arr_size < 0 && match(TK_OP, "=")) {
             eat(TK_OP, "=");
             init = parse_expr(0);
         }
@@ -1190,12 +1215,21 @@ static GlobalDecl parse_global_decl(int is_static) {
     int arr_size = -1;
     if (match(TK_OP, "[")) {
         eat(TK_OP, "[");
-        if (!match(TK_OP, "]"))
+        if (match(TK_OP, "]")) {
+            arr_size = 0; /* infer from initializer */
+        } else {
             arr_size = atoi(eat(TK_NUMBER, NULL)->value);
+        }
         eat(TK_OP, "]");
     }
     Expr *init = NULL;
-    if (arr_size < 0 && match(TK_OP, "=")) {
+    if (arr_size >= 0 && match(TK_OP, "=")) {
+        /* Array initializer */
+        eat(TK_OP, "=");
+        init = parse_init_list();
+        if (arr_size == 0)
+            arr_size = init->u.call.args.len;
+    } else if (arr_size < 0 && match(TK_OP, "=")) {
         eat(TK_OP, "=");
         /* Handle negative initializers */
         if (match(TK_OP, "-")) {
