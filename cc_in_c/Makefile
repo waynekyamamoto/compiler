@@ -38,4 +38,6 @@ test-selfhost: $(TARGET)
 	@rm -f gen1 /tmp/test_batch*_out
 	@echo "All selfhost batch tests passed."
 
-.PHONY: all clean test test-new test-selfhost
+test-all: test test-new test-selfhost
+
+.PHONY: all clean test test-new test-selfhost test-all
