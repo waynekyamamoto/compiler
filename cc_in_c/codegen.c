@@ -90,12 +90,19 @@ typedef struct {
 } StructVarEntry;
 
 typedef struct {
+    char *name;
+    char *struct_type;
+} PtrStructVarEntry;
+
+typedef struct {
     SlotEntry slots[256];
     int nslots;
     ArrayEntry arrays[64];
     int narrays;
     StructVarEntry structvars[64];
     int nstructvars;
+    PtrStructVarEntry ptr_structvars[64];
+    int nptr_structvars;
     int stack_size;
 } FuncLayout;
 
@@ -143,6 +150,13 @@ static const char *find_structvar_type(FuncLayout *layout, const char *name) {
     for (int i = 0; i < layout->nstructvars; i++)
         if (strcmp(layout->structvars[i].name, name) == 0)
             return layout->structvars[i].struct_type;
+    return NULL;
+}
+
+static const char *find_ptr_structvar_type(FuncLayout *layout, const char *name) {
+    for (int i = 0; i < layout->nptr_structvars; i++)
+        if (strcmp(layout->ptr_structvars[i].name, name) == 0)
+            return layout->ptr_structvars[i].struct_type;
     return NULL;
 }
 
@@ -308,7 +322,7 @@ static void walk_stmts_for_layout(StmtArray *stmts, FuncLayout *layout, int *off
                 VarDeclEntry *e = &st->u.vardecl.entries[j];
                 if (find_slot(layout, e->name) >= 0)
                     continue; /* already laid out (e.g. redecl in nested scope) */
-                if (e->struct_type && e->array_size >= 0) {
+                if (e->struct_type && !e->is_ptr && e->array_size >= 0) {
                     /* struct array */
                     int nf = cg_struct_nfields(e->struct_type);
                     *offset += e->array_size * nf * 8;
@@ -320,7 +334,7 @@ static void walk_stmts_for_layout(StmtArray *stmts, FuncLayout *layout, int *off
                     layout->arrays[layout->narrays].name = xstrdup(e->name);
                     layout->arrays[layout->narrays].count = e->array_size;
                     layout->narrays++;
-                } else if (e->struct_type) {
+                } else if (e->struct_type && !e->is_ptr) {
                     int nf = cg_struct_nfields(e->struct_type);
                     *offset += nf * 8;
                     if (layout->nstructvars >= 64) fatal("Too many struct vars");
@@ -335,6 +349,12 @@ static void walk_stmts_for_layout(StmtArray *stmts, FuncLayout *layout, int *off
                     layout->narrays++;
                 } else {
                     *offset += 8;
+                    if (e->struct_type && e->is_ptr == 1) {
+                        if (layout->nptr_structvars >= 64) fatal("Too many ptr struct vars");
+                        layout->ptr_structvars[layout->nptr_structvars].name = xstrdup(e->name);
+                        layout->ptr_structvars[layout->nptr_structvars].struct_type = xstrdup(e->struct_type);
+                        layout->nptr_structvars++;
+                    }
                 }
                 layout_add_slot(layout, e->name, *offset);
             }
@@ -426,8 +446,11 @@ static void gen_addr(Expr *e, FuncLayout *layout) {
     if (e->kind == ND_INDEX) {
         const char *idx_stype = NULL;
         int stride = 8;
-        if (e->u.index.base->kind == ND_VAR)
+        if (e->u.index.base->kind == ND_VAR) {
             idx_stype = find_structvar_type(layout, e->u.index.base->u.var_name);
+            if (!idx_stype)
+                idx_stype = find_ptr_structvar_type(layout, e->u.index.base->u.var_name);
+        }
         if (idx_stype)
             stride = cg_struct_nfields(idx_stype) * 8;
         gen_value(e->u.index.base, layout);
@@ -556,14 +579,20 @@ static void gen_value(Expr *e, FuncLayout *layout) {
 
     if (e->kind == ND_POSTINC || e->kind == ND_POSTDEC) {
         Expr *operand = e->u.postinc_operand;
+        int inc = 1;
+        if (operand->kind == ND_VAR) {
+            const char *pstype = find_ptr_structvar_type(layout, operand->u.var_name);
+            if (pstype)
+                inc = cg_struct_nfields(pstype) * 8;
+        }
         gen_addr(operand, layout);
         emit("\tstr\tx0, [sp, #-16]!");      /* push addr */
         emit("\tldr\tx0, [x0]");             /* load current value */
         emit("\tstr\tx0, [sp, #-16]!");      /* push old value (return) */
         if (e->kind == ND_POSTINC)
-            emit("\tadd\tx0, x0, #1");
+            emit("\tadd\tx0, x0, #%d", inc);
         else
-            emit("\tsub\tx0, x0, #1");
+            emit("\tsub\tx0, x0, #%d", inc);
         emit("\tldr\tx1, [sp, #16]");        /* load addr */
         emit("\tstr\tx0, [x1]");             /* store new value */
         emit("\tldr\tx0, [sp], #32");        /* pop old value */
@@ -622,6 +651,31 @@ static void gen_value(Expr *e, FuncLayout *layout) {
         emit("\tstr\tx0, [sp, #-16]!");
         gen_value(e->u.binary.rhs, layout);
         emit("\tldr\tx1, [sp], #16");
+
+        /* Pointer-to-struct scaling for + and - */
+        if (strcmp(op, "+") == 0 || strcmp(op, "-") == 0) {
+            const char *pstype = NULL;
+            int scale_rhs = 0; /* 1 = scale x0 (rhs), 0 = scale x1 (lhs) */
+            if (e->u.binary.lhs->kind == ND_VAR) {
+                pstype = find_ptr_structvar_type(layout, e->u.binary.lhs->u.var_name);
+                if (pstype) scale_rhs = 1;
+            }
+            if (!pstype && e->u.binary.rhs->kind == ND_VAR) {
+                pstype = find_ptr_structvar_type(layout, e->u.binary.rhs->u.var_name);
+                if (pstype) scale_rhs = 0;
+            }
+            if (pstype) {
+                int nf = cg_struct_nfields(pstype);
+                int scale = nf * 8;
+                if (scale_rhs) {
+                    emit("\tmov\tx9, #%d", scale);
+                    emit("\tmul\tx0, x0, x9");
+                } else {
+                    emit("\tmov\tx9, #%d", scale);
+                    emit("\tmul\tx1, x1, x9");
+                }
+            }
+        }
 
         if (strcmp(op, "+") == 0)      emit("\tadd\tx0, x1, x0");
         else if (strcmp(op, "-") == 0) emit("\tsub\tx0, x1, x0");
@@ -760,7 +814,7 @@ static void gen_stmt(Stmt *st, FuncLayout *layout, const char *ret_label) {
     if (st->kind == ST_VARDECL) {
         for (int i = 0; i < st->u.vardecl.count; i++) {
             VarDeclEntry *e = &st->u.vardecl.entries[i];
-            if (e->struct_type) continue;
+            if (e->struct_type && !e->is_ptr) continue;
             if (e->array_size >= 0) continue;
             int off = find_slot(layout, e->name);
             if (off < 0) fatal("Internal: var missing from layout");

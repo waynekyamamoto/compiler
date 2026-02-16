@@ -78,6 +78,7 @@ typedef struct {
     char *name;
     char *struct_type;  /* NULL if not a struct type */
     int array_size;     /* -1 if not an array */
+    int is_ptr;         /* 1 if pointer type */
     Expr *init;         /* NULL if no initializer */
 } VarDeclEntry;
 

@@ -41,6 +41,15 @@ static int nlocal_vars;
 static EnumConst enum_consts[1024];
 static int nenum_consts;
 
+/* Typedef table: maps typedef name to struct type (NULL for int-like) */
+typedef struct {
+    char *name;
+    char *struct_type;  /* NULL for int/char/void/etc, struct name for struct types */
+} TypedefEntry;
+
+static TypedefEntry typedefs[256];
+static int ntypedefs;
+
 /* ---- Helpers ---- */
 
 static Tok *cur(void) {
@@ -110,6 +119,20 @@ static int find_enum_const(const char *name, int *out_val) {
     return 0;
 }
 
+static TypedefEntry *find_typedef(const char *name) {
+    for (int i = 0; i < ntypedefs; i++)
+        if (strcmp(typedefs[i].name, name) == 0)
+            return &typedefs[i];
+    return NULL;
+}
+
+static void add_typedef(const char *name, const char *struct_type) {
+    if (ntypedefs >= 256) fatal("Too many typedefs");
+    typedefs[ntypedefs].name = xstrdup(name);
+    typedefs[ntypedefs].struct_type = struct_type ? xstrdup(struct_type) : NULL;
+    ntypedefs++;
+}
+
 static void add_enum_const(const char *name, int value) {
     if (nenum_consts >= 1024) fatal("Too many enum constants");
     enum_consts[nenum_consts].name = xstrdup(name);
@@ -134,6 +157,9 @@ static int is_type_start(void) {
         match(TK_KW, "const") || match(TK_KW, "volatile") || match(TK_KW, "register") ||
         match(TK_KW, "static") || match(TK_KW, "extern") || match(TK_KW, "typedef") ||
         match(TK_KW, "_Bool") || match(TK_KW, "bool") || match(TK_KW, "inline"))
+        return 1;
+    /* Check if current identifier is a typedef name */
+    if (cur()->kind == TK_ID && find_typedef(cur()->value))
         return 1;
     return 0;
 }
@@ -171,6 +197,15 @@ static char *parse_base_type(void) {
     if (got_type) {
         skip_qualifiers();
         return NULL;
+    }
+    /* Check if it's a typedef name */
+    if (cur()->kind == TK_ID) {
+        TypedefEntry *td = find_typedef(cur()->value);
+        if (td) {
+            eat(TK_ID, NULL);
+            skip_qualifiers();
+            return td->struct_type ? xstrdup(td->struct_type) : NULL;
+        }
     }
     fatal("Expected type, got '%s' at %d", cur()->value, cur()->pos);
     return NULL;
@@ -293,7 +328,7 @@ static Stmt *parse_vardecl_stmt(void) {
         int is_ptr = 0;
         while (match(TK_OP, "*")) {
             eat(TK_OP, "*");
-            is_ptr = 1;
+            is_ptr++;
         }
         skip_qualifiers();
         Tok *name_tok = eat(TK_ID, NULL);
@@ -306,9 +341,9 @@ static Stmt *parse_vardecl_stmt(void) {
             eat(TK_OP, "]");
         }
         Expr *init = NULL;
-        /* struct_type in decl: for direct (non-pointer) struct variables and struct arrays */
-        char *decl_stype = (stype && !is_ptr) ? xstrdup(stype) : NULL;
-        if (!decl_stype && arr_size < 0 && match(TK_OP, "=")) {
+        /* struct_type in decl: for struct variables, struct arrays, and pointer-to-struct */
+        char *decl_stype = stype ? xstrdup(stype) : NULL;
+        if ((!decl_stype || is_ptr) && arr_size < 0 && match(TK_OP, "=")) {
             eat(TK_OP, "=");
             init = parse_expr(0);
         }
@@ -320,6 +355,7 @@ static Stmt *parse_vardecl_stmt(void) {
         entries[count].name = name;
         entries[count].struct_type = decl_stype;
         entries[count].array_size = arr_size;
+        entries[count].is_ptr = is_ptr;
         entries[count].init = init;
         count++;
 
@@ -598,13 +634,17 @@ static Block parse_block(void) {
 }
 
 static int starts_type(void) {
-    return (match(TK_KW, "int") || match(TK_KW, "char") || match(TK_KW, "void") ||
+    if (match(TK_KW, "int") || match(TK_KW, "char") || match(TK_KW, "void") ||
             match(TK_KW, "unsigned") || match(TK_KW, "signed") ||
             match(TK_KW, "long") || match(TK_KW, "short") ||
             match(TK_KW, "struct") || match(TK_KW, "union") || match(TK_KW, "const") ||
             match(TK_KW, "volatile") || match(TK_KW, "register") ||
             match(TK_KW, "static") || match(TK_KW, "enum") ||
-            match(TK_KW, "_Bool") || match(TK_KW, "bool"));
+            match(TK_KW, "_Bool") || match(TK_KW, "bool"))
+        return 1;
+    if (cur()->kind == TK_ID && find_typedef(cur()->value))
+        return 1;
+    return 0;
 }
 
 static Stmt *parse_stmt(void) {
@@ -1079,6 +1119,7 @@ Program *parse_program(TokArray tokarr) {
     nstruct_defs = 0;
     nlocal_vars = 0;
     nenum_consts = 0;
+    ntypedefs = 0;
 
     /* Add sizeof as a keyword for recognition */
 
@@ -1092,23 +1133,154 @@ Program *parse_program(TokArray tokarr) {
     int nprotos = 0, pcap2 = 0;
 
     while (!match(TK_EOF, NULL)) {
-        /* typedef: skip entirely */
+        /* typedef */
         if (match(TK_KW, "typedef")) {
             eat(TK_KW, "typedef");
-            /* Skip everything until semicolon, handling nested parens/braces */
-            int depth = 0;
-            while (1) {
-                if (match(TK_OP, "(") || match(TK_OP, "{")) {
-                    depth++;
-                    eat(TK_OP, NULL);
-                } else if (match(TK_OP, ")") || match(TK_OP, "}")) {
-                    depth--;
-                    eat(TK_OP, NULL);
-                } else if (depth == 0 && match(TK_OP, ";")) {
+
+            /* typedef struct/union Tag { ... } Name; or typedef struct Tag Name; */
+            if (match(TK_KW, "struct") || match(TK_KW, "union")) {
+                int is_union_td = match(TK_KW, "union");
+                if (is_union_td) eat(TK_KW, "union"); else eat(TK_KW, "struct");
+
+                char *tag_name = NULL;
+                if (match(TK_ID, NULL))
+                    tag_name = xstrdup(cur()->value);
+                eat(TK_ID, NULL);
+
+                /* struct body? */
+                if (match(TK_OP, "{")) {
+                    /* Parse the struct def inline: rewind to re-parse */
+                    /* We already consumed struct/union + name, so we need to parse body */
+                    /* Parse fields directly */
+                    eat(TK_OP, "{");
+                    char **fields = NULL;
+                    FieldInfo *finfo = NULL;
+                    int nf = 0, fcap2 = 0;
+                    while (!match(TK_OP, "}")) {
+                        char *ftype = parse_base_type();
+                        int is_ptr = 0;
+                        while (match(TK_OP, "*")) { eat(TK_OP, "*"); is_ptr = 1; }
+                        Tok *fname_tok = eat(TK_ID, NULL);
+                        if (match(TK_OP, "[")) {
+                            eat(TK_OP, "[");
+                            if (!match(TK_OP, "]")) eat(TK_NUMBER, NULL);
+                            eat(TK_OP, "]");
+                        }
+                        eat(TK_OP, ";");
+                        if (nf >= fcap2) {
+                            fcap2 = fcap2 ? fcap2 * 2 : 8;
+                            fields = realloc(fields, fcap2 * sizeof(char *));
+                            finfo = realloc(finfo, fcap2 * sizeof(FieldInfo));
+                        }
+                        fields[nf] = xstrdup(fname_tok->value);
+                        finfo[nf].name = xstrdup(fname_tok->value);
+                        finfo[nf].struct_type = ftype;
+                        finfo[nf].is_ptr = is_ptr;
+                        nf++;
+                    }
+                    eat(TK_OP, "}");
+
+                    /* Register struct def */
+                    if (tag_name) {
+                        if (nstruct_defs >= 64) fatal("Too many struct definitions");
+                        struct_defs[nstruct_defs].name = xstrdup(tag_name);
+                        struct_defs[nstruct_defs].fields = finfo;
+                        struct_defs[nstruct_defs].nfields = nf;
+                        nstruct_defs++;
+
+                        /* Also add to program structs */
+                        char **ftypes = xmalloc(nf * sizeof(char *));
+                        for (int fi = 0; fi < nf; fi++)
+                            ftypes[fi] = (finfo[fi].struct_type && !finfo[fi].is_ptr) ? xstrdup(finfo[fi].struct_type) : NULL;
+                        if (nstructs >= scap) {
+                            scap = scap ? scap * 2 : 4;
+                            structs = realloc(structs, scap * sizeof(StructDef));
+                        }
+                        structs[nstructs].name = xstrdup(tag_name);
+                        structs[nstructs].fields = fields;
+                        structs[nstructs].field_types = ftypes;
+                        structs[nstructs].nfields = nf;
+                        structs[nstructs].is_union = is_union_td;
+                        nstructs++;
+                    }
+                }
+
+                /* Skip pointer stars */
+                while (match(TK_OP, "*")) eat(TK_OP, "*");
+
+                /* The typedef alias name */
+                if (match(TK_ID, NULL)) {
+                    char *alias = xstrdup(eat(TK_ID, NULL)->value);
+                    add_typedef(alias, tag_name);
+                }
+                eat(TK_OP, ";");
+
+            } else if (match(TK_KW, "enum")) {
+                /* typedef enum ... Name; — parse enum def if body, then alias */
+                eat(TK_KW, "enum");
+                if (match(TK_ID, NULL)) eat(TK_ID, NULL); /* optional tag */
+                if (match(TK_OP, "{")) {
+                    /* Parse enum body */
+                    eat(TK_OP, "{");
+                    int value = 0;
+                    while (!match(TK_OP, "}")) {
+                        Tok *ename = eat(TK_ID, NULL);
+                        if (match(TK_OP, "=")) {
+                            eat(TK_OP, "=");
+                            int neg = 0;
+                            if (match(TK_OP, "-")) { eat(TK_OP, "-"); neg = 1; }
+                            Tok *num_tok = eat(TK_NUMBER, NULL);
+                            value = atoi(num_tok->value);
+                            if (neg) value = -value;
+                        }
+                        add_enum_const(ename->value, value);
+                        value++;
+                        if (match(TK_OP, ",")) eat(TK_OP, ",");
+                    }
+                    eat(TK_OP, "}");
+                }
+                /* alias name */
+                if (match(TK_ID, NULL)) {
+                    char *alias = xstrdup(eat(TK_ID, NULL)->value);
+                    add_typedef(alias, NULL);  /* enum → int-like */
+                }
+                eat(TK_OP, ";");
+
+            } else {
+                /* typedef <base-type> [*]* Name; or typedef with function pointers */
+                /* Try to parse base type */
+                char *stype = parse_base_type();
+                /* Check for function pointer: (*Name)(params) */
+                if (match(TK_OP, "(") && pos + 1 < ntoks &&
+                    toks[pos+1].kind == TK_OP && strcmp(toks[pos+1].value, "*") == 0) {
+                    /* typedef rettype (*Name)(params); — skip, store as int-like typedef */
+                    eat(TK_OP, "(");
+                    eat(TK_OP, "*");
+                    char *alias = xstrdup(eat(TK_ID, NULL)->value);
+                    eat(TK_OP, ")");
+                    /* skip param list */
+                    eat(TK_OP, "(");
+                    int depth = 1;
+                    while (depth > 0) {
+                        if (match(TK_OP, "(")) depth++;
+                        else if (match(TK_OP, ")")) depth--;
+                        if (depth > 0) eat(cur()->kind, NULL);
+                    }
+                    eat(TK_OP, ")");
                     eat(TK_OP, ";");
-                    break;
+                    add_typedef(alias, NULL);
                 } else {
-                    eat(cur()->kind, NULL);
+                    /* Normal: typedef type [*]* Name; */
+                    while (match(TK_OP, "*")) { eat(TK_OP, "*"); stype = NULL; /* ptr-to-struct is just ptr */ }
+                    char *alias = xstrdup(eat(TK_ID, NULL)->value);
+                    /* skip array dimensions like typedef int Arr[10]; */
+                    if (match(TK_OP, "[")) {
+                        eat(TK_OP, "[");
+                        if (!match(TK_OP, "]")) eat(TK_NUMBER, NULL);
+                        eat(TK_OP, "]");
+                    }
+                    eat(TK_OP, ";");
+                    add_typedef(alias, stype);
                 }
             }
             continue;
@@ -1173,6 +1345,9 @@ Program *parse_program(TokArray tokarr) {
                     structs = realloc(structs, scap * sizeof(StructDef));
                 }
                 structs[nstructs++] = parse_struct_or_union_def(is_union_kw);
+            } else if (match(TK_OP, ";")) {
+                /* Forward declaration: struct Foo; — just skip */
+                eat(TK_OP, ";");
             } else {
                 /* struct/union return type: could be function, prototype, or global */
                 pos = saved;
