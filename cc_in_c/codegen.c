@@ -840,14 +840,46 @@ static void gen_stmt(Stmt *st, FuncLayout *layout, const char *ret_label) {
     if (st->kind == ST_VARDECL) {
         for (int i = 0; i < st->u.vardecl.count; i++) {
             VarDeclEntry *e = &st->u.vardecl.entries[i];
-            if (e->struct_type && !e->is_ptr) continue;
-            /* Array with initializer list */
+            /* Struct initializer: struct Foo x = {a, b, c}; */
+            if (e->struct_type && !e->is_ptr && e->array_size < 0) {
+                if (e->init && e->init->kind == ND_INITLIST) {
+                    int base_off = find_slot(layout, e->name);
+                    int nelem = e->init->u.call.args.len;
+                    for (int k = 0; k < nelem; k++) {
+                        gen_value(e->init->u.call.args.data[k], layout);
+                        int elem_off = base_off - k * 8;
+                        if (elem_off <= 255) {
+                            emit("\tstr\tx0, [x29, #-%d]", elem_off);
+                        } else {
+                            emit("\tsub\tx9, x29, #%d", elem_off);
+                            emit("\tstr\tx0, [x9]");
+                        }
+                    }
+                }
+                continue;
+            }
+            /* Array with initializer list or string */
             if (e->array_size >= 0) {
                 if (e->init && e->init->kind == ND_INITLIST) {
                     int base_off = find_slot(layout, e->name);
                     int nelem = e->init->u.call.args.len;
                     for (int k = 0; k < nelem; k++) {
                         gen_value(e->init->u.call.args.data[k], layout);
+                        int elem_off = base_off - k * 8;
+                        if (elem_off <= 255) {
+                            emit("\tstr\tx0, [x29, #-%d]", elem_off);
+                        } else {
+                            emit("\tsub\tx9, x29, #%d", elem_off);
+                            emit("\tstr\tx0, [x9]");
+                        }
+                    }
+                } else if (e->init && e->init->kind == ND_STRLIT) {
+                    /* String initializer: char s[] = "hello"; */
+                    int base_off = find_slot(layout, e->name);
+                    char *decoded = decode_c_string(e->init->u.str_val);
+                    int slen = strlen(decoded) + 1; /* include null */
+                    for (int k = 0; k < slen && k < e->array_size; k++) {
+                        emit("\tmov\tx0, #%d", (unsigned char)decoded[k]);
                         int elem_off = base_off - k * 8;
                         if (elem_off <= 255) {
                             emit("\tstr\tx0, [x29, #-%d]", elem_off);
@@ -1500,6 +1532,17 @@ char *codegen_generate(Program *prog) {
                         emit("\t.quad\t0"); /* fallback for non-constant */
                     }
                 }
+            } else if (gd->array_size >= 0 && gd->init && gd->init->kind == ND_STRLIT) {
+                /* String-initialized array: emit .quad per character */
+                char *decoded = decode_c_string(gd->init->u.str_val);
+                int slen = strlen(decoded) + 1;
+                if (!has_data) { emit(""); emit("\t.data"); has_data = 1; }
+                if (!gd->is_static)
+                    emit("\t.globl\t_%s", gd->name);
+                emit("\t.p2align\t3");
+                emit("_%s:", gd->name);
+                for (int k = 0; k < slen && k < gd->array_size; k++)
+                    emit("\t.quad\t%d", (unsigned char)decoded[k]);
             } else if (gd->array_size >= 0) {
                 /* Uninitialized array: use .comm */
                 int size = gd->array_size * 8;

@@ -1263,10 +1263,22 @@ struct Stmt *parse_vardecl_stmt() {
       decl_stype = my_strdup(stype);
     }
     if (arr_size >= 0 && p_match(TK_OP, "=")) {
-      // Array initializer
+      // Array initializer or string init
+      p_eat(TK_OP, "=");
+      if (p_match(TK_STR, 0)) {
+        // String initializer for char array
+        int *str_val = my_strdup(p_eat(TK_STR, 0));
+        int slen = my_strlen(str_val) + 1;
+        if (arr_size == 0) { arr_size = slen; }
+        init = new_strlit(str_val);
+      } else {
+        init = parse_init_list();
+        if (arr_size == 0) { arr_size = init->nargs; }
+      }
+    } else if (decl_stype != 0 && is_ptr == 0 && arr_size < 0 && p_match(TK_OP, "=")) {
+      // Struct initializer
       p_eat(TK_OP, "=");
       init = parse_init_list();
-      if (arr_size == 0) { arr_size = init->nargs; }
     } else if ((decl_stype == 0 || is_ptr != 0) && arr_size < 0 && p_match(TK_OP, "=")) {
       p_eat(TK_OP, "=");
       init = parse_expr(0);
@@ -2033,11 +2045,17 @@ struct GDecl *parse_global_decl() {
   int *init_str = 0;
   struct Expr *init_list = 0;
   if (array_size >= 0 && p_match(TK_OP, "=")) {
-    // Array initializer
+    // Array initializer or string init
     p_eat(TK_OP, "=");
     has_init = 1;
-    init_list = parse_init_list();
-    if (array_size == 0) { array_size = init_list->nargs; }
+    if (p_match(TK_STR, 0)) {
+      init_str = my_strdup(p_eat(TK_STR, 0));
+      int slen = my_strlen(init_str) + 1;
+      if (array_size == 0) { array_size = slen; }
+    } else {
+      init_list = parse_init_list();
+      if (array_size == 0) { array_size = init_list->nargs; }
+    }
   } else if (p_match(TK_OP, "=")) {
     p_eat(TK_OP, "=");
     has_init = 1;
@@ -3311,14 +3329,61 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
     int k = 0;
     while (i < st->ndecls) {
       struct VarDecl *vd = st->decls[i];
-      if (vd->stype != 0 && vd->is_ptr == 0) { i = i + 1; continue; }
-      // Array with initializer list
+      // Struct initializer: struct Foo x = {a, b, c};
+      if (vd->stype != 0 && vd->is_ptr == 0 && vd->arr_size < 0) {
+        if (vd->init != 0 && vd->init->kind == ND_INITLIST) {
+          base_off = cg_find_slot(vd->name);
+          k = 0;
+          while (k < vd->init->nargs) {
+            gen_value(vd->init->args[k]);
+            elem_off = base_off - k * 8;
+            if (elem_off <= 255) {
+              emit_s("\tstr\tx0, [x29, #-");
+              emit_num(elem_off);
+              emit_line("]");
+            } else {
+              emit_s("\tsub\tx9, x29, #");
+              emit_num(elem_off);
+              emit_ch('\n');
+              emit_line("\tstr\tx0, [x9]");
+            }
+            k = k + 1;
+          }
+        }
+        i = i + 1;
+        continue;
+      }
+      // Array with initializer list or string
       if (vd->arr_size >= 0) {
         if (vd->init != 0 && vd->init->kind == ND_INITLIST) {
           base_off = cg_find_slot(vd->name);
           k = 0;
           while (k < vd->init->nargs) {
             gen_value(vd->init->args[k]);
+            elem_off = base_off - k * 8;
+            if (elem_off <= 255) {
+              emit_s("\tstr\tx0, [x29, #-");
+              emit_num(elem_off);
+              emit_line("]");
+            } else {
+              emit_s("\tsub\tx9, x29, #");
+              emit_num(elem_off);
+              emit_ch('\n');
+              emit_line("\tstr\tx0, [x9]");
+            }
+            k = k + 1;
+          }
+        } else if (vd->init != 0 && vd->init->kind == ND_STRLIT) {
+          // String initializer: char s[] = "hello";
+          base_off = cg_find_slot(vd->name);
+          int *decoded = cg_decode_string(vd->init->sval);
+          int slen = my_strlen(decoded) + 1;
+          k = 0;
+          while (k < slen && k < vd->arr_size) {
+            int ch = __read_byte(decoded, k);
+            emit_s("\tmov\tx0, #");
+            emit_num(ch);
+            emit_ch('\n');
             elem_off = base_off - k * 8;
             if (elem_off <= 255) {
               emit_s("\tstr\tx0, [x29, #-");
@@ -3619,6 +3684,8 @@ int gen_func(struct FuncDef *f) {
 int codegen(struct Program *prog) {
   struct FuncDef *fd = 0;
   struct GDecl *gd = 0;
+  int k = 0;
+  int ch = 0;
   label_id = 0;
   nsp = 0;
   nloop = 0;
@@ -3720,7 +3787,7 @@ int codegen(struct Program *prog) {
         emit_s("\t.globl\t_"); emit_line(gd->name);
         emit_line("\t.p2align\t3");
         emit_s("_"); emit_s(gd->name); emit_line(":");
-        int k = 0;
+        k = 0;
         while (k < gd->init_list->nargs) {
           struct Expr *elem = gd->init_list->args[k];
           if (elem->kind == ND_NUM) {
@@ -3730,6 +3797,20 @@ int codegen(struct Program *prog) {
           } else {
             emit_line("\t.quad\t0");
           }
+          k = k + 1;
+        }
+      } else if (gd->array_size >= 0 && gd->init_str != 0) {
+        // String-initialized array: emit .quad per character
+        int *decoded = cg_decode_string(gd->init_str);
+        int slen = my_strlen(decoded) + 1;
+        if (has_data == 0) { emit_ch('\n'); emit_line("\t.data"); has_data = 1; }
+        emit_s("\t.globl\t_"); emit_line(gd->name);
+        emit_line("\t.p2align\t3");
+        emit_s("_"); emit_s(gd->name); emit_line(":");
+        k = 0;
+        while (k < slen && k < gd->array_size) {
+          ch = __read_byte(decoded, k);
+          emit_s("\t.quad\t"); emit_num(ch); emit_ch('\n');
           k = k + 1;
         }
       } else if (gd->array_size >= 0) {

@@ -418,11 +418,24 @@ static Stmt *parse_vardecl_stmt(void) {
         /* struct_type in decl: for struct variables, struct arrays, and pointer-to-struct */
         char *decl_stype = stype ? xstrdup(stype) : NULL;
         if (arr_size >= 0 && match(TK_OP, "=")) {
-            /* Array initializer: int arr[3] = {1, 2, 3}; or int arr[] = {1, 2, 3}; */
+            /* Array initializer: int arr[3] = {1, 2, 3}; or char s[] = "str"; */
+            eat(TK_OP, "=");
+            if (match(TK_STRING, NULL)) {
+                /* String initializer for char array */
+                Tok *str_tok = eat(TK_STRING, NULL);
+                char *str = str_tok->value;
+                int slen = strlen(str) + 1; /* include null terminator */
+                if (arr_size == 0) arr_size = slen;
+                init = new_strlit(str);
+            } else {
+                init = parse_init_list();
+                if (arr_size == 0)
+                    arr_size = init->u.call.args.len; /* infer size */
+            }
+        } else if (decl_stype && !is_ptr && arr_size < 0 && match(TK_OP, "=")) {
+            /* Struct initializer: struct Point p = {1, 2}; */
             eat(TK_OP, "=");
             init = parse_init_list();
-            if (arr_size == 0)
-                arr_size = init->u.call.args.len; /* infer size */
         } else if ((!decl_stype || is_ptr) && arr_size < 0 && match(TK_OP, "=")) {
             eat(TK_OP, "=");
             init = parse_expr(0);
@@ -1226,9 +1239,16 @@ static GlobalDecl parse_global_decl(int is_static) {
     if (arr_size >= 0 && match(TK_OP, "=")) {
         /* Array initializer */
         eat(TK_OP, "=");
-        init = parse_init_list();
-        if (arr_size == 0)
-            arr_size = init->u.call.args.len;
+        if (match(TK_STRING, NULL)) {
+            Tok *str_tok = eat(TK_STRING, NULL);
+            int slen = strlen(str_tok->value) + 1;
+            if (arr_size == 0) arr_size = slen;
+            init = new_strlit(str_tok->value);
+        } else {
+            init = parse_init_list();
+            if (arr_size == 0)
+                arr_size = init->u.call.args.len;
+        }
     } else if (arr_size < 0 && match(TK_OP, "=")) {
         eat(TK_OP, "=");
         /* Handle negative initializers */
