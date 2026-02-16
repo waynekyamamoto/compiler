@@ -300,8 +300,8 @@ static Stmt *parse_vardecl_stmt(void) {
             eat(TK_OP, "]");
         }
         Expr *init = NULL;
-        /* struct_type in decl: only for direct (non-pointer) struct variables */
-        char *decl_stype = (stype && !is_ptr && arr_size < 0) ? xstrdup(stype) : NULL;
+        /* struct_type in decl: for direct (non-pointer) struct variables and struct arrays */
+        char *decl_stype = (stype && !is_ptr) ? xstrdup(stype) : NULL;
         if (!decl_stype && arr_size < 0 && match(TK_OP, "=")) {
             eat(TK_OP, "=");
             init = parse_expr(0);
@@ -546,6 +546,9 @@ static Expr *parse_primary(void) {
                 if (lv) st = lv->struct_type;
             } else if (e->kind == ND_FIELD || e->kind == ND_ARROW) {
                 st = field_struct_type(e->u.field.struct_type, e->u.field.field);
+            } else if (e->kind == ND_INDEX && e->u.index.base->kind == ND_VAR) {
+                LocalVar *lv2 = find_local(e->u.index.base->u.var_name);
+                if (lv2) st = lv2->struct_type;
             } else if (e->kind == ND_INDEX && (e->u.index.base->kind == ND_FIELD || e->u.index.base->kind == ND_ARROW)) {
                 st = field_struct_type(e->u.index.base->u.field.struct_type, e->u.index.base->u.field.field);
             }
@@ -560,6 +563,9 @@ static Expr *parse_primary(void) {
                 if (lv) st = lv->struct_type;
             } else if (e->kind == ND_FIELD || e->kind == ND_ARROW) {
                 st = field_struct_type(e->u.field.struct_type, e->u.field.field);
+            } else if (e->kind == ND_INDEX && e->u.index.base->kind == ND_VAR) {
+                LocalVar *lv2 = find_local(e->u.index.base->u.var_name);
+                if (lv2) st = lv2->struct_type;
             } else if (e->kind == ND_INDEX && (e->u.index.base->kind == ND_FIELD || e->u.index.base->kind == ND_ARROW)) {
                 st = field_struct_type(e->u.index.base->u.field.struct_type, e->u.index.base->u.field.field);
             }

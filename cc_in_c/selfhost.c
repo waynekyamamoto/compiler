@@ -780,6 +780,19 @@ int *field_stype(int *sname, int *fname) {
   return 0;
 }
 
+int *resolve_stype(struct Expr *e) {
+  if (e->kind == ND_VAR) {
+    return find_lv_stype(e->sval);
+  }
+  if (e->kind == ND_FIELD || e->kind == ND_ARROW) {
+    return field_stype(e->sval2, e->sval);
+  }
+  if (e->kind == ND_INDEX) {
+    return resolve_stype(e->left);
+  }
+  return 0;
+}
+
 // ---- AST constructors ----
 
 struct Expr *new_num(int val) {
@@ -1127,7 +1140,7 @@ struct Stmt *parse_vardecl_stmt() {
     }
     struct Expr *init = 0;
     int *decl_stype = 0;
-    if (stype != 0 && is_ptr == 0 && arr_size < 0) {
+    if (stype != 0 && is_ptr == 0) {
       decl_stype = my_strdup(stype);
     }
     if (decl_stype == 0 && arr_size < 0 && p_match(TK_OP, "=")) {
@@ -1404,23 +1417,13 @@ struct Expr *parse_primary() {
     } else if (p_match(TK_OP, ".")) {
       p_eat(TK_OP, ".");
       field = my_strdup(p_eat(TK_ID, 0));
-      st = 0;
-      if (e->kind == ND_VAR) {
-        st = find_lv_stype(e->sval);
-      } else if (e->kind == ND_FIELD || e->kind == ND_ARROW) {
-        st = field_stype(e->sval2, e->sval);
-      }
+      st = resolve_stype(e);
       if (st == 0) { my_fatal("cannot resolve struct type for '.'"); }
       e = new_field(e, field, st);
     } else {
       p_eat(TK_OP, "->");
       field = my_strdup(p_eat(TK_ID, 0));
-      st = 0;
-      if (e->kind == ND_VAR) {
-        st = find_lv_stype(e->sval);
-      } else if (e->kind == ND_FIELD || e->kind == ND_ARROW) {
-        st = field_stype(e->sval2, e->sval);
-      }
+      st = resolve_stype(e);
       if (st == 0) { my_fatal("cannot resolve struct type for '->'"); }
       e = new_arrow(e, field, st);
     }
@@ -2102,6 +2105,15 @@ int cg_is_structvar(int *name) {
   return 0;
 }
 
+int *cg_structvar_type(int *name) {
+  int i = 0;
+  while (i < nlay_sv) {
+    if (my_strcmp(lay_sv_name[i], name) == 0) { return lay_sv_type[i]; }
+    i = i + 1;
+  }
+  return 0;
+}
+
 int cg_field_index(int *sname, int *fname) {
   int i = 0;
   while (i < ncg_s) {
@@ -2246,6 +2258,7 @@ int lay_add_slot(int *name, int off) {
 }
 
 int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
+  int nf = 0;
   int i = 0;
   while (i < nstmts) {
     struct Stmt *st = stmts[i];
@@ -2257,8 +2270,18 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
           printf("cc: duplicate variable '%s'\n", vd->name);
           exit(1);
         }
-        if (vd->stype != 0) {
-          int nf = cg_struct_nfields(vd->stype);
+        if (vd->stype != 0 && vd->arr_size >= 0) {
+          // struct array: allocate arr_size * nfields slots
+          nf = cg_struct_nfields(vd->stype);
+          *offset = *offset + vd->arr_size * nf * 8;
+          lay_sv_name[nlay_sv] = my_strdup(vd->name);
+          lay_sv_type[nlay_sv] = my_strdup(vd->stype);
+          nlay_sv = nlay_sv + 1;
+          lay_arr_name[nlay_arr] = my_strdup(vd->name);
+          lay_arr_count[nlay_arr] = vd->arr_size;
+          nlay_arr = nlay_arr + 1;
+        } else if (vd->stype != 0) {
+          nf = cg_struct_nfields(vd->stype);
           *offset = *offset + nf * 8;
           lay_sv_name[nlay_sv] = my_strdup(vd->name);
           lay_sv_type[nlay_sv] = my_strdup(vd->stype);
@@ -2372,10 +2395,25 @@ int gen_addr(struct Expr *e) {
     return 0;
   }
   if (e->kind == ND_INDEX) {
+    int *idx_stype = 0;
+    int idx_stride = 8;
+    if (e->left->kind == ND_VAR) {
+      idx_stype = cg_structvar_type(e->left->sval);
+    }
+    if (idx_stype != 0) {
+      idx_stride = cg_struct_nfields(idx_stype) * 8;
+    }
     gen_value(e->left);
     emit_line("\tstr\tx0, [sp, #-16]!");
     gen_value(e->right);
-    emit_line("\tlsl\tx0, x0, #3");
+    if (idx_stride == 8) {
+      emit_line("\tlsl\tx0, x0, #3");
+    } else {
+      emit_s("\tmov\tx1, #");
+      emit_num(idx_stride);
+      emit_ch('\n');
+      emit_line("\tmul\tx0, x0, x1");
+    }
     emit_line("\tldr\tx1, [sp], #16");
     emit_line("\tadd\tx0, x1, x0");
     return 0;

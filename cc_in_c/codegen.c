@@ -138,6 +138,13 @@ static int is_structvar(FuncLayout *layout, const char *name) {
     return 0;
 }
 
+static const char *find_structvar_type(FuncLayout *layout, const char *name) {
+    for (int i = 0; i < layout->nstructvars; i++)
+        if (strcmp(layout->structvars[i].name, name) == 0)
+            return layout->structvars[i].struct_type;
+    return NULL;
+}
+
 static CgStructDef *find_cg_struct(const char *name) {
     for (int i = 0; i < ncg_structs; i++)
         if (strcmp(cg_structs[i].name, name) == 0)
@@ -285,7 +292,19 @@ static void walk_stmts_for_layout(StmtArray *stmts, FuncLayout *layout, int *off
                 VarDeclEntry *e = &st->u.vardecl.entries[j];
                 if (find_slot(layout, e->name) >= 0)
                     continue; /* already laid out (e.g. redecl in nested scope) */
-                if (e->struct_type) {
+                if (e->struct_type && e->array_size >= 0) {
+                    /* struct array */
+                    int nf = cg_struct_nfields(e->struct_type);
+                    *offset += e->array_size * nf * 8;
+                    if (layout->nstructvars >= 64) fatal("Too many struct vars");
+                    layout->structvars[layout->nstructvars].name = xstrdup(e->name);
+                    layout->structvars[layout->nstructvars].struct_type = xstrdup(e->struct_type);
+                    layout->nstructvars++;
+                    if (layout->narrays >= 64) fatal("Too many arrays");
+                    layout->arrays[layout->narrays].name = xstrdup(e->name);
+                    layout->arrays[layout->narrays].count = e->array_size;
+                    layout->narrays++;
+                } else if (e->struct_type) {
                     int nf = cg_struct_nfields(e->struct_type);
                     *offset += nf * 8;
                     if (layout->nstructvars >= 64) fatal("Too many struct vars");
@@ -389,10 +408,21 @@ static void gen_addr(Expr *e, FuncLayout *layout) {
         return;
     }
     if (e->kind == ND_INDEX) {
+        const char *idx_stype = NULL;
+        int stride = 8;
+        if (e->u.index.base->kind == ND_VAR)
+            idx_stype = find_structvar_type(layout, e->u.index.base->u.var_name);
+        if (idx_stype)
+            stride = cg_struct_nfields(idx_stype) * 8;
         gen_value(e->u.index.base, layout);
         emit("\tstr\tx0, [sp, #-16]!");
         gen_value(e->u.index.index, layout);
-        emit("\tlsl\tx0, x0, #3");
+        if (stride == 8) {
+            emit("\tlsl\tx0, x0, #3");
+        } else {
+            emit("\tmov\tx1, #%d", stride);
+            emit("\tmul\tx0, x0, x1");
+        }
         emit("\tldr\tx1, [sp], #16");
         emit("\tadd\tx0, x1, x0");
         return;
