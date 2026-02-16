@@ -546,6 +546,8 @@ static Expr *parse_primary(void) {
                 if (lv) st = lv->struct_type;
             } else if (e->kind == ND_FIELD || e->kind == ND_ARROW) {
                 st = field_struct_type(e->u.field.struct_type, e->u.field.field);
+            } else if (e->kind == ND_INDEX && (e->u.index.base->kind == ND_FIELD || e->u.index.base->kind == ND_ARROW)) {
+                st = field_struct_type(e->u.index.base->u.field.struct_type, e->u.index.base->u.field.field);
             }
             if (!st) fatal("Cannot resolve struct type for '.' at %d", cur()->pos);
             e = new_field(e, field, st);
@@ -558,6 +560,8 @@ static Expr *parse_primary(void) {
                 if (lv) st = lv->struct_type;
             } else if (e->kind == ND_FIELD || e->kind == ND_ARROW) {
                 st = field_struct_type(e->u.field.struct_type, e->u.field.field);
+            } else if (e->kind == ND_INDEX && (e->u.index.base->kind == ND_FIELD || e->u.index.base->kind == ND_ARROW)) {
+                st = field_struct_type(e->u.index.base->u.field.struct_type, e->u.index.base->u.field.field);
             }
             if (!st) fatal("Cannot resolve struct type for '->' at %d", cur()->pos);
             e = new_arrow(e, field, st);
