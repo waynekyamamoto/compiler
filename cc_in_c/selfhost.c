@@ -586,17 +586,18 @@ int lex(int *src, int srclen) {
       if (__read_byte(buf, i) == '\\') {
         i++;
         ec = __read_byte(buf, i);
-        if (ec == 'n') { ch = 10; }
-        else if (ec == 't') { ch = 9; }
-        else if (ec == 'r') { ch = 13; }
-        else if (ec == 'a') { ch = 7; }
-        else if (ec == 'b') { ch = 8; }
-        else if (ec == 'f') { ch = 12; }
-        else if (ec == 'v') { ch = 11; }
-        else if (ec == '\\') { ch = 92; }
-        else if (ec == 39) { ch = 39; }
-        else if (ec == '0') { ch = 0; }
-        else if (ec == 'x') {
+        switch (ec) {
+        case 'n': ch = 10; break;
+        case 't': ch = 9; break;
+        case 'r': ch = 13; break;
+        case 'a': ch = 7; break;
+        case 'b': ch = 8; break;
+        case 'f': ch = 12; break;
+        case 'v': ch = 11; break;
+        case '\\': ch = 92; break;
+        case 39: ch = 39; break;
+        case '0': ch = 0; break;
+        case 'x':
           // hex escape \xHH
           i++;
           ch = 0;
@@ -609,8 +610,8 @@ int lex(int *src, int srclen) {
             i++;
           }
           i--;
-        }
-        else if (ec >= '0' && ec <= '7') {
+          break;
+        case '1': case '2': case '3': case '4': case '5': case '6': case '7':
           // octal escape \ooo
           ch = ec - '0';
           i++;
@@ -623,8 +624,9 @@ int lex(int *src, int srclen) {
             }
           }
           i--;
+          break;
+        default: my_fatal("bad char escape"); break;
         }
-        else { my_fatal("bad char escape"); }
         i++;
       } else {
         ch = __read_byte(buf, i);
@@ -2613,17 +2615,18 @@ int *cg_decode_string(int *lit) {
     }
     i++;
     int ec = __read_byte(lit, i);
-    if (ec == 'n') { __write_byte(buf, j, 10); }
-    else if (ec == 't') { __write_byte(buf, j, 9); }
-    else if (ec == 'r') { __write_byte(buf, j, 13); }
-    else if (ec == 'a') { __write_byte(buf, j, 7); }
-    else if (ec == 'b') { __write_byte(buf, j, 8); }
-    else if (ec == 'f') { __write_byte(buf, j, 12); }
-    else if (ec == 'v') { __write_byte(buf, j, 11); }
-    else if (ec == '\\') { __write_byte(buf, j, 92); }
-    else if (ec == '"') { __write_byte(buf, j, 34); }
-    else if (ec == '0') { __write_byte(buf, j, 0); }
-    else if (ec == 'x') {
+    switch (ec) {
+    case 'n': __write_byte(buf, j, 10); break;
+    case 't': __write_byte(buf, j, 9); break;
+    case 'r': __write_byte(buf, j, 13); break;
+    case 'a': __write_byte(buf, j, 7); break;
+    case 'b': __write_byte(buf, j, 8); break;
+    case 'f': __write_byte(buf, j, 12); break;
+    case 'v': __write_byte(buf, j, 11); break;
+    case '\\': __write_byte(buf, j, 92); break;
+    case '"': __write_byte(buf, j, 34); break;
+    case '0': __write_byte(buf, j, 0); break;
+    case 'x':
       // hex escape \xHH
       val = 0;
       i++;
@@ -2638,8 +2641,7 @@ int *cg_decode_string(int *lit) {
       __write_byte(buf, j, val);
       j++;
       continue;
-    }
-    else if (ec >= '0' && ec <= '7') {
+    case '1': case '2': case '3': case '4': case '5': case '6': case '7':
       // octal escape \ooo
       val = ec - '0';
       i++;
@@ -2654,8 +2656,8 @@ int *cg_decode_string(int *lit) {
       __write_byte(buf, j, val);
       j++;
       continue;
+    default: my_fatal("bad escape in string literal"); break;
     }
-    else { my_fatal("bad escape in string literal"); }
     j++;
     i++;
   }
@@ -2669,12 +2671,14 @@ int cg_emit_escaped_string(int *s) {
   while (1) {
     int c = __read_byte(s, i);
     if (c == 0) { break; }
-    if (c == '\\') { emit_ch('\\'); emit_ch('\\'); }
-    else if (c == '"') { emit_ch('\\'); emit_ch('"'); }
-    else if (c == 10) { emit_ch('\\'); emit_ch('n'); }
-    else if (c == 9) { emit_ch('\\'); emit_ch('t'); }
-    else if (c == 13) { emit_ch('\\'); emit_ch('r'); }
-    else { emit_ch(c); }
+    switch (c) {
+    case '\\': emit_ch('\\'); emit_ch('\\'); break;
+    case '"': emit_ch('\\'); emit_ch('"'); break;
+    case 10: emit_ch('\\'); emit_ch('n'); break;
+    case 9: emit_ch('\\'); emit_ch('t'); break;
+    case 13: emit_ch('\\'); emit_ch('r'); break;
+    default: emit_ch(c); break;
+    }
     i++;
   }
   return 0;
