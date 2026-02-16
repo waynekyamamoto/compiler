@@ -19,6 +19,23 @@ test: $(TARGET)
 	./cc ../hello.c -o hello_test && ./hello_test
 	./cc ../hanoi.c -o hanoi_test && ./hanoi_test
 	./cc ../ptr_test.c -o ptr_test_out && ./ptr_test_out
-	rm -f hello_test hanoi_test ptr_test_out ../hello.s ../hanoi.s ../ptr_test.s
+	rm -f hello_test hanoi_test ptr_test_out ../hello.s ../hanoi.s ../ptr_test.s ../hello.o ../hanoi.o ../ptr_test.o
 
-.PHONY: all clean test
+test-new: $(TARGET)
+	@for n in 1 2 3 4 5; do \
+		echo "=== test_batch$$n ==="; \
+		./cc test_batch$$n.c -o test_batch$${n}_out && ./test_batch$${n}_out || exit 1; \
+	done
+	@rm -f test_batch*_out test_batch*.s test_batch*.o
+	@echo "All batch tests passed."
+
+test-selfhost: $(TARGET)
+	./cc selfhost.c -o gen1
+	@for n in 1 2 3 4 5; do \
+		echo "=== test_batch$$n (selfhost) ==="; \
+		./gen1 test_batch$$n.c -o /tmp/test_batch$${n}_out && /tmp/test_batch$${n}_out || exit 1; \
+	done
+	@rm -f gen1 /tmp/test_batch*_out
+	@echo "All selfhost batch tests passed."
+
+.PHONY: all clean test test-new test-selfhost
