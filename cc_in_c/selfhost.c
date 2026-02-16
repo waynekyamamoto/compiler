@@ -1026,6 +1026,25 @@ int skip_qualifiers() {
   return skipped;
 }
 
+int is_funcptr_decl() {
+  if (!p_match(TK_OP, "(")) { return 0; }
+  if (cur_pos + 1 < ntokens && tok_kind[cur_pos + 1] == TK_OP && my_strcmp(tok_val[cur_pos + 1], "*") == 0) { return 1; }
+  return 0;
+}
+
+int skip_param_list() {
+  int depth = 0;
+  p_eat(TK_OP, "(");
+  depth = 1;
+  while (depth > 0) {
+    if (p_match(TK_OP, "(")) { depth = depth + 1; }
+    if (p_match(TK_OP, ")")) { depth = depth - 1; }
+    if (depth > 0) { cur_pos = cur_pos + 1; }
+  }
+  p_eat(TK_OP, ")");
+  return 0;
+}
+
 int *find_typedef(int *name) {
   int i = 0;
   while (i < ntd) {
@@ -1182,11 +1201,31 @@ struct Stmt *parse_vardecl_stmt() {
 
   while (1) {
     int is_ptr = 0;
+    int is_funcptr = 0;
+    // Function pointer: type (*name)(params) or type *(*name)(params)
+    if (is_funcptr_decl()) {
+      p_eat(TK_OP, "(");
+      p_eat(TK_OP, "*");
+      is_ptr = 1;
+      is_funcptr = 1;
+    }
     while (p_match(TK_OP, "*")) {
       p_eat(TK_OP, "*");
       is_ptr = is_ptr + 1;
     }
+    // Check again after consuming stars: type * (*name)(params)
+    if (is_funcptr == 0 && is_funcptr_decl()) {
+      p_eat(TK_OP, "(");
+      p_eat(TK_OP, "*");
+      is_ptr = is_ptr + 1;
+      is_funcptr = 1;
+    }
+    skip_qualifiers();
     int *name = my_strdup(p_eat(TK_ID, 0));
+    if (is_funcptr) {
+      p_eat(TK_OP, ")");
+      skip_param_list();
+    }
     int arr_size = 0 - 1;
     if (p_match(TK_OP, "[")) {
       p_eat(TK_OP, "[");
@@ -1350,14 +1389,17 @@ struct Expr *parse_unary() {
     return new_num(8);
   }
 
-  // Type cast: (type)expr
+  // Type cast: (type)expr — handles funcptr casts like (int (*)(int, int))
   if (p_match(TK_OP, "(")) {
     cast_saved = cur_pos;
     p_eat(TK_OP, "(");
     if (tok_kind[cur_pos] == TK_KW && is_type_keyword(tok_val[cur_pos])) {
-      // Skip the type
-      while (!p_match(TK_OP, ")")) {
-        cur_pos = cur_pos + 1;
+      // Skip the type, handling nested parens for funcptr casts
+      int cast_depth = 1;
+      while (cast_depth > 0) {
+        if (p_match(TK_OP, "(")) { cast_depth = cast_depth + 1; }
+        if (p_match(TK_OP, ")")) { cast_depth = cast_depth - 1; }
+        if (cast_depth > 0) { cur_pos = cur_pos + 1; }
       }
       p_eat(TK_OP, ")");
       return parse_unary();
@@ -1451,9 +1493,41 @@ struct Expr *parse_primary() {
     return 0;
   }
 
-  // Postfix: [], ., ->, ++, --
+  // Postfix: [], ., ->, ++, --, ()
   while (p_match(TK_OP, "[") || p_match(TK_OP, ".") || p_match(TK_OP, "->") ||
-         p_match(TK_OP, "++") || p_match(TK_OP, "--")) {
+         p_match(TK_OP, "++") || p_match(TK_OP, "--") || p_match(TK_OP, "(")) {
+    // Postfix function call: expr(args) — for indirect calls through non-identifiers
+    if (p_match(TK_OP, "(")) {
+      p_eat(TK_OP, "(");
+      struct Expr **ic_args = my_malloc(64 * 8);
+      int ic_nargs = 0;
+      if (!p_match(TK_OP, ")")) {
+        while (1) {
+          ic_args[ic_nargs] = parse_expr(0);
+          ic_nargs = ic_nargs + 1;
+          if (p_match(TK_OP, ",")) { p_eat(TK_OP, ","); continue; }
+          break;
+        }
+      }
+      p_eat(TK_OP, ")");
+      if (e->kind == ND_VAR) {
+        e = new_call(e->sval, ic_args, ic_nargs);
+      } else {
+        // Indirect call: prepend function expression as first arg
+        struct Expr **new_args = my_malloc(64 * 8);
+        int na = 0;
+        new_args[0] = e;
+        na = 1;
+        int ai = 0;
+        while (ai < ic_nargs) {
+          new_args[na] = ic_args[ai];
+          na = na + 1;
+          ai = ai + 1;
+        }
+        e = new_call("__indirect_call", new_args, na);
+      }
+      continue;
+    }
     if (p_match(TK_OP, "++")) {
       p_eat(TK_OP, "++");
       e = new_postinc(e);
@@ -1732,11 +1806,29 @@ struct SDef *parse_struct_or_union_def(int is_union) {
   while (!p_match(TK_OP, "}")) {
     int *ftype = parse_base_type();
     int is_ptr = 0;
+    int is_funcptr = 0;
+    // Function pointer field: type (*name)(params)
+    if (is_funcptr_decl()) {
+      p_eat(TK_OP, "(");
+      p_eat(TK_OP, "*");
+      is_ptr = 1;
+      is_funcptr = 1;
+    }
     while (p_match(TK_OP, "*")) {
       p_eat(TK_OP, "*");
       is_ptr = 1;
     }
     int *fname = my_strdup(p_eat(TK_ID, 0));
+    if (is_funcptr) {
+      p_eat(TK_OP, ")");
+      skip_param_list();
+    }
+    // skip array dimensions in struct fields
+    if (p_match(TK_OP, "[")) {
+      p_eat(TK_OP, "[");
+      if (!p_match(TK_OP, "]")) { p_eat(TK_NUM, 0); }
+      p_eat(TK_OP, "]");
+    }
     p_eat(TK_OP, ";");
 
     fields[nf] = fname;
@@ -1806,13 +1898,33 @@ struct FuncDef *parse_func() {
       }
       int *stype = parse_base_type();
       int is_ptr = 0;
+      int is_funcptr = 0;
+      // Function pointer param: type (*name)(params)
+      if (is_funcptr_decl()) {
+        p_eat(TK_OP, "(");
+        p_eat(TK_OP, "*");
+        is_ptr = 1;
+        is_funcptr = 1;
+      }
       while (p_match(TK_OP, "*")) {
         p_eat(TK_OP, "*");
         is_ptr = 1;
       }
+      skip_qualifiers();
+      // Unnamed funcptr param: type (*)(params)
+      if (is_funcptr && p_match(TK_OP, ")")) {
+        p_eat(TK_OP, ")");
+        skip_param_list();
+        if (p_match(TK_OP, ",")) { p_eat(TK_OP, ","); continue; }
+        break;
+      }
       // Parameter might be unnamed (in prototypes)
       if (p_match(TK_ID, 0)) {
         int *pname = my_strdup(p_eat(TK_ID, 0));
+        if (is_funcptr) {
+          p_eat(TK_OP, ")");
+          skip_param_list();
+        }
         params[np] = my_strdup(pname);
         np = np + 1;
         if (stype != 0) {
@@ -1859,8 +1971,21 @@ struct FuncDef *parse_func() {
 struct GDecl *parse_global_decl() {
   parse_base_type();
   int is_ptr = 0;
+  int is_funcptr = 0;
+  // Function pointer global: type (*name)(params)
+  if (is_funcptr_decl()) {
+    p_eat(TK_OP, "(");
+    p_eat(TK_OP, "*");
+    is_ptr = 1;
+    is_funcptr = 1;
+  }
   while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); is_ptr = 1; }
+  skip_qualifiers();
   int *name = my_strdup(p_eat(TK_ID, 0));
+  if (is_funcptr) {
+    p_eat(TK_OP, ")");
+    skip_param_list();
+  }
 
   int array_size = 0 - 1;
   if (p_match(TK_OP, "[")) {
@@ -2092,6 +2217,24 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
   } else {
     // Normal: typedef type [*]* Name;
     while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); ptd_stype = 0; }
+    // Check again for funcptr after stars: typedef int *(*Name)(params);
+    if (p_match(TK_OP, "(") && cur_pos + 1 < ntokens && tok_kind[cur_pos + 1] == TK_OP && my_strcmp(tok_val[cur_pos + 1], "*") == 0) {
+      p_eat(TK_OP, "(");
+      p_eat(TK_OP, "*");
+      alias = my_strdup(p_eat(TK_ID, 0));
+      p_eat(TK_OP, ")");
+      p_eat(TK_OP, "(");
+      td_depth = 1;
+      while (td_depth > 0) {
+        if (p_match(TK_OP, "(")) { td_depth = td_depth + 1; }
+        if (p_match(TK_OP, ")")) { td_depth = td_depth - 1; }
+        if (td_depth > 0) { cur_pos = cur_pos + 1; }
+      }
+      p_eat(TK_OP, ")");
+      p_eat(TK_OP, ";");
+      add_typedef(alias, 0);
+      return 0;
+    }
     alias = my_strdup(p_eat(TK_ID, 0));
     if (p_match(TK_OP, "[")) {
       p_eat(TK_OP, "[");
@@ -2978,6 +3121,44 @@ int gen_value(struct Expr *e) {
     if (nargs > 8) { my_fatal("too many args"); }
     int ai = 0;
     int disp = 0;
+    int real_nargs = 0;
+
+    // Indirect call through arbitrary expression (e.g. s.field(args))
+    if (my_strcmp(name, "__indirect_call") == 0) {
+      real_nargs = nargs - 1;
+      if (real_nargs > 8) { my_fatal("too many args"); }
+      // Load function pointer expression (args[0]), push to stack
+      gen_value(e->args[0]);
+      emit_line("\tstr\tx0, [sp, #-16]!");
+      // Push actual args to stack
+      ai = 0;
+      while (ai < real_nargs) {
+        gen_value(e->args[1 + ai]);
+        emit_line("\tstr\tx0, [sp, #-16]!");
+        ai = ai + 1;
+      }
+      // Load function pointer from bottom of stack into x8
+      emit_s("\tldr\tx8, [sp, #");
+      emit_num(real_nargs * 16);
+      emit_line("]");
+      // Load args from stack into registers
+      ai = 0;
+      while (ai < real_nargs) {
+        disp = (real_nargs - 1 - ai) * 16;
+        emit_s("\tldr\tx");
+        emit_num(ai);
+        emit_s(", [sp, #");
+        emit_num(disp);
+        emit_line("]");
+        ai = ai + 1;
+      }
+      // Pop all (args + function pointer)
+      emit_s("\tadd\tsp, sp, #");
+      emit_num((real_nargs + 1) * 16);
+      emit_ch('\n');
+      emit_line("\tblr\tx8");
+      return 0;
+    }
 
     // Indirect call through function pointer variable
     if (is_known_func(name) == 0 && (cg_find_slot(name) >= 0 || cg_is_global(name))) {

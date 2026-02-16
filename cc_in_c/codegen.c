@@ -754,6 +754,32 @@ static void gen_value(Expr *e, FuncLayout *layout) {
 
         if (nargs > 8) fatal("Supports up to 8 call arguments");
 
+        /* Indirect call through arbitrary expression (e.g. s.field(args)) */
+        if (strcmp(name, "__indirect_call") == 0) {
+            /* args[0] is the function pointer expression, args[1..n] are actual args */
+            int real_nargs = nargs - 1;
+            if (real_nargs > 8) fatal("Supports up to 8 call arguments");
+            /* Load function pointer expression, push to stack */
+            gen_value(args[0], layout);
+            emit("\tstr\tx0, [sp, #-16]!");
+            /* Push actual args to stack */
+            for (int i = 0; i < real_nargs; i++) {
+                gen_value(args[1 + i], layout);
+                emit("\tstr\tx0, [sp, #-16]!");
+            }
+            /* Load function pointer from bottom of stack into x8 */
+            emit("\tldr\tx8, [sp, #%d]", real_nargs * 16);
+            /* Load args from stack into registers */
+            for (int i = 0; i < real_nargs; i++) {
+                int disp = (real_nargs - 1 - i) * 16;
+                emit("\tldr\tx%d, [sp, #%d]", i, disp);
+            }
+            /* Pop all (args + function pointer) */
+            emit("\tadd\tsp, sp, #%d", (real_nargs + 1) * 16);
+            emit("\tblr\tx8");
+            return;
+        }
+
         /* Indirect call through function pointer variable */
         if (!is_known_func(name) &&
             (find_slot(layout, name) >= 0 || find_global(name))) {

@@ -140,6 +140,29 @@ static void add_enum_const(const char *name, int value) {
     nenum_consts++;
 }
 
+/* ---- Helpers for function pointer parsing ---- */
+
+/* Check if we're looking at a function pointer declarator: (*name)(params)
+   Returns 1 if so. Does not advance pos. */
+static int is_funcptr_decl(void) {
+    if (!match(TK_OP, "(")) return 0;
+    return (pos + 1 < ntoks && toks[pos+1].kind == TK_OP &&
+            strcmp(toks[pos+1].value, "*") == 0);
+}
+
+/* Skip a parenthesized parameter list: (type1, type2, ...) or (type1 name1, ...)
+   Handles nested parentheses. */
+static void skip_param_list(void) {
+    eat(TK_OP, "(");
+    int depth = 1;
+    while (depth > 0) {
+        if (match(TK_OP, "(")) depth++;
+        else if (match(TK_OP, ")")) depth--;
+        if (depth > 0) eat(cur()->kind, NULL);
+    }
+    eat(TK_OP, ")");
+}
+
 /* ---- Type parsing ---- */
 
 /* Skip type qualifiers: const, volatile, register */
@@ -235,11 +258,23 @@ static StructDef parse_struct_or_union_def(int is_union) {
     while (!match(TK_OP, "}")) {
         char *ftype = parse_base_type();
         int is_ptr = 0;
+        int is_funcptr = 0;
+        /* Function pointer field: type (*name)(params) */
+        if (is_funcptr_decl()) {
+            eat(TK_OP, "(");
+            eat(TK_OP, "*");
+            is_ptr = 1;
+            is_funcptr = 1;
+        }
         while (match(TK_OP, "*")) {
             eat(TK_OP, "*");
             is_ptr = 1;
         }
         Tok *fname_tok = eat(TK_ID, NULL);
+        if (is_funcptr) {
+            eat(TK_OP, ")");
+            skip_param_list();
+        }
         /* skip array dimensions in struct fields */
         if (match(TK_OP, "[")) {
             eat(TK_OP, "[");
@@ -326,13 +361,33 @@ static Stmt *parse_vardecl_stmt(void) {
 
     while (1) {
         int is_ptr = 0;
+        int is_funcptr = 0;
+        /* Function pointer: type (*name)(params) or type *(*name)(params) */
+        if (is_funcptr_decl()) {
+            eat(TK_OP, "(");
+            eat(TK_OP, "*");
+            is_ptr = 1;
+            is_funcptr = 1;
+        }
         while (match(TK_OP, "*")) {
             eat(TK_OP, "*");
             is_ptr++;
         }
+        /* Check again after consuming stars: type * (*name)(params) */
+        if (!is_funcptr && is_funcptr_decl()) {
+            eat(TK_OP, "(");
+            eat(TK_OP, "*");
+            is_ptr++;
+            is_funcptr = 1;
+        }
         skip_qualifiers();
         Tok *name_tok = eat(TK_ID, NULL);
         char *name = xstrdup(name_tok->value);
+        /* Close the funcptr declarator paren and skip param list */
+        if (is_funcptr) {
+            eat(TK_OP, ")");
+            skip_param_list();
+        }
         int arr_size = -1;
         if (match(TK_OP, "[")) {
             eat(TK_OP, "[");
@@ -492,7 +547,15 @@ static Expr *parse_unary(void) {
         if (is_type_start()) {
             /* It's a cast — consume the type and closing paren, then parse unary */
             parse_base_type();
-            while (match(TK_OP, "*")) eat(TK_OP, "*");
+            /* Function pointer cast: (type (*)(params))expr */
+            if (is_funcptr_decl()) {
+                eat(TK_OP, "(");
+                eat(TK_OP, "*");
+                eat(TK_OP, ")");
+                skip_param_list();
+            } else {
+                while (match(TK_OP, "*")) eat(TK_OP, "*");
+            }
             eat(TK_OP, ")");
             Expr *operand = parse_unary();
             return operand; /* cast is a no-op for now */
@@ -565,9 +628,46 @@ static Expr *parse_primary(void) {
         return NULL;
     }
 
-    /* postfix: [], ., ->, ++, -- */
+    /* postfix: [], ., ->, ++, --, () */
     while (match(TK_OP, "[") || match(TK_OP, ".") || match(TK_OP, "->") ||
-           match(TK_OP, "++") || match(TK_OP, "--")) {
+           match(TK_OP, "++") || match(TK_OP, "--") || match(TK_OP, "(")) {
+        /* Postfix function call: expr(args) — for indirect calls through non-identifiers */
+        if (match(TK_OP, "(")) {
+            eat(TK_OP, "(");
+            ExprArray args = {NULL, 0, 0};
+            if (!match(TK_OP, ")")) {
+                while (1) {
+                    exprarray_push(&args, parse_expr(0));
+                    if (match(TK_OP, ",")) { eat(TK_OP, ","); continue; }
+                    break;
+                }
+            }
+            eat(TK_OP, ")");
+            /* Wrap as: assign e to a temp, then call.
+               For codegen, we create a call node with the expression as name "__indirect"
+               and prepend the function expression as the first "arg". */
+            /* Actually, we need to express this in the existing AST.
+               The simplest approach: if e is a VAR, create a regular CALL.
+               Otherwise, create an UNARY(*) + CALL pattern won't work.
+               Let's use the existing indirect call mechanism by assigning to a hidden var. */
+            /* Simplest: rewrite expr(args) as a ND_CALL with name from expr if possible */
+            if (e->kind == ND_VAR) {
+                /* Direct call through variable — this is the normal case */
+                e = new_call(e->u.var_name, args);
+            } else {
+                /* Indirect call through expression (e.g. s.field, arr[i], etc.)
+                   Desugar: create a unary dereference of the expression, not possible with current AST.
+                   For now, use a special call with "__indirect_call" and expression prepended. */
+                /* Actually, let's just handle this by pushing the function expr as first arg
+                   and using a special name that codegen will recognize */
+                ExprArray new_args = {NULL, 0, 0};
+                exprarray_push(&new_args, e);  /* function pointer expression */
+                for (int ai = 0; ai < args.len; ai++)
+                    exprarray_push(&new_args, args.data[ai]);
+                e = new_call("__indirect_call", new_args);
+            }
+            continue;
+        }
         if (match(TK_OP, "[")) {
             eat(TK_OP, "[");
             Expr *idx = parse_expr(0);
@@ -921,14 +1021,34 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
                 }
                 char *stype = parse_base_type();
                 int is_ptr = 0;
+                int is_funcptr = 0;
+                /* Function pointer param: type (*name)(params) or type (*)(params) */
+                if (is_funcptr_decl()) {
+                    eat(TK_OP, "(");
+                    eat(TK_OP, "*");
+                    is_ptr = 1;
+                    is_funcptr = 1;
+                }
                 while (match(TK_OP, "*")) {
                     eat(TK_OP, "*");
                     is_ptr = 1;
                 }
                 skip_qualifiers();
+                /* Unnamed funcptr param: type (*)(params) */
+                if (is_funcptr && match(TK_OP, ")")) {
+                    eat(TK_OP, ")");
+                    skip_param_list();
+                    /* unnamed — skip to next param */
+                    if (match(TK_OP, ",")) { eat(TK_OP, ","); continue; }
+                    break;
+                }
                 /* Parameter might be unnamed (in prototypes) */
                 if (match(TK_ID, NULL)) {
                     Tok *pname = eat(TK_ID, NULL);
+                    if (is_funcptr) {
+                        eat(TK_OP, ")");
+                        skip_param_list();
+                    }
                     /* skip array params like char buf[] */
                     if (match(TK_OP, "[")) {
                         eat(TK_OP, "[");
@@ -982,11 +1102,23 @@ static GlobalDecl parse_extern_decl(void) {
 
     char *stype = parse_base_type();
     int is_ptr = 0;
+    int is_funcptr = 0;
+    /* extern function pointer: extern type (*name)(params); */
+    if (is_funcptr_decl()) {
+        eat(TK_OP, "(");
+        eat(TK_OP, "*");
+        is_ptr = 1;
+        is_funcptr = 1;
+    }
     while (match(TK_OP, "*")) {
         eat(TK_OP, "*");
         is_ptr = 1;
     }
     Tok *name_tok = eat(TK_ID, NULL);
+    if (is_funcptr) {
+        eat(TK_OP, ")");
+        skip_param_list();
+    }
     int arr_size = -1;
     if (match(TK_OP, "[")) {
         eat(TK_OP, "[");
@@ -1037,12 +1169,24 @@ static int is_func_lookahead(void) {
 static GlobalDecl parse_global_decl(int is_static) {
     char *stype = parse_base_type();
     int is_ptr = 0;
+    int is_funcptr = 0;
+    /* Function pointer global: type (*name)(params) */
+    if (is_funcptr_decl()) {
+        eat(TK_OP, "(");
+        eat(TK_OP, "*");
+        is_ptr = 1;
+        is_funcptr = 1;
+    }
     while (match(TK_OP, "*")) {
         eat(TK_OP, "*");
         is_ptr = 1;
     }
     skip_qualifiers();
     Tok *name_tok = eat(TK_ID, NULL);
+    if (is_funcptr) {
+        eat(TK_OP, ")");
+        skip_param_list();
+    }
     int arr_size = -1;
     if (match(TK_OP, "[")) {
         eat(TK_OP, "[");
@@ -1272,6 +1416,25 @@ Program *parse_program(TokArray tokarr) {
                 } else {
                     /* Normal: typedef type [*]* Name; */
                     while (match(TK_OP, "*")) { eat(TK_OP, "*"); stype = NULL; /* ptr-to-struct is just ptr */ }
+                    /* Check again for funcptr after stars: typedef int *(*Name)(params); */
+                    if (match(TK_OP, "(") && pos + 1 < ntoks &&
+                        toks[pos+1].kind == TK_OP && strcmp(toks[pos+1].value, "*") == 0) {
+                        eat(TK_OP, "(");
+                        eat(TK_OP, "*");
+                        char *alias = xstrdup(eat(TK_ID, NULL)->value);
+                        eat(TK_OP, ")");
+                        eat(TK_OP, "(");
+                        int depth = 1;
+                        while (depth > 0) {
+                            if (match(TK_OP, "(")) depth++;
+                            else if (match(TK_OP, ")")) depth--;
+                            if (depth > 0) eat(cur()->kind, NULL);
+                        }
+                        eat(TK_OP, ")");
+                        eat(TK_OP, ";");
+                        add_typedef(alias, NULL);
+                        continue;
+                    }
                     char *alias = xstrdup(eat(TK_ID, NULL)->value);
                     /* skip array dimensions like typedef int Arr[10]; */
                     if (match(TK_OP, "[")) {
