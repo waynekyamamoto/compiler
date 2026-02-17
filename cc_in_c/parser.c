@@ -433,6 +433,89 @@ static StructDef parse_struct_or_union_def(int is_union) {
     return sd;
 }
 
+/* ---- Constant expression evaluator for enum values ---- */
+
+static int parse_const_expr(void);
+
+static int parse_const_primary(void) {
+    if (match(TK_OP, "(")) {
+        eat(TK_OP, "(");
+        int val = parse_const_expr();
+        eat(TK_OP, ")");
+        return val;
+    }
+    if (match(TK_NUMBER, NULL)) {
+        return atoi(eat(TK_NUMBER, NULL)->value);
+    }
+    if (match(TK_ID, NULL)) {
+        char *name = eat(TK_ID, NULL)->value;
+        int val;
+        if (find_enum_const(name, &val)) return val;
+        fatal("Unknown enum constant '%s'", name);
+    }
+    fatal("Expected constant expression at %d", cur()->pos);
+    return 0;
+}
+
+static int parse_const_unary(void) {
+    if (match(TK_OP, "-")) { eat(TK_OP, "-"); return -parse_const_unary(); }
+    if (match(TK_OP, "~")) { eat(TK_OP, "~"); return ~parse_const_unary(); }
+    return parse_const_primary();
+}
+
+static int parse_const_mul(void) {
+    int val = parse_const_unary();
+    while (match(TK_OP, "*") || match(TK_OP, "/") || match(TK_OP, "%")) {
+        char *op = cur()->value;
+        eat(TK_OP, NULL);
+        int rhs = parse_const_unary();
+        if (op[0] == '*') val *= rhs;
+        else if (op[0] == '/') val /= rhs;
+        else val %= rhs;
+    }
+    return val;
+}
+
+static int parse_const_add(void) {
+    int val = parse_const_mul();
+    while (match(TK_OP, "+") || match(TK_OP, "-")) {
+        char *op = cur()->value;
+        eat(TK_OP, NULL);
+        int rhs = parse_const_mul();
+        if (op[0] == '+') val += rhs; else val -= rhs;
+    }
+    return val;
+}
+
+static int parse_const_shift(void) {
+    int val = parse_const_add();
+    while (match(TK_OP, "<<") || match(TK_OP, ">>")) {
+        char *op = cur()->value;
+        eat(TK_OP, NULL);
+        int rhs = parse_const_add();
+        if (op[0] == '<') val <<= rhs; else val >>= rhs;
+    }
+    return val;
+}
+
+static int parse_const_and(void) {
+    int val = parse_const_shift();
+    while (match(TK_OP, "&")) { eat(TK_OP, "&"); val &= parse_const_shift(); }
+    return val;
+}
+
+static int parse_const_xor(void) {
+    int val = parse_const_and();
+    while (match(TK_OP, "^")) { eat(TK_OP, "^"); val ^= parse_const_and(); }
+    return val;
+}
+
+static int parse_const_expr(void) {
+    int val = parse_const_xor();
+    while (match(TK_OP, "|")) { eat(TK_OP, "|"); val |= parse_const_xor(); }
+    return val;
+}
+
 /* ---- Enum definition ---- */
 
 static void parse_enum_def(void) {
@@ -446,15 +529,7 @@ static void parse_enum_def(void) {
         Tok *name_tok = eat(TK_ID, NULL);
         if (match(TK_OP, "=")) {
             eat(TK_OP, "=");
-            /* support optional negative sign and integer literal */
-            int neg = 0;
-            if (match(TK_OP, "-")) {
-                eat(TK_OP, "-");
-                neg = 1;
-            }
-            Tok *num_tok = eat(TK_NUMBER, NULL);
-            value = atoi(num_tok->value);
-            if (neg) value = -value;
+            value = parse_const_expr();
         }
         add_enum_const(name_tok->value, value);
         value++;
@@ -1633,11 +1708,7 @@ Program *parse_program(TokArray tokarr) {
                         Tok *ename = eat(TK_ID, NULL);
                         if (match(TK_OP, "=")) {
                             eat(TK_OP, "=");
-                            int neg = 0;
-                            if (match(TK_OP, "-")) { eat(TK_OP, "-"); neg = 1; }
-                            Tok *num_tok = eat(TK_NUMBER, NULL);
-                            value = atoi(num_tok->value);
-                            if (neg) value = -value;
+                            value = parse_const_expr();
                         }
                         add_enum_const(ename->value, value);
                         value++;

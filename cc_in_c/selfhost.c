@@ -546,45 +546,238 @@ int *pp_read_file(int *path, int *out_len) {
   return buf;
 }
 
-// Evaluate simple #if expression from a string: "0", "1", "defined(NAME)", "!defined(NAME)"
-int pp_eval_if_expr(int *expr, int elen) {
-  int i = 0;
-  int ns = 0;
-  int *name = 0;
-  int negated = 0;
-  // skip whitespace
-  while (i < elen && (__read_byte(expr, i) == ' ' || __read_byte(expr, i) == '\t')) { i++; }
-  // Check for !defined(...)
-  if (i < elen && __read_byte(expr, i) == '!') {
-    negated = 1;
-    i++;
+// Recursive descent #if expression evaluator
+int *ifex_buf;    // expression buffer
+int ifex_pos;     // current position
+int ifex_len;     // length
+
+int ifex_ch() {
+  if (ifex_pos >= ifex_len) { return 0; }
+  return __read_byte(ifex_buf, ifex_pos);
+}
+
+int ifex_skip_ws() {
+  while (ifex_pos < ifex_len && (ifex_ch() == ' ' || ifex_ch() == '\t')) { ifex_pos++; }
+  return 0;
+}
+
+int ifex_is_alnum(int c) {
+  if (c >= 'a' && c <= 'z') { return 1; }
+  if (c >= 'A' && c <= 'Z') { return 1; }
+  if (c >= '0' && c <= '9') { return 1; }
+  if (c == '_') { return 1; }
+  return 0;
+}
+
+int ifex_parse_or();
+
+int ifex_parse_num() {
+  int val = 0;
+  int d = 0;
+  if (ifex_ch() == '0' && ifex_pos + 1 < ifex_len &&
+      (__read_byte(ifex_buf, ifex_pos + 1) == 'x' || __read_byte(ifex_buf, ifex_pos + 1) == 'X')) {
+    ifex_pos += 2;
+    while (ifex_pos < ifex_len) {
+      d = ifex_ch();
+      if (d >= '0' && d <= '9') { val = val * 16 + d - '0'; }
+      else if (d >= 'a' && d <= 'f') { val = val * 16 + d - 'a' + 10; }
+      else if (d >= 'A' && d <= 'F') { val = val * 16 + d - 'A' + 10; }
+      else { return val; }
+      ifex_pos++;
+    }
+  } else {
+    while (ifex_pos < ifex_len && ifex_ch() >= '0' && ifex_ch() <= '9') {
+      val = val * 10 + ifex_ch() - '0';
+      ifex_pos++;
+    }
   }
-  // Check for "defined(...)"
-  if (i + 7 <= elen &&
-      __read_byte(expr, i) == 'd' && __read_byte(expr, i+1) == 'e' &&
-      __read_byte(expr, i+2) == 'f' && __read_byte(expr, i+3) == 'i' &&
-      __read_byte(expr, i+4) == 'n' && __read_byte(expr, i+5) == 'e' &&
-      __read_byte(expr, i+6) == 'd') {
-    i += 7;
-    while (i < elen && (__read_byte(expr, i) == ' ' || __read_byte(expr, i) == '\t')) { i++; }
-    if (i < elen && __read_byte(expr, i) == '(') {
-      i++;
-      while (i < elen && (__read_byte(expr, i) == ' ' || __read_byte(expr, i) == '\t')) { i++; }
-      ns = i;
-      while (i < elen && __read_byte(expr, i) != ')' && __read_byte(expr, i) != ' ' && __read_byte(expr, i) != '\t') { i++; }
-      name = make_str(expr, ns, i - ns);
-      if (negated) { return 1 - pp_is_macro_defined(name); }
+  return val;
+}
+
+int ifex_parse_primary() {
+  int ns = 0;
+  int nlen = 0;
+  int *name = 0;
+  int result = 0;
+  int mi = 0;
+
+  ifex_skip_ws();
+  // defined(NAME)
+  if (ifex_pos + 7 <= ifex_len &&
+      __read_byte(ifex_buf, ifex_pos) == 'd' && __read_byte(ifex_buf, ifex_pos+1) == 'e' &&
+      __read_byte(ifex_buf, ifex_pos+2) == 'f' && __read_byte(ifex_buf, ifex_pos+3) == 'i' &&
+      __read_byte(ifex_buf, ifex_pos+4) == 'n' && __read_byte(ifex_buf, ifex_pos+5) == 'e' &&
+      __read_byte(ifex_buf, ifex_pos+6) == 'd' &&
+      (ifex_pos + 7 >= ifex_len || ifex_is_alnum(__read_byte(ifex_buf, ifex_pos + 7)) == 0)) {
+    ifex_pos += 7;
+    ifex_skip_ws();
+    if (ifex_ch() == '(') {
+      ifex_pos++;
+      ifex_skip_ws();
+      ns = ifex_pos;
+      while (ifex_pos < ifex_len && ifex_is_alnum(ifex_ch())) { ifex_pos++; }
+      name = make_str(ifex_buf, ns, ifex_pos - ns);
+      ifex_skip_ws();
+      if (ifex_ch() == ')') { ifex_pos++; }
       return pp_is_macro_defined(name);
     }
   }
-  // Check for numeric literal
-  if (i < elen && __read_byte(expr, i) >= '0' && __read_byte(expr, i) <= '9') {
-    if (__read_byte(expr, i) == '0') { return 0; }
-    return 1;
+  // Parenthesized expression
+  if (ifex_ch() == '(') {
+    ifex_pos++;
+    result = ifex_parse_or();
+    ifex_skip_ws();
+    if (ifex_ch() == ')') { ifex_pos++; }
+    return result;
   }
-  printf("cc: Unsupported #if expression\n");
-  exit(1);
+  // Number
+  if (ifex_ch() >= '0' && ifex_ch() <= '9') {
+    return ifex_parse_num();
+  }
+  // Identifier: look up as macro value, default to 0
+  if (ifex_is_alnum(ifex_ch()) && (ifex_ch() < '0' || ifex_ch() > '9')) {
+    ns = ifex_pos;
+    while (ifex_pos < ifex_len && ifex_is_alnum(ifex_ch())) { ifex_pos++; }
+    name = make_str(ifex_buf, ns, ifex_pos - ns);
+    mi = 0;
+    while (mi < nmacros) {
+      if (my_strcmp(macro_names[mi], name) == 0 && macro_values[mi] != 0) {
+        return my_atoi(macro_values[mi]);
+      }
+      mi++;
+    }
+    return 0;
+  }
   return 0;
+}
+
+int ifex_parse_unary() {
+  ifex_skip_ws();
+  if (ifex_ch() == '!') { ifex_pos++; return ifex_parse_unary() == 0 ? 1 : 0; }
+  if (ifex_ch() == '-') { ifex_pos++; return 0 - ifex_parse_unary(); }
+  if (ifex_ch() == '~') { ifex_pos++; return ~ifex_parse_unary(); }
+  return ifex_parse_primary();
+}
+
+int ifex_parse_mul() {
+  int val = ifex_parse_unary();
+  int rhs = 0;
+  while (1) {
+    ifex_skip_ws();
+    if (ifex_ch() == '*') { ifex_pos++; val = val * ifex_parse_unary(); }
+    else if (ifex_ch() == '/' && (ifex_pos + 1 >= ifex_len || __read_byte(ifex_buf, ifex_pos + 1) != '/')) {
+      ifex_pos++; rhs = ifex_parse_unary(); if (rhs != 0) { val = val / rhs; }
+    }
+    else { return val; }
+  }
+  return val;
+}
+
+int ifex_parse_add() {
+  int val = ifex_parse_mul();
+  while (1) {
+    ifex_skip_ws();
+    if (ifex_ch() == '+') { ifex_pos++; val = val + ifex_parse_mul(); }
+    else if (ifex_ch() == '-') { ifex_pos++; val = val - ifex_parse_mul(); }
+    else { return val; }
+  }
+  return val;
+}
+
+int ifex_parse_shift() {
+  int val = ifex_parse_add();
+  while (1) {
+    ifex_skip_ws();
+    if (ifex_ch() == '<' && ifex_pos + 1 < ifex_len && __read_byte(ifex_buf, ifex_pos + 1) == '<') {
+      ifex_pos += 2; val = val << ifex_parse_add();
+    }
+    else if (ifex_ch() == '>' && ifex_pos + 1 < ifex_len && __read_byte(ifex_buf, ifex_pos + 1) == '>') {
+      ifex_pos += 2; val = val >> ifex_parse_add();
+    }
+    else { return val; }
+  }
+  return val;
+}
+
+int ifex_parse_rel() {
+  int val = ifex_parse_shift();
+  while (1) {
+    ifex_skip_ws();
+    if (ifex_ch() == '<' && ifex_pos + 1 < ifex_len && __read_byte(ifex_buf, ifex_pos + 1) == '=') {
+      ifex_pos += 2; val = val <= ifex_parse_shift() ? 1 : 0;
+    }
+    else if (ifex_ch() == '>' && ifex_pos + 1 < ifex_len && __read_byte(ifex_buf, ifex_pos + 1) == '=') {
+      ifex_pos += 2; val = val >= ifex_parse_shift() ? 1 : 0;
+    }
+    else if (ifex_ch() == '<' && (ifex_pos + 1 >= ifex_len || __read_byte(ifex_buf, ifex_pos + 1) != '<')) {
+      ifex_pos++; val = val < ifex_parse_shift() ? 1 : 0;
+    }
+    else if (ifex_ch() == '>' && (ifex_pos + 1 >= ifex_len || __read_byte(ifex_buf, ifex_pos + 1) != '>')) {
+      ifex_pos++; val = val > ifex_parse_shift() ? 1 : 0;
+    }
+    else { return val; }
+  }
+  return val;
+}
+
+int ifex_parse_eq() {
+  int val = ifex_parse_rel();
+  while (1) {
+    ifex_skip_ws();
+    if (ifex_ch() == '=' && ifex_pos + 1 < ifex_len && __read_byte(ifex_buf, ifex_pos + 1) == '=') {
+      ifex_pos += 2; val = val == ifex_parse_rel() ? 1 : 0;
+    }
+    else if (ifex_ch() == '!' && ifex_pos + 1 < ifex_len && __read_byte(ifex_buf, ifex_pos + 1) == '=') {
+      ifex_pos += 2; val = val != ifex_parse_rel() ? 1 : 0;
+    }
+    else { return val; }
+  }
+  return val;
+}
+
+int ifex_parse_bitor() {
+  int val = ifex_parse_eq();
+  while (1) {
+    ifex_skip_ws();
+    if (ifex_ch() == '|' && (ifex_pos + 1 >= ifex_len || __read_byte(ifex_buf, ifex_pos + 1) != '|')) {
+      ifex_pos++; val = val | ifex_parse_eq();
+    }
+    else { return val; }
+  }
+  return val;
+}
+
+int ifex_parse_and() {
+  int val = ifex_parse_bitor();
+  int rhs = 0;
+  while (1) {
+    ifex_skip_ws();
+    if (ifex_ch() == '&' && ifex_pos + 1 < ifex_len && __read_byte(ifex_buf, ifex_pos + 1) == '&') {
+      ifex_pos += 2; rhs = ifex_parse_bitor(); val = (val && rhs) ? 1 : 0;
+    }
+    else { return val; }
+  }
+  return val;
+}
+
+int ifex_parse_or() {
+  int val = ifex_parse_and();
+  int rhs = 0;
+  while (1) {
+    ifex_skip_ws();
+    if (ifex_ch() == '|' && ifex_pos + 1 < ifex_len && __read_byte(ifex_buf, ifex_pos + 1) == '|') {
+      ifex_pos += 2; rhs = ifex_parse_and(); val = (val || rhs) ? 1 : 0;
+    }
+    else { return val; }
+  }
+  return val;
+}
+
+int pp_eval_if_expr(int *expr, int elen) {
+  ifex_buf = expr;
+  ifex_pos = 0;
+  ifex_len = elen;
+  return ifex_parse_or();
 }
 
 // ---- Lexer ----
@@ -2438,6 +2631,88 @@ int is_func_lookahead() {
   return result;
 }
 
+// ---- Constant expression evaluator for enum values ----
+int parse_const_expr();
+
+int parse_const_primary() {
+  if (p_match(TK_OP, "(")) {
+    p_eat(TK_OP, "(");
+    int val = parse_const_expr();
+    p_eat(TK_OP, ")");
+    return val;
+  }
+  if (p_match(TK_NUM, 0)) {
+    return my_atoi(p_eat(TK_NUM, 0));
+  }
+  if (p_match(TK_ID, 0)) {
+    int *name = p_eat(TK_ID, 0);
+    if (has_enum_const(name)) { return find_enum_const(name); }
+    printf("cc: Unknown enum constant: %s\n", name);
+    exit(1);
+  }
+  my_fatal("Expected constant expression");
+  return 0;
+}
+
+int parse_const_unary() {
+  if (p_match(TK_OP, "-")) { p_eat(TK_OP, "-"); return 0 - parse_const_unary(); }
+  if (p_match(TK_OP, "~")) { p_eat(TK_OP, "~"); return ~parse_const_unary(); }
+  return parse_const_primary();
+}
+
+int parse_const_mul() {
+  int val = parse_const_unary();
+  while (p_match(TK_OP, "*") || p_match(TK_OP, "/") || p_match(TK_OP, "%")) {
+    int *op = tok_val[cur_pos];
+    p_eat(TK_OP, 0);
+    int rhs = parse_const_unary();
+    if (__read_byte(op, 0) == '*') { val = val * rhs; }
+    else if (__read_byte(op, 0) == '/') { val = val / rhs; }
+    else { val = val % rhs; }
+  }
+  return val;
+}
+
+int parse_const_add() {
+  int val = parse_const_mul();
+  while (p_match(TK_OP, "+") || p_match(TK_OP, "-")) {
+    int *op = tok_val[cur_pos];
+    p_eat(TK_OP, 0);
+    int rhs = parse_const_mul();
+    if (__read_byte(op, 0) == '+') { val = val + rhs; } else { val = val - rhs; }
+  }
+  return val;
+}
+
+int parse_const_shift() {
+  int val = parse_const_add();
+  while (p_match(TK_OP, "<<") || p_match(TK_OP, ">>")) {
+    int *op = tok_val[cur_pos];
+    p_eat(TK_OP, 0);
+    int rhs = parse_const_add();
+    if (__read_byte(op, 0) == '<') { val = val << rhs; } else { val = val >> rhs; }
+  }
+  return val;
+}
+
+int parse_const_and() {
+  int val = parse_const_shift();
+  while (p_match(TK_OP, "&")) { p_eat(TK_OP, "&"); val = val & parse_const_shift(); }
+  return val;
+}
+
+int parse_const_xor() {
+  int val = parse_const_and();
+  while (p_match(TK_OP, "^")) { p_eat(TK_OP, "^"); val = val ^ parse_const_and(); }
+  return val;
+}
+
+int parse_const_expr() {
+  int val = parse_const_xor();
+  while (p_match(TK_OP, "|")) { p_eat(TK_OP, "|"); val = val | parse_const_xor(); }
+  return val;
+}
+
 int parse_enum_def() {
   p_eat(TK_KW, "enum");
   // optional enum tag name
@@ -2448,10 +2723,7 @@ int parse_enum_def() {
     int *ename = my_strdup(p_eat(TK_ID, 0));
     if (p_match(TK_OP, "=")) {
       p_eat(TK_OP, "=");
-      int neg = 0;
-      if (p_match(TK_OP, "-")) { p_eat(TK_OP, "-"); neg = 1; }
-      val = my_atoi(p_eat(TK_NUM, 0));
-      if (neg) { val = 0 - val; }
+      val = parse_const_expr();
     }
     add_enum_const(ename, val);
     val++;
@@ -2585,10 +2857,7 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
         ename = my_strdup(p_eat(TK_ID, 0));
         if (p_match(TK_OP, "=")) {
           p_eat(TK_OP, "=");
-          neg = 0;
-          if (p_match(TK_OP, "-")) { p_eat(TK_OP, "-"); neg = 1; }
-          td_eval = my_atoi(p_eat(TK_NUM, 0));
-          if (neg) { td_eval = 0 - td_eval; }
+          td_eval = parse_const_expr();
         }
         add_enum_const(ename, td_eval);
         td_eval++;
@@ -4867,6 +5136,39 @@ int pp_preprocess(int *src, int srclen, int *filepath, int *out, int co, int dep
         if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
       }
 
+      // Check for "undef"
+      else if (si + 5 <= srclen &&
+          __read_byte(src, si) == 'u' && __read_byte(src, si+1) == 'n' &&
+          __read_byte(src, si+2) == 'd' && __read_byte(src, si+3) == 'e' &&
+          __read_byte(src, si+4) == 'f' &&
+          (__read_byte(src, si+5) == ' ' || __read_byte(src, si+5) == '\t')) {
+        si += 5;
+        while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) { si++; }
+        nstart = si;
+        while (si < srclen && __read_byte(src, si) != '\n' && __read_byte(src, si) != ' ' && __read_byte(src, si) != '\t') { si++; }
+        name = make_str(src, nstart, si - nstart);
+        // Remove from macro table
+        int ui = 0;
+        while (ui < nmacros) {
+          if (my_strcmp(macro_names[ui], name) == 0) {
+            int uj = ui;
+            while (uj < nmacros - 1) {
+              macro_names[uj] = macro_names[uj + 1];
+              macro_values[uj] = macro_values[uj + 1];
+              macro_nparams[uj] = macro_nparams[uj + 1];
+              macro_params[uj] = macro_params[uj + 1];
+              macro_bodies[uj] = macro_bodies[uj + 1];
+              uj++;
+            }
+            nmacros--;
+            ui = nmacros; // break
+          }
+          ui++;
+        }
+        while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
+        if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
+      }
+
       else {
         // Other preprocessor directive — skip
         while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
@@ -4940,6 +5242,14 @@ int main(int argc, int *argv) {
   }
   __write_byte(srcbuf, srclen, 0);
   fclose(f);
+
+  // Join backslash-newline continuations
+  for (int bsi = 0; bsi < srclen - 1; bsi++) {
+    if (__read_byte(srcbuf, bsi) == '\\' && __read_byte(srcbuf, bsi + 1) == '\n') {
+      __write_byte(srcbuf, bsi, ' ');
+      __write_byte(srcbuf, bsi + 1, ' ');
+    }
+  }
 
   // Strip preprocessor lines and collect #define macros
   nmacros = 0;

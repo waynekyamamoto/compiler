@@ -294,52 +294,189 @@ typedef struct {
 static IfState if_stack[32];
 static int if_depth;
 
-/* Evaluate simple #if expression: 0, 1, defined(NAME), !defined(NAME) */
-static int eval_if_expr(const char *expr) {
-    /* Skip whitespace */
-    while (*expr == ' ' || *expr == '\t') expr++;
-    /* Check for !defined(...) */
-    if (*expr == '!' && strncmp(expr + 1, "defined", 7) == 0) {
-        expr += 8;
-        while (*expr == ' ' || *expr == '\t') expr++;
-        if (*expr == '(') {
-            expr++;
-            while (*expr == ' ' || *expr == '\t') expr++;
-            const char *ns = expr;
-            while (*expr && *expr != ')' && *expr != ' ' && *expr != '\t') expr++;
-            int nlen = expr - ns;
-            char *name = xmalloc(nlen + 1);
-            memcpy(name, ns, nlen);
-            name[nlen] = '\0';
-            int result = !is_macro_defined(name);
-            free(name);
-            return result;
+/* Recursive descent #if expression evaluator */
+static const char *ifex;  /* current position in expression string */
+
+static void ifex_skip_ws(void) {
+    while (*ifex == ' ' || *ifex == '\t') ifex++;
+}
+
+static int ifex_parse_or(void);
+
+static int ifex_parse_num(void) {
+    int val = 0;
+    if (ifex[0] == '0' && (ifex[1] == 'x' || ifex[1] == 'X')) {
+        ifex += 2;
+        while ((*ifex >= '0' && *ifex <= '9') || (*ifex >= 'a' && *ifex <= 'f') || (*ifex >= 'A' && *ifex <= 'F')) {
+            int d;
+            if (*ifex >= '0' && *ifex <= '9') d = *ifex - '0';
+            else if (*ifex >= 'a' && *ifex <= 'f') d = *ifex - 'a' + 10;
+            else d = *ifex - 'A' + 10;
+            val = val * 16 + d;
+            ifex++;
+        }
+    } else {
+        while (*ifex >= '0' && *ifex <= '9') {
+            val = val * 10 + (*ifex - '0');
+            ifex++;
         }
     }
-    /* Check for defined(...) */
-    if (strncmp(expr, "defined", 7) == 0) {
-        expr += 7;
-        while (*expr == ' ' || *expr == '\t') expr++;
-        if (*expr == '(') {
-            expr++;
-            while (*expr == ' ' || *expr == '\t') expr++;
-            const char *ns = expr;
-            while (*expr && *expr != ')' && *expr != ' ' && *expr != '\t') expr++;
-            int nlen = expr - ns;
+    return val;
+}
+
+static int ifex_parse_primary(void) {
+    ifex_skip_ws();
+    /* defined(NAME) */
+    if (strncmp(ifex, "defined", 7) == 0 && !is_ident_char(ifex[7])) {
+        ifex += 7;
+        ifex_skip_ws();
+        if (*ifex == '(') {
+            ifex++;
+            ifex_skip_ws();
+            const char *ns = ifex;
+            while (*ifex && is_ident_char(*ifex)) ifex++;
+            int nlen = ifex - ns;
             char *name = xmalloc(nlen + 1);
             memcpy(name, ns, nlen);
             name[nlen] = '\0';
+            ifex_skip_ws();
+            if (*ifex == ')') ifex++;
             int result = is_macro_defined(name);
             free(name);
             return result;
         }
     }
-    /* Check for numeric literal */
-    if (*expr >= '0' && *expr <= '9') {
-        return *expr != '0';
+    /* Parenthesized expression */
+    if (*ifex == '(') {
+        ifex++;
+        int val = ifex_parse_or();
+        ifex_skip_ws();
+        if (*ifex == ')') ifex++;
+        return val;
     }
-    fatal("Unsupported #if expression: %s", expr);
+    /* Number */
+    if (*ifex >= '0' && *ifex <= '9') {
+        return ifex_parse_num();
+    }
+    /* Identifier: look up as macro value, default to 0 */
+    if (is_ident_char(*ifex) && !(*ifex >= '0' && *ifex <= '9')) {
+        const char *ns = ifex;
+        while (*ifex && is_ident_char(*ifex)) ifex++;
+        int nlen = ifex - ns;
+        char *name = xmalloc(nlen + 1);
+        memcpy(name, ns, nlen);
+        name[nlen] = '\0';
+        /* Look up macro value */
+        for (int i = 0; i < nmacros; i++) {
+            if (strcmp(macros[i].name, name) == 0 && macros[i].value) {
+                free(name);
+                return atoi(macros[i].value);
+            }
+        }
+        free(name);
+        return 0; /* undefined identifier = 0 per C standard */
+    }
     return 0;
+}
+
+static int ifex_parse_unary(void) {
+    ifex_skip_ws();
+    if (*ifex == '!') { ifex++; return !ifex_parse_unary(); }
+    if (*ifex == '-') { ifex++; return -ifex_parse_unary(); }
+    if (*ifex == '~') { ifex++; return ~ifex_parse_unary(); }
+    return ifex_parse_primary();
+}
+
+static int ifex_parse_mul(void) {
+    int val = ifex_parse_unary();
+    while (1) {
+        ifex_skip_ws();
+        if (*ifex == '*') { ifex++; val *= ifex_parse_unary(); }
+        else if (*ifex == '/' && ifex[1] != '/') { ifex++; int r = ifex_parse_unary(); val = r ? val / r : 0; }
+        else break;
+    }
+    return val;
+}
+
+static int ifex_parse_add(void) {
+    int val = ifex_parse_mul();
+    while (1) {
+        ifex_skip_ws();
+        if (*ifex == '+') { ifex++; val += ifex_parse_mul(); }
+        else if (*ifex == '-') { ifex++; val -= ifex_parse_mul(); }
+        else break;
+    }
+    return val;
+}
+
+static int ifex_parse_shift(void) {
+    int val = ifex_parse_add();
+    while (1) {
+        ifex_skip_ws();
+        if (ifex[0] == '<' && ifex[1] == '<') { ifex += 2; val <<= ifex_parse_add(); }
+        else if (ifex[0] == '>' && ifex[1] == '>' && ifex[2] != '=') { ifex += 2; val >>= ifex_parse_add(); }
+        else break;
+    }
+    return val;
+}
+
+static int ifex_parse_rel(void) {
+    int val = ifex_parse_shift();
+    while (1) {
+        ifex_skip_ws();
+        if (ifex[0] == '<' && ifex[1] == '=') { ifex += 2; val = val <= ifex_parse_shift(); }
+        else if (ifex[0] == '>' && ifex[1] == '=') { ifex += 2; val = val >= ifex_parse_shift(); }
+        else if (ifex[0] == '<' && ifex[1] != '<') { ifex++; val = val < ifex_parse_shift(); }
+        else if (ifex[0] == '>' && ifex[1] != '>') { ifex++; val = val > ifex_parse_shift(); }
+        else break;
+    }
+    return val;
+}
+
+static int ifex_parse_eq(void) {
+    int val = ifex_parse_rel();
+    while (1) {
+        ifex_skip_ws();
+        if (ifex[0] == '=' && ifex[1] == '=') { ifex += 2; val = val == ifex_parse_rel(); }
+        else if (ifex[0] == '!' && ifex[1] == '=') { ifex += 2; val = val != ifex_parse_rel(); }
+        else break;
+    }
+    return val;
+}
+
+static int ifex_parse_bitor(void) {
+    int val = ifex_parse_eq();
+    while (1) {
+        ifex_skip_ws();
+        if (ifex[0] == '|' && ifex[1] != '|') { ifex++; val |= ifex_parse_eq(); }
+        else break;
+    }
+    return val;
+}
+
+static int ifex_parse_and(void) {
+    int val = ifex_parse_bitor();
+    while (1) {
+        ifex_skip_ws();
+        if (ifex[0] == '&' && ifex[1] == '&') { ifex += 2; int rhs = ifex_parse_bitor(); val = val && rhs; }
+        else break;
+    }
+    return val;
+}
+
+static int ifex_parse_or(void) {
+    int val = ifex_parse_and();
+    while (1) {
+        ifex_skip_ws();
+        if (ifex[0] == '|' && ifex[1] == '|') { ifex += 2; int rhs = ifex_parse_and(); val = val || rhs; }
+        else break;
+    }
+    return val;
+}
+
+static int eval_if_expr(const char *expr) {
+    ifex = expr;
+    return ifex_parse_or();
 }
 
 /* Check if currently including (all levels of if_stack are including) */
@@ -588,6 +725,33 @@ static void preprocess_file(const char *src, const char *filepath, int depth, Bu
                 if (*p == '\n') { buf_push(b, '\n'); p++; }
                 continue;
             }
+            /* #undef */
+            if (strncmp(p, "undef", 5) == 0 && (p[5] == ' ' || p[5] == '\t')) {
+                p += 5;
+                while (*p == ' ' || *p == '\t') p++;
+                const char *ns = p;
+                while (*p && *p != '\n' && *p != ' ' && *p != '\t') p++;
+                int nlen = p - ns;
+                char *name = xmalloc(nlen + 1);
+                memcpy(name, ns, nlen);
+                name[nlen] = '\0';
+                /* Remove from macro table */
+                for (int i = 0; i < nmacros; i++) {
+                    if (strcmp(macros[i].name, name) == 0) {
+                        free(macros[i].name);
+                        free(macros[i].value);
+                        free(macros[i].body);
+                        for (int j = i; j < nmacros - 1; j++)
+                            macros[j] = macros[j + 1];
+                        nmacros--;
+                        break;
+                    }
+                }
+                free(name);
+                while (*p && *p != '\n') p++;
+                if (*p == '\n') { buf_push(b, '\n'); p++; }
+                continue;
+            }
             /* Other preprocessor directive — skip */
             while (*p && *p != '\n') p++;
             if (*p == '\n') { buf_push(b, '\n'); p++; }
@@ -608,12 +772,27 @@ static void preprocess_file(const char *src, const char *filepath, int depth, Bu
     free(dir);
 }
 
+static char *join_backslash_lines(const char *src) {
+    int len = strlen(src);
+    char *out = xmalloc(len + 1);
+    memcpy(out, src, len + 1);
+    for (int i = 0; i < len - 1; i++) {
+        if (out[i] == '\\' && out[i + 1] == '\n') {
+            out[i] = ' ';
+            out[i + 1] = ' ';
+        }
+    }
+    return out;
+}
+
 static char *strip_preprocessor(const char *src, const char *filepath) {
     nmacros = 0;
     if_depth = 0;
+    char *joined = join_backslash_lines(src);
     Buf b;
     buf_init(&b);
-    preprocess_file(src, filepath, 0, &b);
+    preprocess_file(joined, filepath, 0, &b);
+    free(joined);
     if (if_depth != 0) fatal("Unterminated #if/#ifdef/#ifndef");
     char *stripped = buf_detach(&b);
     char *expanded = expand_macros(stripped);
