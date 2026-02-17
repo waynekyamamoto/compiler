@@ -104,41 +104,293 @@ static char *expand_macros(const char *src) {
     return buf_detach(&b);
 }
 
-static char *strip_preprocessor(const char *src) {
-    nmacros = 0;
+static int is_macro_defined(const char *name) {
+    for (int i = 0; i < nmacros; i++) {
+        if (strcmp(macros[i].name, name) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Extract directory part of a file path */
+static char *get_dir_from_path(const char *path) {
+    int len = strlen(path);
+    int last_slash = -1;
+    for (int i = len - 1; i >= 0; i--) {
+        if (path[i] == '/') { last_slash = i; break; }
+    }
+    if (last_slash < 0) return xstrdup(".");
+    char *dir = xmalloc(last_slash + 2);
+    memcpy(dir, path, last_slash + 1);
+    dir[last_slash + 1] = '\0';
+    return dir;
+}
+
+/* Concatenate directory and filename */
+static char *concat_paths(const char *dir, const char *file) {
     Buf b;
     buf_init(&b);
+    buf_append(&b, dir);
+    int dlen = strlen(dir);
+    if (dlen > 0 && dir[dlen - 1] != '/') buf_push(&b, '/');
+    buf_append(&b, file);
+    return buf_detach(&b);
+}
+
+/* If-stack for conditional compilation */
+typedef struct {
+    int including;
+    int seen_else;
+    int satisfied;  /* has any branch been taken? */
+} IfState;
+
+static IfState if_stack[32];
+static int if_depth;
+
+/* Evaluate simple #if expression: 0, 1, defined(NAME), !defined(NAME) */
+static int eval_if_expr(const char *expr) {
+    /* Skip whitespace */
+    while (*expr == ' ' || *expr == '\t') expr++;
+    /* Check for !defined(...) */
+    if (*expr == '!' && strncmp(expr + 1, "defined", 7) == 0) {
+        expr += 8;
+        while (*expr == ' ' || *expr == '\t') expr++;
+        if (*expr == '(') {
+            expr++;
+            while (*expr == ' ' || *expr == '\t') expr++;
+            const char *ns = expr;
+            while (*expr && *expr != ')' && *expr != ' ' && *expr != '\t') expr++;
+            int nlen = expr - ns;
+            char *name = xmalloc(nlen + 1);
+            memcpy(name, ns, nlen);
+            name[nlen] = '\0';
+            int result = !is_macro_defined(name);
+            free(name);
+            return result;
+        }
+    }
+    /* Check for defined(...) */
+    if (strncmp(expr, "defined", 7) == 0) {
+        expr += 7;
+        while (*expr == ' ' || *expr == '\t') expr++;
+        if (*expr == '(') {
+            expr++;
+            while (*expr == ' ' || *expr == '\t') expr++;
+            const char *ns = expr;
+            while (*expr && *expr != ')' && *expr != ' ' && *expr != '\t') expr++;
+            int nlen = expr - ns;
+            char *name = xmalloc(nlen + 1);
+            memcpy(name, ns, nlen);
+            name[nlen] = '\0';
+            int result = is_macro_defined(name);
+            free(name);
+            return result;
+        }
+    }
+    /* Check for numeric literal */
+    if (*expr >= '0' && *expr <= '9') {
+        return *expr != '0';
+    }
+    fatal("Unsupported #if expression: %s", expr);
+    return 0;
+}
+
+/* Check if currently including (all levels of if_stack are including) */
+static int pp_is_including(void) {
+    for (int i = 0; i < if_depth; i++) {
+        if (!if_stack[i].including) return 0;
+    }
+    return 1;
+}
+
+static void preprocess_file(const char *src, const char *filepath, int depth, Buf *b);
+
+static void preprocess_file(const char *src, const char *filepath, int depth, Buf *b) {
+    if (depth > 32) fatal("Include depth exceeded (max 32)");
+    char *dir = get_dir_from_path(filepath);
     const char *p = src;
     while (*p) {
-        /* Find start of line */
         const char *line_start = p;
-        /* Skip leading whitespace */
         while (*p == ' ' || *p == '\t') p++;
         if (*p == '#') {
-            p++; /* skip '#' */
+            p++;
             while (*p == ' ' || *p == '\t') p++;
-            /* Check for #define */
+
+            /* #ifdef */
+            if (strncmp(p, "ifdef", 5) == 0 && (p[5] == ' ' || p[5] == '\t')) {
+                p += 5;
+                while (*p == ' ' || *p == '\t') p++;
+                const char *ns = p;
+                while (*p && *p != '\n' && *p != ' ' && *p != '\t') p++;
+                int nlen = p - ns;
+                char *name = xmalloc(nlen + 1);
+                memcpy(name, ns, nlen);
+                name[nlen] = '\0';
+                if (if_depth >= 32) fatal("#ifdef nesting too deep");
+                int cond = pp_is_including() && is_macro_defined(name);
+                if_stack[if_depth].including = cond;
+                if_stack[if_depth].seen_else = 0;
+                if_stack[if_depth].satisfied = cond;
+                if_depth++;
+                free(name);
+                while (*p && *p != '\n') p++;
+                if (*p == '\n') { buf_push(b, '\n'); p++; }
+                continue;
+            }
+            /* #ifndef */
+            if (strncmp(p, "ifndef", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
+                p += 6;
+                while (*p == ' ' || *p == '\t') p++;
+                const char *ns = p;
+                while (*p && *p != '\n' && *p != ' ' && *p != '\t') p++;
+                int nlen = p - ns;
+                char *name = xmalloc(nlen + 1);
+                memcpy(name, ns, nlen);
+                name[nlen] = '\0';
+                if (if_depth >= 32) fatal("#ifndef nesting too deep");
+                int cond = pp_is_including() && !is_macro_defined(name);
+                if_stack[if_depth].including = cond;
+                if_stack[if_depth].seen_else = 0;
+                if_stack[if_depth].satisfied = cond;
+                if_depth++;
+                free(name);
+                while (*p && *p != '\n') p++;
+                if (*p == '\n') { buf_push(b, '\n'); p++; }
+                continue;
+            }
+            /* #if */
+            if (strncmp(p, "if", 2) == 0 && (p[2] == ' ' || p[2] == '\t')) {
+                p += 2;
+                while (*p == ' ' || *p == '\t') p++;
+                const char *expr_start = p;
+                while (*p && *p != '\n') p++;
+                int elen = p - expr_start;
+                /* Trim trailing whitespace */
+                while (elen > 0 && (expr_start[elen-1] == ' ' || expr_start[elen-1] == '\t')) elen--;
+                char *expr = xmalloc(elen + 1);
+                memcpy(expr, expr_start, elen);
+                expr[elen] = '\0';
+                if (if_depth >= 32) fatal("#if nesting too deep");
+                int cond = pp_is_including() && eval_if_expr(expr);
+                if_stack[if_depth].including = cond;
+                if_stack[if_depth].seen_else = 0;
+                if_stack[if_depth].satisfied = cond;
+                if_depth++;
+                free(expr);
+                if (*p == '\n') { buf_push(b, '\n'); p++; }
+                continue;
+            }
+            /* #elif */
+            if (strncmp(p, "elif", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
+                p += 4;
+                while (*p == ' ' || *p == '\t') p++;
+                const char *expr_start = p;
+                while (*p && *p != '\n') p++;
+                int elen = p - expr_start;
+                while (elen > 0 && (expr_start[elen-1] == ' ' || expr_start[elen-1] == '\t')) elen--;
+                char *expr = xmalloc(elen + 1);
+                memcpy(expr, expr_start, elen);
+                expr[elen] = '\0';
+                if (if_depth <= 0) fatal("#elif without #if");
+                if (if_stack[if_depth - 1].seen_else) fatal("#elif after #else");
+                /* Check if parent levels are including */
+                int parent_inc = 1;
+                for (int i = 0; i < if_depth - 1; i++) {
+                    if (!if_stack[i].including) { parent_inc = 0; break; }
+                }
+                if (if_stack[if_depth - 1].satisfied) {
+                    if_stack[if_depth - 1].including = 0;
+                } else if (parent_inc && eval_if_expr(expr)) {
+                    if_stack[if_depth - 1].including = 1;
+                    if_stack[if_depth - 1].satisfied = 1;
+                } else {
+                    if_stack[if_depth - 1].including = 0;
+                }
+                free(expr);
+                if (*p == '\n') { buf_push(b, '\n'); p++; }
+                continue;
+            }
+            /* #else */
+            if (strncmp(p, "else", 4) == 0 && (p[4] == '\n' || p[4] == '\0' || p[4] == ' ' || p[4] == '\t')) {
+                if (if_depth <= 0) fatal("#else without #if");
+                if (if_stack[if_depth - 1].seen_else) fatal("duplicate #else");
+                if_stack[if_depth - 1].seen_else = 1;
+                /* Check if parent levels are including */
+                int parent_inc = 1;
+                for (int i = 0; i < if_depth - 1; i++) {
+                    if (!if_stack[i].including) { parent_inc = 0; break; }
+                }
+                if (if_stack[if_depth - 1].satisfied) {
+                    if_stack[if_depth - 1].including = 0;
+                } else {
+                    if_stack[if_depth - 1].including = parent_inc;
+                    if_stack[if_depth - 1].satisfied = 1;
+                }
+                while (*p && *p != '\n') p++;
+                if (*p == '\n') { buf_push(b, '\n'); p++; }
+                continue;
+            }
+            /* #endif */
+            if (strncmp(p, "endif", 5) == 0 && (p[5] == '\n' || p[5] == '\0' || p[5] == ' ' || p[5] == '\t')) {
+                if (if_depth <= 0) fatal("#endif without #if");
+                if_depth--;
+                while (*p && *p != '\n') p++;
+                if (*p == '\n') { buf_push(b, '\n'); p++; }
+                continue;
+            }
+
+            /* Only process remaining directives if including */
+            if (!pp_is_including()) {
+                while (*p && *p != '\n') p++;
+                if (*p == '\n') { buf_push(b, '\n'); p++; }
+                continue;
+            }
+
+            /* #include "file" */
+            if (strncmp(p, "include", 7) == 0 && (p[7] == ' ' || p[7] == '\t' || p[7] == '"')) {
+                p += 7;
+                while (*p == ' ' || *p == '\t') p++;
+                if (*p == '"') {
+                    p++;
+                    const char *path_start = p;
+                    while (*p && *p != '"' && *p != '\n') p++;
+                    int plen = p - path_start;
+                    char *inc_file = xmalloc(plen + 1);
+                    memcpy(inc_file, path_start, plen);
+                    inc_file[plen] = '\0';
+                    if (*p == '"') p++;
+                    /* Build full path relative to current file */
+                    char *full_path = concat_paths(dir, inc_file);
+                    char *inc_src = read_file(full_path);
+                    preprocess_file(inc_src, full_path, depth + 1, b);
+                    free(inc_src);
+                    free(full_path);
+                    free(inc_file);
+                    while (*p && *p != '\n') p++;
+                    if (*p == '\n') { buf_push(b, '\n'); p++; }
+                    continue;
+                }
+                /* #include <...> — skip (system header) */
+                while (*p && *p != '\n') p++;
+                if (*p == '\n') { buf_push(b, '\n'); p++; }
+                continue;
+            }
+            /* #define */
             if (strncmp(p, "define", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
                 p += 6;
                 while (*p == ' ' || *p == '\t') p++;
-                /* Read macro name */
                 const char *name_start = p;
                 while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '(') p++;
                 int name_len = p - name_start;
                 char *name = xmalloc(name_len + 1);
                 memcpy(name, name_start, name_len);
                 name[name_len] = '\0';
-                /* Skip function-like macros (with parentheses) */
                 if (*p == '(') {
-                    /* Skip entire line */
                     while (*p && *p != '\n') p++;
                     free(name);
                 } else {
-                    /* Read value (rest of line, trimmed) */
                     while (*p == ' ' || *p == '\t') p++;
                     const char *val_start = p;
                     while (*p && *p != '\n') p++;
-                    /* Trim trailing whitespace */
                     const char *val_end = p;
                     while (val_end > val_start && (val_end[-1] == ' ' || val_end[-1] == '\t')) val_end--;
                     int val_len = val_end - val_start;
@@ -149,27 +401,36 @@ static char *strip_preprocessor(const char *src) {
                     free(name);
                     free(value);
                 }
+                if (*p == '\n') { buf_push(b, '\n'); p++; }
+                continue;
+            }
+            /* Other preprocessor directive — skip */
+            while (*p && *p != '\n') p++;
+            if (*p == '\n') { buf_push(b, '\n'); p++; }
+        } else {
+            /* Non-directive line */
+            if (pp_is_including()) {
+                p = line_start;
+                while (*p && *p != '\n') {
+                    buf_push(b, *p);
+                    p++;
+                }
             } else {
-                /* Skip entire line (other preprocessor directives) */
                 while (*p && *p != '\n') p++;
             }
-            if (*p == '\n') {
-                buf_push(&b, '\n');
-                p++;
-            }
-        } else {
-            /* Copy entire line */
-            p = line_start;
-            while (*p && *p != '\n') {
-                buf_push(&b, *p);
-                p++;
-            }
-            if (*p == '\n') {
-                buf_push(&b, '\n');
-                p++;
-            }
+            if (*p == '\n') { buf_push(b, '\n'); p++; }
         }
     }
+    free(dir);
+}
+
+static char *strip_preprocessor(const char *src, const char *filepath) {
+    nmacros = 0;
+    if_depth = 0;
+    Buf b;
+    buf_init(&b);
+    preprocess_file(src, filepath, 0, &b);
+    if (if_depth != 0) fatal("Unterminated #if/#ifdef/#ifndef");
     char *stripped = buf_detach(&b);
     char *expanded = expand_macros(stripped);
     free(stripped);
@@ -205,7 +466,7 @@ static int has_extension(const char *path, const char *ext) {
 /* Compile a .c file to a .o file. Returns the .o path (allocated). */
 static char *compile_c_to_o(const char *c_path) {
     char *src = read_file(c_path);
-    char *cleaned = strip_preprocessor(src);
+    char *cleaned = strip_preprocessor(src, c_path);
 
     TokArray toks = lex(cleaned);
     Program *prog = parse_program(toks);

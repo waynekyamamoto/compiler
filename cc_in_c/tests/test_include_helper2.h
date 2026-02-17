@@ -1,0 +1,6 @@
+#ifndef TEST_INCLUDE_HELPER2_H
+#define TEST_INCLUDE_HELPER2_H
+
+#define HELPER2_VALUE 99
+
+#endif

@@ -209,6 +209,15 @@ int *macro_names[256];
 int *macro_values[256];
 int nmacros;
 
+// Conditional compilation stack
+int if_stack_including[32];
+int if_stack_seen_else[32];
+int if_stack_satisfied[32];
+int if_depth;
+
+// Include depth tracking
+int include_depth;
+
 // Known function names (for function pointer support)
 int *known_funcs[512];
 int nknown_funcs;
@@ -400,6 +409,142 @@ int *make_str(int *src, int start, int len) {
   }
   __write_byte(buf, len, 0);
   return buf;
+}
+
+// ---- Preprocessor helpers ----
+
+int pp_is_macro_defined(int *name) {
+  int i = 0;
+  while (i < nmacros) {
+    if (my_strcmp(macro_names[i], name) == 0) { return 1; }
+    i++;
+  }
+  return 0;
+}
+
+// Check if all if_stack levels are including
+int pp_is_including() {
+  int i = 0;
+  while (i < if_depth) {
+    if (if_stack_including[i] == 0) { return 0; }
+    i++;
+  }
+  return 1;
+}
+
+// Check if parent levels (0..if_depth-2) are including
+int pp_parent_including() {
+  int i = 0;
+  while (i < if_depth - 1) {
+    if (if_stack_including[i] == 0) { return 0; }
+    i++;
+  }
+  return 1;
+}
+
+// Get directory from a file path (returns new string)
+int *pp_get_dir(int *path) {
+  int len = my_strlen(path);
+  int last_slash = 0 - 1;
+  int i = len - 1;
+  while (i >= 0) {
+    if (__read_byte(path, i) == '/') { last_slash = i; i = 0 - 1; }
+    i--;
+  }
+  if (last_slash < 0) {
+    int *dot = my_malloc(2);
+    __write_byte(dot, 0, '.');
+    __write_byte(dot, 1, 0);
+    return dot;
+  }
+  int *dir = my_malloc(last_slash + 2);
+  i = 0;
+  while (i <= last_slash) {
+    __write_byte(dir, i, __read_byte(path, i));
+    i++;
+  }
+  __write_byte(dir, last_slash + 1, 0);
+  return dir;
+}
+
+// Concatenate dir + filename
+int *pp_concat_paths(int *dir, int *file) {
+  int dlen = my_strlen(dir);
+  int flen = my_strlen(file);
+  int need_slash = 0;
+  if (dlen > 0 && __read_byte(dir, dlen - 1) != '/') { need_slash = 1; }
+  int *result = my_malloc(dlen + need_slash + flen + 1);
+  int o = 0;
+  int i = 0;
+  while (i < dlen) { __write_byte(result, o, __read_byte(dir, i)); o++; i++; }
+  if (need_slash) { __write_byte(result, o, '/'); o++; }
+  i = 0;
+  while (i < flen) { __write_byte(result, o, __read_byte(file, i)); o++; i++; }
+  __write_byte(result, o, 0);
+  return result;
+}
+
+// Read a file into a buffer, return pointer and set *out_len
+int *pp_read_file(int *path, int *out_len) {
+  int *f = fopen(path, "r");
+  if (f == 0) {
+    printf("cc: Cannot open include: %s\n", path);
+    exit(1);
+  }
+  int *buf = my_malloc(500 * 1000);
+  int len = 0;
+  int ch = fgetc(f);
+  while (ch != 0 - 1) {
+    __write_byte(buf, len, ch);
+    len++;
+    ch = fgetc(f);
+  }
+  __write_byte(buf, len, 0);
+  fclose(f);
+  // Store length at out_len pointer (use first element)
+  *out_len = len;
+  return buf;
+}
+
+// Evaluate simple #if expression from a string: "0", "1", "defined(NAME)", "!defined(NAME)"
+int pp_eval_if_expr(int *expr, int elen) {
+  int i = 0;
+  int ns = 0;
+  int *name = 0;
+  int negated = 0;
+  // skip whitespace
+  while (i < elen && (__read_byte(expr, i) == ' ' || __read_byte(expr, i) == '\t')) { i++; }
+  // Check for !defined(...)
+  if (i < elen && __read_byte(expr, i) == '!') {
+    negated = 1;
+    i++;
+  }
+  // Check for "defined(...)"
+  if (i + 7 <= elen &&
+      __read_byte(expr, i) == 'd' && __read_byte(expr, i+1) == 'e' &&
+      __read_byte(expr, i+2) == 'f' && __read_byte(expr, i+3) == 'i' &&
+      __read_byte(expr, i+4) == 'n' && __read_byte(expr, i+5) == 'e' &&
+      __read_byte(expr, i+6) == 'd') {
+    i += 7;
+    while (i < elen && (__read_byte(expr, i) == ' ' || __read_byte(expr, i) == '\t')) { i++; }
+    if (i < elen && __read_byte(expr, i) == '(') {
+      i++;
+      while (i < elen && (__read_byte(expr, i) == ' ' || __read_byte(expr, i) == '\t')) { i++; }
+      ns = i;
+      while (i < elen && __read_byte(expr, i) != ')' && __read_byte(expr, i) != ' ' && __read_byte(expr, i) != '\t') { i++; }
+      name = make_str(expr, ns, i - ns);
+      if (negated) { return 1 - pp_is_macro_defined(name); }
+      return pp_is_macro_defined(name);
+    }
+  }
+  // Check for numeric literal
+  if (i < elen && __read_byte(expr, i) >= '0' && __read_byte(expr, i) <= '9') {
+    if (__read_byte(expr, i) == '0') { return 0; }
+    return 1;
+  }
+  printf("cc: Unsupported #if expression\n");
+  exit(1);
+  return 0;
 }
 
 // ---- Lexer ----
@@ -3788,6 +3933,273 @@ int codegen(struct Program *prog) {
   return 0;
 }
 
+// ---- Preprocessor pass ----
+
+// Preprocess source buffer, writing to out buffer at offset co.
+// Returns new co (output offset).
+int pp_preprocess(int *src, int srclen, int *filepath, int *out, int co, int depth) {
+  if (depth > 32) { my_fatal("Include depth exceeded (max 32)"); }
+  int *dir = pp_get_dir(filepath);
+  int ci = 0;
+  int si = 0;
+  int nstart = 0;
+  int nend = 0;
+  int vstart = 0;
+  int vend = 0;
+  int cond = 0;
+  int parent_inc = 0;
+  int *name = 0;
+  int estart = 0;
+  int eend = 0;
+  int *expr = 0;
+  int pstart = 0;
+  int *inc_file = 0;
+  int *full_path = 0;
+  int inc_len = 0;
+  int *inc_src = 0;
+
+  while (ci < srclen) {
+    // Skip leading whitespace to check for #
+    si = ci;
+    while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) {
+      si++;
+    }
+    if (si < srclen && __read_byte(src, si) == '#') {
+      si++;
+      // skip whitespace after #
+      while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) {
+        si++;
+      }
+
+      // Check for "ifdef"
+      if (si + 5 <= srclen &&
+          __read_byte(src, si) == 'i' && __read_byte(src, si+1) == 'f' &&
+          __read_byte(src, si+2) == 'd' && __read_byte(src, si+3) == 'e' &&
+          __read_byte(src, si+4) == 'f' &&
+          (__read_byte(src, si+5) == ' ' || __read_byte(src, si+5) == '\t')) {
+        si += 5;
+        while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) { si++; }
+        nstart = si;
+        while (si < srclen && __read_byte(src, si) != '\n' && __read_byte(src, si) != ' ' && __read_byte(src, si) != '\t') { si++; }
+        name = make_str(src, nstart, si - nstart);
+        if (if_depth >= 32) { my_fatal("#ifdef nesting too deep"); }
+        cond = pp_is_including() && pp_is_macro_defined(name);
+        if_stack_including[if_depth] = cond;
+        if_stack_seen_else[if_depth] = 0;
+        if_stack_satisfied[if_depth] = cond;
+        if_depth++;
+        // skip rest of line
+        while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
+        if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
+        // Use continue to restart while loop
+        // (selfhost doesn't have continue so use goto-like pattern)
+      }
+
+      // Check for "ifndef"
+      else if (si + 6 <= srclen &&
+          __read_byte(src, si) == 'i' && __read_byte(src, si+1) == 'f' &&
+          __read_byte(src, si+2) == 'n' && __read_byte(src, si+3) == 'd' &&
+          __read_byte(src, si+4) == 'e' && __read_byte(src, si+5) == 'f' &&
+          (__read_byte(src, si+6) == ' ' || __read_byte(src, si+6) == '\t')) {
+        si += 6;
+        while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) { si++; }
+        nstart = si;
+        while (si < srclen && __read_byte(src, si) != '\n' && __read_byte(src, si) != ' ' && __read_byte(src, si) != '\t') { si++; }
+        name = make_str(src, nstart, si - nstart);
+        if (if_depth >= 32) { my_fatal("#ifndef nesting too deep"); }
+        cond = pp_is_including() && (1 - pp_is_macro_defined(name));
+        if_stack_including[if_depth] = cond;
+        if_stack_seen_else[if_depth] = 0;
+        if_stack_satisfied[if_depth] = cond;
+        if_depth++;
+        while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
+        if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
+      }
+
+      // Check for "if " (but not ifdef/ifndef which we already handled)
+      else if (si + 2 <= srclen &&
+          __read_byte(src, si) == 'i' && __read_byte(src, si+1) == 'f' &&
+          (__read_byte(src, si+2) == ' ' || __read_byte(src, si+2) == '\t')) {
+        si += 2;
+        while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) { si++; }
+        // Read expression until end of line
+        estart = si;
+        while (si < srclen && __read_byte(src, si) != '\n') { si++; }
+        eend = si;
+        // Trim trailing whitespace
+        while (eend > estart && (__read_byte(src, eend - 1) == ' ' || __read_byte(src, eend - 1) == '\t')) { eend--; }
+        expr = make_str(src, estart, eend - estart);
+        if (if_depth >= 32) { my_fatal("#if nesting too deep"); }
+        cond = pp_is_including() && pp_eval_if_expr(expr, eend - estart);
+        if_stack_including[if_depth] = cond;
+        if_stack_seen_else[if_depth] = 0;
+        if_stack_satisfied[if_depth] = cond;
+        if_depth++;
+        while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
+        if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
+      }
+
+      // Check for "elif"
+      else if (si + 4 <= srclen &&
+          __read_byte(src, si) == 'e' && __read_byte(src, si+1) == 'l' &&
+          __read_byte(src, si+2) == 'i' && __read_byte(src, si+3) == 'f' &&
+          (__read_byte(src, si+4) == ' ' || __read_byte(src, si+4) == '\t')) {
+        si += 4;
+        while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) { si++; }
+        estart = si;
+        while (si < srclen && __read_byte(src, si) != '\n') { si++; }
+        eend = si;
+        while (eend > estart && (__read_byte(src, eend - 1) == ' ' || __read_byte(src, eend - 1) == '\t')) { eend--; }
+        expr = make_str(src, estart, eend - estart);
+        if (if_depth <= 0) { my_fatal("#elif without #if"); }
+        if (if_stack_seen_else[if_depth - 1]) { my_fatal("#elif after #else"); }
+        parent_inc = pp_parent_including();
+        if (if_stack_satisfied[if_depth - 1]) {
+          if_stack_including[if_depth - 1] = 0;
+        } else if (parent_inc && pp_eval_if_expr(expr, eend - estart)) {
+          if_stack_including[if_depth - 1] = 1;
+          if_stack_satisfied[if_depth - 1] = 1;
+        } else {
+          if_stack_including[if_depth - 1] = 0;
+        }
+        while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
+        if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
+      }
+
+      // Check for "else"
+      else if (si + 4 <= srclen &&
+          __read_byte(src, si) == 'e' && __read_byte(src, si+1) == 'l' &&
+          __read_byte(src, si+2) == 's' && __read_byte(src, si+3) == 'e' &&
+          (__read_byte(src, si+4) == '\n' || si + 4 == srclen || __read_byte(src, si+4) == ' ' || __read_byte(src, si+4) == '\t')) {
+        if (if_depth <= 0) { my_fatal("#else without #if"); }
+        if (if_stack_seen_else[if_depth - 1]) { my_fatal("duplicate #else"); }
+        if_stack_seen_else[if_depth - 1] = 1;
+        parent_inc = pp_parent_including();
+        if (if_stack_satisfied[if_depth - 1]) {
+          if_stack_including[if_depth - 1] = 0;
+        } else {
+          if_stack_including[if_depth - 1] = parent_inc;
+          if_stack_satisfied[if_depth - 1] = 1;
+        }
+        while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
+        if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
+      }
+
+      // Check for "endif"
+      else if (si + 5 <= srclen &&
+          __read_byte(src, si) == 'e' && __read_byte(src, si+1) == 'n' &&
+          __read_byte(src, si+2) == 'd' && __read_byte(src, si+3) == 'i' &&
+          __read_byte(src, si+4) == 'f' &&
+          (si + 5 == srclen || __read_byte(src, si+5) == '\n' || __read_byte(src, si+5) == ' ' || __read_byte(src, si+5) == '\t')) {
+        if (if_depth <= 0) { my_fatal("#endif without #if"); }
+        if_depth--;
+        while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
+        if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
+      }
+
+      // Not including — skip remaining directive types
+      else if (pp_is_including() == 0) {
+        while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
+        if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
+      }
+
+      // Check for "include"
+      else if (si + 7 <= srclen &&
+          __read_byte(src, si) == 'i' && __read_byte(src, si+1) == 'n' &&
+          __read_byte(src, si+2) == 'c' && __read_byte(src, si+3) == 'l' &&
+          __read_byte(src, si+4) == 'u' && __read_byte(src, si+5) == 'd' &&
+          __read_byte(src, si+6) == 'e' &&
+          (__read_byte(src, si+7) == ' ' || __read_byte(src, si+7) == '\t' || __read_byte(src, si+7) == '"')) {
+        si += 7;
+        while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) { si++; }
+        if (si < srclen && __read_byte(src, si) == '"') {
+          si++;
+          pstart = si;
+          while (si < srclen && __read_byte(src, si) != '"' && __read_byte(src, si) != '\n') { si++; }
+          inc_file = make_str(src, pstart, si - pstart);
+          full_path = pp_concat_paths(dir, inc_file);
+          inc_len = 0;
+          inc_src = pp_read_file(full_path, &inc_len);
+          co = pp_preprocess(inc_src, inc_len, full_path, out, co, depth + 1);
+        }
+        // Skip rest of line (handles both "file" and <file> includes)
+        while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
+        if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
+      }
+
+      // Check for "define"
+      else if (si + 6 <= srclen &&
+          __read_byte(src, si) == 'd' && __read_byte(src, si + 1) == 'e' &&
+          __read_byte(src, si + 2) == 'f' && __read_byte(src, si + 3) == 'i' &&
+          __read_byte(src, si + 4) == 'n' && __read_byte(src, si + 5) == 'e' &&
+          (__read_byte(src, si + 6) == ' ' || __read_byte(src, si + 6) == '\t')) {
+        si += 6;
+        while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) {
+          si++;
+        }
+        // Read macro name
+        nstart = si;
+        while (si < srclen && __read_byte(src, si) != ' ' && __read_byte(src, si) != '\t' &&
+               __read_byte(src, si) != '\n' && __read_byte(src, si) != '(') {
+          si++;
+        }
+        nend = si;
+        // Skip function-like macros
+        if (si < srclen && __read_byte(src, si) == '(') {
+          // skip line
+        } else {
+          // skip whitespace
+          while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) {
+            si++;
+          }
+          // Read value until end of line
+          vstart = si;
+          while (si < srclen && __read_byte(src, si) != '\n') {
+            si++;
+          }
+          // Trim trailing whitespace
+          vend = si;
+          while (vend > vstart && (__read_byte(src, vend - 1) == ' ' || __read_byte(src, vend - 1) == '\t')) {
+            vend--;
+          }
+          macro_names[nmacros] = make_str(src, nstart, nend - nstart);
+          macro_values[nmacros] = make_str(src, vstart, vend - vstart);
+          nmacros++;
+        }
+        // Skip entire line
+        while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
+        if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
+      }
+
+      else {
+        // Other preprocessor directive — skip
+        while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
+        if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
+      }
+
+    } else {
+      // Non-directive line
+      if (pp_is_including()) {
+        // Copy line
+        while (ci < srclen && __read_byte(src, ci) != '\n') {
+          __write_byte(out, co, __read_byte(src, ci));
+          co++;
+          ci++;
+        }
+      } else {
+        // Skip line
+        while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
+      }
+      if (ci < srclen) {
+        __write_byte(out, co, '\n');
+        co++;
+        ci++;
+      }
+    }
+  }
+  return co;
+}
+
 // ---- Driver ----
 
 int main(int argc, int *argv) {
@@ -3835,91 +4247,13 @@ int main(int argc, int *argv) {
 
   // Strip preprocessor lines and collect #define macros
   nmacros = 0;
-  int *cleaned = my_malloc(srclen + 1);
-  int ci = 0;
+  if_depth = 0;
+  int *cleaned = my_malloc(srclen * 4 + 1);
   int co = 0;
-  int si = 0;
-  int mc = 0;
-  int nstart = 0;
-  int nend = 0;
-  int vstart = 0;
-  int vend = 0;
-  while (ci < srclen) {
-    // Skip leading whitespace to check for #
-    si = ci;
-    while (si < srclen && (__read_byte(srcbuf, si) == ' ' || __read_byte(srcbuf, si) == '\t')) {
-      si++;
-    }
-    if (si < srclen && __read_byte(srcbuf, si) == '#') {
-      si++;
-      // skip whitespace after #
-      while (si < srclen && (__read_byte(srcbuf, si) == ' ' || __read_byte(srcbuf, si) == '\t')) {
-        si++;
-      }
-      // Check for "define"
-      if (si + 6 <= srclen &&
-          __read_byte(srcbuf, si) == 'd' && __read_byte(srcbuf, si + 1) == 'e' &&
-          __read_byte(srcbuf, si + 2) == 'f' && __read_byte(srcbuf, si + 3) == 'i' &&
-          __read_byte(srcbuf, si + 4) == 'n' && __read_byte(srcbuf, si + 5) == 'e' &&
-          (__read_byte(srcbuf, si + 6) == ' ' || __read_byte(srcbuf, si + 6) == '\t')) {
-        si += 6;
-        while (si < srclen && (__read_byte(srcbuf, si) == ' ' || __read_byte(srcbuf, si) == '\t')) {
-          si++;
-        }
-        // Read macro name
-        nstart = si;
-        while (si < srclen && __read_byte(srcbuf, si) != ' ' && __read_byte(srcbuf, si) != '\t' &&
-               __read_byte(srcbuf, si) != '\n' && __read_byte(srcbuf, si) != '(') {
-          si++;
-        }
-        nend = si;
-        // Skip function-like macros
-        if (si < srclen && __read_byte(srcbuf, si) == '(') {
-          // skip line
-        } else {
-          // skip whitespace
-          while (si < srclen && (__read_byte(srcbuf, si) == ' ' || __read_byte(srcbuf, si) == '\t')) {
-            si++;
-          }
-          // Read value until end of line
-          vstart = si;
-          while (si < srclen && __read_byte(srcbuf, si) != '\n') {
-            si++;
-          }
-          // Trim trailing whitespace
-          vend = si;
-          while (vend > vstart && (__read_byte(srcbuf, vend - 1) == ' ' || __read_byte(srcbuf, vend - 1) == '\t')) {
-            vend--;
-          }
-          macro_names[nmacros] = make_str(srcbuf, nstart, nend - nstart);
-          macro_values[nmacros] = make_str(srcbuf, vstart, vend - vstart);
-          nmacros++;
-        }
-      }
-      // Skip entire line
-      while (ci < srclen && __read_byte(srcbuf, ci) != '\n') {
-        ci++;
-      }
-      if (ci < srclen) {
-        __write_byte(cleaned, co, '\n');
-        co++;
-        ci++;
-      }
-    } else {
-      // Copy line
-      while (ci < srclen && __read_byte(srcbuf, ci) != '\n') {
-        __write_byte(cleaned, co, __read_byte(srcbuf, ci));
-        co++;
-        ci++;
-      }
-      if (ci < srclen) {
-        __write_byte(cleaned, co, '\n');
-        co++;
-        ci++;
-      }
-    }
-  }
+  // Use pp_preprocess to handle the source
+  co = pp_preprocess(srcbuf, srclen, c_path, cleaned, co, 0);
   __write_byte(cleaned, co, 0);
+  if (if_depth != 0) { my_fatal("Unterminated #if/#ifdef/#ifndef"); }
 
   // Expand macros if any were defined
   int *expanded = 0;
@@ -3928,6 +4262,7 @@ int main(int argc, int *argv) {
   int istart = 0;
   int ilen = 0;
   int found = 0;
+  int mc = 0;
   int vlen = 0;
   int vi = 0;
   int ki = 0;
