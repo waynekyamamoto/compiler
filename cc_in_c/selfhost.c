@@ -2548,12 +2548,16 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
           }
           fti++;
         }
-        sd = my_malloc(48);
+        sd = my_malloc(72);
         sd->name = my_strdup(tag_name);
         sd->fields = td_fields;
         sd->field_types = ftypes;
         sd->nfields = td_nf;
         sd->is_union = is_union_td;
+        sd->bit_widths = 0;
+        sd->bit_offsets = 0;
+        sd->word_indices = 0;
+        sd->nwords = 0;
         structs[*ns_ptr] = sd;
         *ns_ptr = *ns_ptr + 1;
       }
