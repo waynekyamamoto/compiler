@@ -23,7 +23,10 @@ static char *read_file(const char *path) {
 /* Simple #define macro table */
 typedef struct {
     char *name;
-    char *value;
+    char *value;       /* object-like replacement text */
+    char **params;     /* NULL for object-like; param names for function-like */
+    int nparams;       /* -1 = object-like, >=0 = function-like */
+    char *body;        /* replacement body for function-like */
 } Macro;
 
 static Macro macros[256];
@@ -40,12 +43,133 @@ static void add_macro(const char *name, const char *value) {
     }
     macros[nmacros].name = xstrdup(name);
     macros[nmacros].value = xstrdup(value);
+    macros[nmacros].params = NULL;
+    macros[nmacros].nparams = -1;
+    macros[nmacros].body = NULL;
+    nmacros++;
+}
+
+static void add_func_macro(const char *name, char **params, int nparams, const char *body) {
+    /* Overwrite if exists */
+    for (int i = 0; i < nmacros; i++) {
+        if (strcmp(macros[i].name, name) == 0) {
+            macros[i].params = params;
+            macros[i].nparams = nparams;
+            free(macros[i].body);
+            macros[i].body = xstrdup(body);
+            macros[i].value = NULL;
+            return;
+        }
+    }
+    macros[nmacros].name = xstrdup(name);
+    macros[nmacros].value = NULL;
+    macros[nmacros].params = params;
+    macros[nmacros].nparams = nparams;
+    macros[nmacros].body = xstrdup(body);
     nmacros++;
 }
 
 static int is_ident_char(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
            (c >= '0' && c <= '9') || c == '_';
+}
+
+/* Substitute params in function-like macro body with args */
+static char *subst_macro_params(const Macro *m, char **args, int nargs) {
+    Buf b;
+    buf_init(&b);
+    const char *body = m->body;
+    int blen = strlen(body);
+    int i = 0;
+    while (i < blen) {
+        if (is_ident_char(body[i]) && (i == 0 || !is_ident_char(body[i-1]))) {
+            int start = i;
+            while (i < blen && is_ident_char(body[i])) i++;
+            int ilen = i - start;
+            int found = 0;
+            for (int p = 0; p < m->nparams; p++) {
+                if ((int)strlen(m->params[p]) == ilen &&
+                    strncmp(body + start, m->params[p], ilen) == 0) {
+                    if (p < nargs)
+                        buf_append(&b, args[p]);
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                for (int k = start; k < i; k++) buf_push(&b, body[k]);
+            }
+        } else {
+            buf_push(&b, body[i++]);
+        }
+    }
+    return buf_detach(&b);
+}
+
+static char *expand_macros(const char *src);
+
+/* Parse function-like macro arguments from src starting at position *pos (after '(')
+   Returns array of argument strings, sets *nargs */
+static char **parse_macro_args(const char *src, int len, int *pos, int *nargs) {
+    char **args = xmalloc(16 * sizeof(char *));
+    int cap = 16;
+    *nargs = 0;
+    int depth = 1;
+    int i = *pos;
+    Buf arg;
+    buf_init(&arg);
+    while (i < len && depth > 0) {
+        if (src[i] == '(') depth++;
+        else if (src[i] == ')') {
+            depth--;
+            if (depth == 0) { i++; break; }
+        } else if (src[i] == ',' && depth == 1) {
+            /* End of this argument */
+            if (*nargs >= cap) {
+                cap *= 2;
+                args = realloc(args, cap * sizeof(char *));
+            }
+            args[(*nargs)++] = buf_detach(&arg);
+            buf_init(&arg);
+            i++;
+            /* skip leading whitespace in next arg */
+            while (i < len && (src[i] == ' ' || src[i] == '\t')) i++;
+            continue;
+        } else if (src[i] == '"') {
+            /* String literal in macro arg */
+            buf_push(&arg, src[i++]);
+            while (i < len && src[i] != '"') {
+                if (src[i] == '\\' && i + 1 < len)
+                    buf_push(&arg, src[i++]);
+                buf_push(&arg, src[i++]);
+            }
+            if (i < len) buf_push(&arg, src[i++]);
+            continue;
+        } else if (src[i] == '\'') {
+            buf_push(&arg, src[i++]);
+            while (i < len && src[i] != '\'') {
+                if (src[i] == '\\' && i + 1 < len)
+                    buf_push(&arg, src[i++]);
+                buf_push(&arg, src[i++]);
+            }
+            if (i < len) buf_push(&arg, src[i++]);
+            continue;
+        }
+        buf_push(&arg, src[i++]);
+    }
+    /* Last argument (or only argument for zero-param macros) */
+    char *last = buf_detach(&arg);
+    if (*nargs > 0 || strlen(last) > 0) {
+        if (*nargs >= cap) {
+            cap *= 2;
+            args = realloc(args, cap * sizeof(char *));
+        }
+        args[(*nargs)++] = last;
+    } else {
+        free(last);
+    }
+    *pos = i;
+    return args;
 }
 
 static char *expand_macros(const char *src) {
@@ -89,9 +213,33 @@ static char *expand_macros(const char *src) {
             for (int m = 0; m < nmacros; m++) {
                 if ((int)strlen(macros[m].name) == ilen &&
                     strncmp(src + start, macros[m].name, ilen) == 0) {
-                    buf_append(&b, macros[m].value);
-                    found = 1;
-                    break;
+                    if (macros[m].nparams >= 0) {
+                        /* Function-like macro: need '(' */
+                        int j = i;
+                        while (j < len && (src[j] == ' ' || src[j] == '\t')) j++;
+                        if (j < len && src[j] == '(') {
+                            j++; /* skip '(' */
+                            int nargs = 0;
+                            char **args = parse_macro_args(src, len, &j, &nargs);
+                            char *subst = subst_macro_params(&macros[m], args, nargs);
+                            /* Re-expand the substituted result */
+                            char *expanded = expand_macros(subst);
+                            buf_append(&b, expanded);
+                            free(subst);
+                            free(expanded);
+                            for (int a = 0; a < nargs; a++) free(args[a]);
+                            free(args);
+                            i = j;
+                            found = 1;
+                            break;
+                        }
+                        /* No '(' follows — not a macro invocation, copy as-is */
+                    } else {
+                        /* Object-like macro */
+                        buf_append(&b, macros[m].value);
+                        found = 1;
+                        break;
+                    }
                 }
             }
             if (!found) {
@@ -385,8 +533,44 @@ static void preprocess_file(const char *src, const char *filepath, int depth, Bu
                 memcpy(name, name_start, name_len);
                 name[name_len] = '\0';
                 if (*p == '(') {
+                    /* Function-like macro: parse params */
+                    p++; /* skip '(' */
+                    char **params = xmalloc(16 * sizeof(char *));
+                    int nparams = 0;
+                    int pcap = 16;
+                    while (*p && *p != ')' && *p != '\n') {
+                        while (*p == ' ' || *p == '\t') p++;
+                        if (*p == ')') break;
+                        const char *ps = p;
+                        while (*p && *p != ',' && *p != ')' && *p != ' ' && *p != '\t' && *p != '\n') p++;
+                        int plen = p - ps;
+                        if (plen > 0) {
+                            if (nparams >= pcap) {
+                                pcap *= 2;
+                                params = realloc(params, pcap * sizeof(char *));
+                            }
+                            char *param = xmalloc(plen + 1);
+                            memcpy(param, ps, plen);
+                            param[plen] = '\0';
+                            params[nparams++] = param;
+                        }
+                        while (*p == ' ' || *p == '\t') p++;
+                        if (*p == ',') p++;
+                    }
+                    if (*p == ')') p++;
+                    /* Read body = rest of line, trimmed */
+                    while (*p == ' ' || *p == '\t') p++;
+                    const char *body_start = p;
                     while (*p && *p != '\n') p++;
+                    const char *body_end = p;
+                    while (body_end > body_start && (body_end[-1] == ' ' || body_end[-1] == '\t')) body_end--;
+                    int body_len = body_end - body_start;
+                    char *body = xmalloc(body_len + 1);
+                    memcpy(body, body_start, body_len);
+                    body[body_len] = '\0';
+                    add_func_macro(name, params, nparams, body);
                     free(name);
+                    free(body);
                 } else {
                     while (*p == ' ' || *p == '\t') p++;
                     const char *val_start = p;

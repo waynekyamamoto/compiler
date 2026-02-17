@@ -117,6 +117,7 @@ typedef struct {
 typedef struct {
     char *name;
     int count;
+    int inner_dim;  /* -1 for 1D, >=0 for inner dimension of 2D */
 } ArrayEntry;
 
 typedef struct {
@@ -130,6 +131,10 @@ typedef struct {
 } PtrStructVarEntry;
 
 typedef struct {
+    char *name;
+} UnsignedSlotEntry;
+
+typedef struct {
     SlotEntry slots[256];
     int nslots;
     ArrayEntry arrays[64];
@@ -138,6 +143,8 @@ typedef struct {
     int nstructvars;
     PtrStructVarEntry ptr_structvars[64];
     int nptr_structvars;
+    UnsignedSlotEntry unsigned_slots[256];
+    int nunsigned_slots;
     int stack_size;
 } FuncLayout;
 
@@ -172,6 +179,13 @@ static int is_array(FuncLayout *layout, const char *name) {
         if (strcmp(layout->arrays[i].name, name) == 0)
             return 1;
     return 0;
+}
+
+static int get_array_inner_dim(FuncLayout *layout, const char *name) {
+    for (int i = 0; i < layout->narrays; i++)
+        if (strcmp(layout->arrays[i].name, name) == 0)
+            return layout->arrays[i].inner_dim;
+    return -1;
 }
 
 static int is_structvar(FuncLayout *layout, const char *name) {
@@ -258,6 +272,13 @@ static int get_bitfield_info(const char *struct_name, const char *field_name, in
         }
     }
     *out_bit_offset = 0;
+    return 0;
+}
+
+static int is_unsigned_var(FuncLayout *layout, const char *name) {
+    for (int i = 0; i < layout->nunsigned_slots; i++)
+        if (strcmp(layout->unsigned_slots[i].name, name) == 0)
+            return 1;
     return 0;
 }
 
@@ -479,10 +500,13 @@ static void walk_stmts_for_layout(StmtArray *stmts, FuncLayout *layout, int *off
                     layout->structvars[layout->nstructvars].struct_type = xstrdup(e->struct_type);
                     layout->nstructvars++;
                 } else if (e->array_size >= 0) {
-                    *offset += e->array_size * 8;
+                    int total = e->array_size;
+                    if (e->array_size2 >= 0) total = e->array_size * e->array_size2;
+                    *offset += total * 8;
                     if (layout->narrays >= 64) fatal("Too many arrays");
                     layout->arrays[layout->narrays].name = xstrdup(e->name);
-                    layout->arrays[layout->narrays].count = e->array_size;
+                    layout->arrays[layout->narrays].count = total;
+                    layout->arrays[layout->narrays].inner_dim = e->array_size2;
                     layout->narrays++;
                 } else {
                     *offset += 8;
@@ -494,6 +518,12 @@ static void walk_stmts_for_layout(StmtArray *stmts, FuncLayout *layout, int *off
                     }
                 }
                 layout_add_slot(layout, e->name, *offset);
+                if (e->is_unsigned) {
+                    if (layout->nunsigned_slots < 256) {
+                        layout->unsigned_slots[layout->nunsigned_slots].name = xstrdup(e->name);
+                        layout->nunsigned_slots++;
+                    }
+                }
             }
         } else if (st->kind == ST_IF) {
             walk_block_for_layout(&st->u.if_s.then_blk, layout, offset);
@@ -624,6 +654,12 @@ static void gen_addr(Expr *e, FuncLayout *layout) {
             idx_stype = find_structvar_type(layout, e->u.index.base->u.var_name);
             if (!idx_stype)
                 idx_stype = find_ptr_structvar_type(layout, e->u.index.base->u.var_name);
+            /* Check for 2D array: stride = inner_dim * 8 */
+            if (!idx_stype) {
+                int inner = get_array_inner_dim(layout, e->u.index.base->u.var_name);
+                if (inner >= 0)
+                    stride = inner * 8;
+            }
         }
         if (idx_stype)
             stride = cg_struct_nfields(idx_stype) * 8;
@@ -722,6 +758,13 @@ static void gen_value(Expr *e, FuncLayout *layout) {
     }
 
     if (e->kind == ND_INDEX) {
+        /* For 2D array: arr[i] returns row address (no load), arr[i][j] loads */
+        if (e->u.index.base->kind == ND_VAR &&
+            get_array_inner_dim(layout, e->u.index.base->u.var_name) >= 0) {
+            /* This is indexing a 2D array — return row pointer, don't load */
+            gen_addr(e, layout);
+            return;
+        }
         gen_addr(e, layout);
         emit("\tldr\tx0, [x0]");
         return;
@@ -929,24 +972,41 @@ static void gen_value(Expr *e, FuncLayout *layout) {
             }
         }
 
+        /* Check if either operand involves an unsigned variable */
+        int use_unsigned = 0;
+        if (e->u.binary.lhs->kind == ND_VAR && is_unsigned_var(layout, e->u.binary.lhs->u.var_name))
+            use_unsigned = 1;
+        if (e->u.binary.rhs->kind == ND_VAR && is_unsigned_var(layout, e->u.binary.rhs->u.var_name))
+            use_unsigned = 1;
+
         if (strcmp(op, "+") == 0)      emit("\tadd\tx0, x1, x0");
         else if (strcmp(op, "-") == 0) emit("\tsub\tx0, x1, x0");
         else if (strcmp(op, "*") == 0) emit("\tmul\tx0, x1, x0");
-        else if (strcmp(op, "/") == 0) emit("\tsdiv\tx0, x1, x0");
+        else if (strcmp(op, "/") == 0) {
+            if (use_unsigned) emit("\tudiv\tx0, x1, x0");
+            else emit("\tsdiv\tx0, x1, x0");
+        }
         else if (strcmp(op, "&") == 0) emit("\tand\tx0, x1, x0");
         else if (strcmp(op, "|") == 0) emit("\torr\tx0, x1, x0");
         else if (strcmp(op, "^") == 0) emit("\teor\tx0, x1, x0");
         else if (strcmp(op, "<<") == 0) emit("\tlsl\tx0, x1, x0");
-        else if (strcmp(op, ">>") == 0) emit("\tasr\tx0, x1, x0");
+        else if (strcmp(op, ">>") == 0) {
+            if (use_unsigned) emit("\tlsr\tx0, x1, x0");
+            else emit("\tasr\tx0, x1, x0");
+        }
         else if (strcmp(op, "%") == 0) {
-            emit("\tsdiv\tx9, x1, x0");
+            if (use_unsigned) {
+                emit("\tudiv\tx9, x1, x0");
+            } else {
+                emit("\tsdiv\tx9, x1, x0");
+            }
             emit("\tmsub\tx0, x9, x0, x1");
         } else if (strcmp(op, "==") == 0) { emit("\tcmp\tx1, x0"); emit("\tcset\tx0, eq"); }
         else if (strcmp(op, "!=") == 0)   { emit("\tcmp\tx1, x0"); emit("\tcset\tx0, ne"); }
-        else if (strcmp(op, "<") == 0)    { emit("\tcmp\tx1, x0"); emit("\tcset\tx0, lt"); }
-        else if (strcmp(op, "<=") == 0)   { emit("\tcmp\tx1, x0"); emit("\tcset\tx0, le"); }
-        else if (strcmp(op, ">") == 0)    { emit("\tcmp\tx1, x0"); emit("\tcset\tx0, gt"); }
-        else if (strcmp(op, ">=") == 0)   { emit("\tcmp\tx1, x0"); emit("\tcset\tx0, ge"); }
+        else if (strcmp(op, "<") == 0)    { emit("\tcmp\tx1, x0"); emit("\tcset\tx0, %s", use_unsigned ? "lo" : "lt"); }
+        else if (strcmp(op, "<=") == 0)   { emit("\tcmp\tx1, x0"); emit("\tcset\tx0, %s", use_unsigned ? "ls" : "le"); }
+        else if (strcmp(op, ">") == 0)    { emit("\tcmp\tx1, x0"); emit("\tcset\tx0, %s", use_unsigned ? "hi" : "gt"); }
+        else if (strcmp(op, ">=") == 0)   { emit("\tcmp\tx1, x0"); emit("\tcset\tx0, %s", use_unsigned ? "hs" : "ge"); }
         else fatal("Unsupported binary op '%s'", op);
         return;
     }

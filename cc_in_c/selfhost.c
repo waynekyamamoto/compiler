@@ -50,6 +50,8 @@ struct VarDecl {
   int is_ptr;
   struct Expr *init;
   int is_static;
+  int is_unsigned;
+  int arr_size2;
 };
 
 struct Stmt {
@@ -193,6 +195,7 @@ int lay_off[256];
 int nlay;
 int *lay_arr_name[64];
 int lay_arr_count[64];
+int lay_arr_inner[64];
 int nlay_arr;
 int *lay_sv_name[64];
 int *lay_sv_type[64];
@@ -200,6 +203,8 @@ int nlay_sv;
 int *lay_psv_name[64];
 int *lay_psv_type[64];
 int nlay_psv;
+int *lay_unsigned_name[256];
+int nlay_unsigned;
 int lay_stack_size;
 
 // Enum constant table
@@ -222,6 +227,9 @@ int cg_cl_gen_counter;
 // Anonymous struct counter
 int anon_struct_counter;
 
+// Parser: last_type_unsigned flag
+int last_type_unsigned;
+
 // Inline struct defs for anonymous structs
 struct SDef *inline_sdefs[64];
 int ninline_sdefs;
@@ -229,6 +237,9 @@ int ninline_sdefs;
 // Macro table for #define
 int *macro_names[256];
 int *macro_values[256];
+int macro_nparams[256];  // -1 = object-like, >=0 = function-like
+int **macro_params[256]; // param name arrays for function-like
+int *macro_bodies[256];  // body text for function-like
 int nmacros;
 
 // Conditional compilation stack
@@ -1215,6 +1226,7 @@ int add_typedef(int *name, int *stype) {
 
 int *parse_base_type() {
   skip_qualifiers();
+  last_type_unsigned = 0;
   if (p_match(TK_KW, "int")) {
     p_eat(TK_KW, "int");
     // consume trailing long/short
@@ -1233,6 +1245,7 @@ int *parse_base_type() {
     return 0;
   }
   if (p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) {
+    if (p_match(TK_KW, "unsigned")) { last_type_unsigned = 1; }
     cur_pos++;
     // optional: int, long, short, char after
     if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; }
@@ -1369,13 +1382,15 @@ struct Stmt **parse_block_or_stmt(int *out_len) {
 }
 
 struct VarDecl *make_vd(int *name, int *stype, int arr_size, int is_ptr, struct Expr *init, int is_static) {
-  struct VarDecl *vd = my_malloc(48);
+  struct VarDecl *vd = my_malloc(64);
   vd->name = name;
   vd->stype = stype;
   vd->arr_size = arr_size;
   vd->is_ptr = is_ptr;
   vd->init = init;
   vd->is_static = is_static;
+  vd->is_unsigned = 0;
+  vd->arr_size2 = 0 - 1;
   return vd;
 }
 
@@ -1439,6 +1454,7 @@ struct Expr *parse_init_list(int *stype_name) {
 
 struct Stmt *parse_vardecl_stmt(int vd_is_static) {
   int *stype = parse_base_type();
+  int base_unsigned = last_type_unsigned;
   struct VarDecl **decls = my_malloc(64 * 8);
   int ndecls = 0;
 
@@ -1470,6 +1486,7 @@ struct Stmt *parse_vardecl_stmt(int vd_is_static) {
       skip_param_list();
     }
     int arr_size = 0 - 1;
+    int arr_size2 = 0 - 1;
     if (p_match(TK_OP, "[")) {
       p_eat(TK_OP, "[");
       if (p_match(TK_OP, "]")) {
@@ -1478,6 +1495,12 @@ struct Stmt *parse_vardecl_stmt(int vd_is_static) {
         arr_size = my_atoi(p_eat(TK_NUM, 0));
       }
       p_eat(TK_OP, "]");
+      // Check for second dimension: int arr[N][M]
+      if (p_match(TK_OP, "[")) {
+        p_eat(TK_OP, "[");
+        arr_size2 = my_atoi(p_eat(TK_NUM, 0));
+        p_eat(TK_OP, "]");
+      }
     }
     struct Expr *init = 0;
     int *decl_stype = 0;
@@ -1506,6 +1529,8 @@ struct Stmt *parse_vardecl_stmt(int vd_is_static) {
       init = parse_expr(0);
     }
     decls[ndecls] = make_vd(my_strdup(name), decl_stype, arr_size, is_ptr, init, vd_is_static);
+    decls[ndecls]->is_unsigned = base_unsigned;
+    decls[ndecls]->arr_size2 = arr_size2;
     ndecls++;
     if (stype != 0) {
       add_lv(name, stype, is_ptr);
@@ -1637,20 +1662,57 @@ struct Expr *parse_unary() {
   // sizeof
   if (p_match(TK_KW, "sizeof")) {
     p_eat(TK_KW, "sizeof");
+    int sz = 8;
     if (p_match(TK_OP, "(")) {
       p_eat(TK_OP, "(");
-      // Skip everything inside parens (type or expr)
-      sz_depth = 1;
-      while (sz_depth > 0) {
-        if (p_match(TK_OP, "(")) { sz_depth = sz_depth + 1; }
-        else if (p_match(TK_OP, ")")) { sz_depth = sz_depth - 1; if (sz_depth == 0) { break; } }
-        cur_pos++;
+      if (tok_kind[cur_pos] == TK_KW && is_type_keyword(tok_val[cur_pos])) {
+        int is_char_type = p_match(TK_KW, "char");
+        int *sz_stype = parse_base_type();
+        int sz_is_ptr = 0;
+        while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); sz_is_ptr = 1; }
+        if (sz_is_ptr) {
+          sz = 8;
+        } else if (is_char_type && sz_stype == 0) {
+          sz = 1;
+        } else if (sz_stype != 0) {
+          // Look up struct nfields
+          int si = 0;
+          int sfound = 0;
+          while (si < np_sdefs) {
+            struct SDefInfo *sdi = p_sdefs[si];
+            if (my_strcmp(sdi->name, sz_stype) == 0) {
+              sz = sdi->nflds * 8;
+              sfound = 1;
+              si = np_sdefs;
+            }
+            si++;
+          }
+          if (sfound == 0) { sz = 8; }
+        } else {
+          sz = 8;
+        }
+        // Check for array dimension
+        if (p_match(TK_OP, "[")) {
+          p_eat(TK_OP, "[");
+          int arr_n = my_atoi(p_eat(TK_NUM, 0));
+          p_eat(TK_OP, "]");
+          sz = arr_n * sz;
+        }
+      } else if (tok_kind[cur_pos] == TK_ID && has_typedef(tok_val[cur_pos])) {
+        // Typedef name
+        parse_base_type();
+        while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); }
+        sz = 8;
+      } else {
+        parse_expr(0);
+        sz = 8;
       }
       p_eat(TK_OP, ")");
     } else {
       parse_unary();
+      sz = 8;
     }
-    return new_num(8);
+    return new_num(sz);
   }
 
   // Type cast: (type)expr — handles funcptr casts like (int (*)(int, int))
@@ -3124,6 +3186,7 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
           nlay_sv++;
           lay_arr_name[nlay_arr] = my_strdup(vd->name);
           lay_arr_count[nlay_arr] = vd->arr_size;
+          lay_arr_inner[nlay_arr] = 0 - 1;
           nlay_arr++;
         } else if (vd->stype != 0 && vd->is_ptr == 0) {
           nf = cg_struct_nfields(vd->stype);
@@ -3132,9 +3195,12 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
           lay_sv_type[nlay_sv] = my_strdup(vd->stype);
           nlay_sv++;
         } else if (vd->arr_size >= 0) {
-          *offset = *offset + vd->arr_size * 8;
+          int total = vd->arr_size;
+          if (vd->arr_size2 >= 0) { total = vd->arr_size * vd->arr_size2; }
+          *offset = *offset + total * 8;
           lay_arr_name[nlay_arr] = my_strdup(vd->name);
-          lay_arr_count[nlay_arr] = vd->arr_size;
+          lay_arr_count[nlay_arr] = total;
+          lay_arr_inner[nlay_arr] = vd->arr_size2;
           nlay_arr++;
         } else {
           *offset = *offset + 8;
@@ -3145,6 +3211,10 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
           }
         }
         lay_add_slot(vd->name, *offset);
+        if (vd->is_unsigned) {
+          lay_unsigned_name[nlay_unsigned] = my_strdup(vd->name);
+          nlay_unsigned++;
+        }
       }
     } else if (st->kind == ST_IF) {
       lay_walk_stmts(st->body, st->nbody, offset);
@@ -3191,11 +3261,30 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
   return 0;
 }
 
+int cg_is_unsigned(int *name) {
+  int i = 0;
+  while (i < nlay_unsigned) {
+    if (my_strcmp(lay_unsigned_name[i], name) == 0) { return 1; }
+    i++;
+  }
+  return 0;
+}
+
+int cg_get_arr_inner(int *name) {
+  int i = 0;
+  while (i < nlay_arr) {
+    if (my_strcmp(lay_arr_name[i], name) == 0) { return lay_arr_inner[i]; }
+    i++;
+  }
+  return 0 - 1;
+}
+
 int layout_func(struct FuncDef *f) {
   nlay = 0;
   nlay_arr = 0;
   nlay_sv = 0;
   nlay_psv = 0;
+  nlay_unsigned = 0;
   int offset = 0;
 
   for (int i = 0; i < f->nparams; i++) {
@@ -3291,6 +3380,13 @@ int gen_addr(struct Expr *e) {
       idx_stype = cg_structvar_type(e->left->sval);
       if (idx_stype == 0) {
         idx_stype = cg_ptr_structvar_type(e->left->sval);
+      }
+      // Check for 2D array: stride = inner_dim * 8
+      if (idx_stype == 0) {
+        int inner = cg_get_arr_inner(e->left->sval);
+        if (inner >= 0) {
+          idx_stride = inner * 8;
+        }
       }
     }
     if (idx_stype != 0) {
@@ -3411,6 +3507,12 @@ int gen_value(struct Expr *e) {
   }
 
   if (e->kind == ND_INDEX) {
+    // For 2D array: arr[i] returns row address (no load), arr[i][j] loads
+    if (e->left->kind == ND_VAR && cg_get_arr_inner(e->left->sval) >= 0) {
+      // This is indexing a 2D array - return row pointer, don't load
+      gen_addr(e);
+      return 0;
+    }
     gen_addr(e);
     emit_line("\tldr\tx0, [x0]");
     return 0;
@@ -3634,25 +3736,52 @@ int gen_value(struct Expr *e) {
       }
     }
 
+    // Check if either operand is unsigned
+    int use_unsigned = 0;
+    if (e->left->kind == ND_VAR && cg_is_unsigned(e->left->sval)) { use_unsigned = 1; }
+    if (e->right->kind == ND_VAR && cg_is_unsigned(e->right->sval)) { use_unsigned = 1; }
+
     if (my_strcmp(bin_op, "+") == 0) { emit_line("\tadd\tx0, x1, x0"); }
     else if (my_strcmp(bin_op, "-") == 0) { emit_line("\tsub\tx0, x1, x0"); }
     else if (my_strcmp(bin_op, "*") == 0) { emit_line("\tmul\tx0, x1, x0"); }
-    else if (my_strcmp(bin_op, "/") == 0) { emit_line("\tsdiv\tx0, x1, x0"); }
+    else if (my_strcmp(bin_op, "/") == 0) {
+      if (use_unsigned) { emit_line("\tudiv\tx0, x1, x0"); }
+      else { emit_line("\tsdiv\tx0, x1, x0"); }
+    }
     else if (my_strcmp(bin_op, "&") == 0) { emit_line("\tand\tx0, x1, x0"); }
     else if (my_strcmp(bin_op, "|") == 0) { emit_line("\torr\tx0, x1, x0"); }
     else if (my_strcmp(bin_op, "^") == 0) { emit_line("\teor\tx0, x1, x0"); }
     else if (my_strcmp(bin_op, "<<") == 0) { emit_line("\tlsl\tx0, x1, x0"); }
-    else if (my_strcmp(bin_op, ">>") == 0) { emit_line("\tasr\tx0, x1, x0"); }
+    else if (my_strcmp(bin_op, ">>") == 0) {
+      if (use_unsigned) { emit_line("\tlsr\tx0, x1, x0"); }
+      else { emit_line("\tasr\tx0, x1, x0"); }
+    }
     else if (my_strcmp(bin_op, "%") == 0) {
-      emit_line("\tsdiv\tx9, x1, x0");
+      if (use_unsigned) {
+        emit_line("\tudiv\tx9, x1, x0");
+      } else {
+        emit_line("\tsdiv\tx9, x1, x0");
+      }
       emit_line("\tmsub\tx0, x9, x0, x1");
     }
     else if (my_strcmp(bin_op, "==") == 0) { emit_line("\tcmp\tx1, x0"); emit_line("\tcset\tx0, eq"); }
     else if (my_strcmp(bin_op, "!=") == 0) { emit_line("\tcmp\tx1, x0"); emit_line("\tcset\tx0, ne"); }
-    else if (my_strcmp(bin_op, "<") == 0) { emit_line("\tcmp\tx1, x0"); emit_line("\tcset\tx0, lt"); }
-    else if (my_strcmp(bin_op, "<=") == 0) { emit_line("\tcmp\tx1, x0"); emit_line("\tcset\tx0, le"); }
-    else if (my_strcmp(bin_op, ">") == 0) { emit_line("\tcmp\tx1, x0"); emit_line("\tcset\tx0, gt"); }
-    else if (my_strcmp(bin_op, ">=") == 0) { emit_line("\tcmp\tx1, x0"); emit_line("\tcset\tx0, ge"); }
+    else if (my_strcmp(bin_op, "<") == 0) {
+      emit_line("\tcmp\tx1, x0");
+      if (use_unsigned) { emit_line("\tcset\tx0, lo"); } else { emit_line("\tcset\tx0, lt"); }
+    }
+    else if (my_strcmp(bin_op, "<=") == 0) {
+      emit_line("\tcmp\tx1, x0");
+      if (use_unsigned) { emit_line("\tcset\tx0, ls"); } else { emit_line("\tcset\tx0, le"); }
+    }
+    else if (my_strcmp(bin_op, ">") == 0) {
+      emit_line("\tcmp\tx1, x0");
+      if (use_unsigned) { emit_line("\tcset\tx0, hi"); } else { emit_line("\tcset\tx0, gt"); }
+    }
+    else if (my_strcmp(bin_op, ">=") == 0) {
+      emit_line("\tcmp\tx1, x0");
+      if (use_unsigned) { emit_line("\tcset\tx0, hs"); } else { emit_line("\tcset\tx0, ge"); }
+    }
     return 0;
   }
 
@@ -4673,10 +4802,41 @@ int pp_preprocess(int *src, int srclen, int *filepath, int *out, int co, int dep
           si++;
         }
         nend = si;
-        // Skip function-like macros
+        // Function-like macros: parse params and body
         if (si < srclen && __read_byte(src, si) == '(') {
-          // skip line
+          si++; // skip '('
+          int **fparams = my_malloc(16 * 8);
+          int fnp = 0;
+          while (si < srclen && __read_byte(src, si) != ')' && __read_byte(src, si) != '\n') {
+            while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) { si++; }
+            if (__read_byte(src, si) == ')') { break; }
+            int ps = si;
+            while (si < srclen && __read_byte(src, si) != ',' && __read_byte(src, si) != ')' &&
+                   __read_byte(src, si) != ' ' && __read_byte(src, si) != '\t' && __read_byte(src, si) != '\n') {
+              si++;
+            }
+            if (si > ps) {
+              fparams[fnp] = make_str(src, ps, si - ps);
+              fnp++;
+            }
+            while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) { si++; }
+            if (__read_byte(src, si) == ',') { si++; }
+          }
+          if (si < srclen && __read_byte(src, si) == ')') { si++; }
+          // Read body = rest of line, trimmed
+          while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) { si++; }
+          int bstart = si;
+          while (si < srclen && __read_byte(src, si) != '\n') { si++; }
+          int bend = si;
+          while (bend > bstart && (__read_byte(src, bend - 1) == ' ' || __read_byte(src, bend - 1) == '\t')) { bend--; }
+          macro_names[nmacros] = make_str(src, nstart, nend - nstart);
+          macro_values[nmacros] = 0;
+          macro_nparams[nmacros] = fnp;
+          macro_params[nmacros] = fparams;
+          macro_bodies[nmacros] = make_str(src, bstart, bend - bstart);
+          nmacros++;
         } else {
+          // Object-like macro
           // skip whitespace
           while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) {
             si++;
@@ -4693,6 +4853,9 @@ int pp_preprocess(int *src, int srclen, int *filepath, int *out, int co, int dep
           }
           macro_names[nmacros] = make_str(src, nstart, nend - nstart);
           macro_values[nmacros] = make_str(src, vstart, vend - vstart);
+          macro_nparams[nmacros] = 0 - 1;
+          macro_params[nmacros] = 0;
+          macro_bodies[nmacros] = 0;
           nmacros++;
         }
         // Skip entire line
@@ -4852,16 +5015,106 @@ int main(int argc, int *argv) {
         while (mc < nmacros) {
           if (my_strlen(macro_names[mc]) == ilen &&
               my_strcmp(make_str(cleaned, istart, ilen), macro_names[mc]) == 0) {
-            // Copy macro value
-            vlen = my_strlen(macro_values[mc]);
-            vi = 0;
-            while (vi < vlen) {
-              __write_byte(expanded, eo, __read_byte(macro_values[mc], vi));
-              eo++;
-              vi++;
+            if (macro_nparams[mc] >= 0) {
+              // Function-like macro: look for '('
+              int fj = ei;
+              while (fj < co && (__read_byte(cleaned, fj) == ' ' || __read_byte(cleaned, fj) == '\t')) { fj++; }
+              if (fj < co && __read_byte(cleaned, fj) == '(') {
+                fj++; // skip '('
+                // Parse arguments
+                int *fargs[16];
+                int fnargs = 0;
+                int fdepth = 1;
+                int astart = fj;
+                while (fj < co && fdepth > 0) {
+                  if (__read_byte(cleaned, fj) == '(') { fdepth++; }
+                  else if (__read_byte(cleaned, fj) == ')') {
+                    fdepth--;
+                    if (fdepth == 0) {
+                      if (fj > astart || fnargs > 0) {
+                        fargs[fnargs] = make_str(cleaned, astart, fj - astart);
+                        fnargs++;
+                      }
+                      fj++;
+                      break;
+                    }
+                  } else if (__read_byte(cleaned, fj) == ',' && fdepth == 1) {
+                    fargs[fnargs] = make_str(cleaned, astart, fj - astart);
+                    fnargs++;
+                    fj++;
+                    while (fj < co && (__read_byte(cleaned, fj) == ' ' || __read_byte(cleaned, fj) == '\t')) { fj++; }
+                    astart = fj;
+                    continue;
+                  } else if (__read_byte(cleaned, fj) == '"') {
+                    fj++;
+                    while (fj < co && __read_byte(cleaned, fj) != '"') {
+                      if (__read_byte(cleaned, fj) == '\\' && fj + 1 < co) { fj++; }
+                      fj++;
+                    }
+                    if (fj < co) { fj++; }
+                    continue;
+                  }
+                  fj++;
+                }
+                // Substitute params in body
+                int *mbody = macro_bodies[mc];
+                int mblen = my_strlen(mbody);
+                int bi = 0;
+                while (bi < mblen) {
+                  if (is_alpha(__read_byte(mbody, bi))) {
+                    int ps1 = bi;
+                    while (bi < mblen && is_alnum(__read_byte(mbody, bi))) { bi++; }
+                    int pl1 = bi - ps1;
+                    int *pn1 = make_str(mbody, ps1, pl1);
+                    int pf1 = 0;
+                    int px1 = 0;
+                    while (px1 < macro_nparams[mc]) {
+                      if (my_strcmp(macro_params[mc][px1], pn1) == 0) {
+                        // Substitute with argument
+                        int alen = my_strlen(fargs[px1]);
+                        int ai = 0;
+                        while (ai < alen) {
+                          __write_byte(expanded, eo, __read_byte(fargs[px1], ai));
+                          eo++;
+                          ai++;
+                        }
+                        pf1 = 1;
+                        px1 = macro_nparams[mc]; // break
+                      }
+                      px1++;
+                    }
+                    if (pf1 == 0) {
+                      // Copy body identifier as-is
+                      int bk = ps1;
+                      while (bk < bi) {
+                        __write_byte(expanded, eo, __read_byte(mbody, bk));
+                        eo++;
+                        bk++;
+                      }
+                    }
+                  } else {
+                    __write_byte(expanded, eo, __read_byte(mbody, bi));
+                    eo++;
+                    bi++;
+                  }
+                }
+                ei = fj;
+                found = 1;
+                mc = nmacros; // break
+              }
+              // If no '(' follows, don't expand — fall through
+            } else {
+              // Object-like macro: copy value
+              vlen = my_strlen(macro_values[mc]);
+              vi = 0;
+              while (vi < vlen) {
+                __write_byte(expanded, eo, __read_byte(macro_values[mc], vi));
+                eo++;
+                vi++;
+              }
+              found = 1;
+              mc = nmacros; // break
             }
-            found = 1;
-            mc = nmacros; // break
           }
           mc++;
         }
@@ -4882,6 +5135,114 @@ int main(int argc, int *argv) {
     }
     __write_byte(expanded, eo, 0);
     cleaned = expanded;
+    co = eo;
+
+    // Second pass for nested macro expansion
+    int *expanded2 = my_malloc(co * 4 + 1);
+    ei = 0;
+    eo = 0;
+    while (ei < co) {
+      if (__read_byte(cleaned, ei) == '"') {
+        __write_byte(expanded2, eo, __read_byte(cleaned, ei)); ei++; eo++;
+        while (ei < co && __read_byte(cleaned, ei) != '"') {
+          if (__read_byte(cleaned, ei) == '\\' && ei + 1 < co) {
+            __write_byte(expanded2, eo, __read_byte(cleaned, ei)); ei++; eo++;
+          }
+          __write_byte(expanded2, eo, __read_byte(cleaned, ei)); ei++; eo++;
+        }
+        if (ei < co) { __write_byte(expanded2, eo, __read_byte(cleaned, ei)); ei++; eo++; }
+      } else if (__read_byte(cleaned, ei) == '\'') {
+        __write_byte(expanded2, eo, __read_byte(cleaned, ei)); ei++; eo++;
+        while (ei < co && __read_byte(cleaned, ei) != '\'') {
+          if (__read_byte(cleaned, ei) == '\\' && ei + 1 < co) {
+            __write_byte(expanded2, eo, __read_byte(cleaned, ei)); ei++; eo++;
+          }
+          __write_byte(expanded2, eo, __read_byte(cleaned, ei)); ei++; eo++;
+        }
+        if (ei < co) { __write_byte(expanded2, eo, __read_byte(cleaned, ei)); ei++; eo++; }
+      } else if (is_alpha(__read_byte(cleaned, ei))) {
+        istart = ei;
+        while (ei < co && is_alnum(__read_byte(cleaned, ei))) { ei++; }
+        ilen = ei - istart;
+        found = 0;
+        mc = 0;
+        while (mc < nmacros) {
+          if (my_strlen(macro_names[mc]) == ilen &&
+              my_strcmp(make_str(cleaned, istart, ilen), macro_names[mc]) == 0) {
+            if (macro_nparams[mc] >= 0) {
+              int fj2 = ei;
+              while (fj2 < co && (__read_byte(cleaned, fj2) == ' ' || __read_byte(cleaned, fj2) == '\t')) { fj2++; }
+              if (fj2 < co && __read_byte(cleaned, fj2) == '(') {
+                fj2++;
+                int *fargs2[16];
+                int fnargs2 = 0;
+                int fdepth2 = 1;
+                int astart2 = fj2;
+                while (fj2 < co && fdepth2 > 0) {
+                  if (__read_byte(cleaned, fj2) == '(') { fdepth2++; }
+                  else if (__read_byte(cleaned, fj2) == ')') {
+                    fdepth2--;
+                    if (fdepth2 == 0) {
+                      if (fj2 > astart2 || fnargs2 > 0) { fargs2[fnargs2] = make_str(cleaned, astart2, fj2 - astart2); fnargs2++; }
+                      fj2++; break;
+                    }
+                  } else if (__read_byte(cleaned, fj2) == ',' && fdepth2 == 1) {
+                    fargs2[fnargs2] = make_str(cleaned, astart2, fj2 - astart2); fnargs2++;
+                    fj2++;
+                    while (fj2 < co && (__read_byte(cleaned, fj2) == ' ' || __read_byte(cleaned, fj2) == '\t')) { fj2++; }
+                    astart2 = fj2; continue;
+                  }
+                  fj2++;
+                }
+                int *mbody2 = macro_bodies[mc];
+                int mblen2 = my_strlen(mbody2);
+                int bi2 = 0;
+                while (bi2 < mblen2) {
+                  if (is_alpha(__read_byte(mbody2, bi2))) {
+                    int pstart2 = bi2;
+                    while (bi2 < mblen2 && is_alnum(__read_byte(mbody2, bi2))) { bi2++; }
+                    int plen2 = bi2 - pstart2;
+                    int *pname2 = make_str(mbody2, pstart2, plen2);
+                    int pfound2 = 0;
+                    int pi2 = 0;
+                    while (pi2 < macro_nparams[mc]) {
+                      if (my_strcmp(macro_params[mc][pi2], pname2) == 0) {
+                        int alen2 = my_strlen(fargs2[pi2]);
+                        int ai2 = 0;
+                        while (ai2 < alen2) { __write_byte(expanded2, eo, __read_byte(fargs2[pi2], ai2)); eo++; ai2++; }
+                        pfound2 = 1; pi2 = macro_nparams[mc];
+                      }
+                      pi2++;
+                    }
+                    if (pfound2 == 0) {
+                      int bk2 = pstart2;
+                      while (bk2 < bi2) { __write_byte(expanded2, eo, __read_byte(mbody2, bk2)); eo++; bk2++; }
+                    }
+                  } else {
+                    __write_byte(expanded2, eo, __read_byte(mbody2, bi2)); eo++; bi2++;
+                  }
+                }
+                ei = fj2; found = 1; mc = nmacros;
+              }
+            } else {
+              vlen = my_strlen(macro_values[mc]);
+              vi = 0;
+              while (vi < vlen) { __write_byte(expanded2, eo, __read_byte(macro_values[mc], vi)); eo++; vi++; }
+              found = 1; mc = nmacros;
+            }
+          }
+          mc++;
+        }
+        if (found == 0) {
+          ki = istart;
+          while (ki < ei) { __write_byte(expanded2, eo, __read_byte(cleaned, ki)); eo++; ki++; }
+        }
+      } else {
+        __write_byte(expanded2, eo, __read_byte(cleaned, ei)); ei++; eo++;
+      }
+    }
+    __write_byte(expanded2, eo, 0);
+    cleaned = expanded2;
     co = eo;
   }
 

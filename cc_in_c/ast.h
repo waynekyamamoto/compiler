@@ -85,6 +85,8 @@ typedef struct {
     int is_ptr;         /* 1 if pointer type */
     Expr *init;         /* NULL if no initializer */
     int is_static;      /* 1 if static local */
+    int is_unsigned;    /* 1 if unsigned type */
+    int array_size2;    /* -1 if not 2D, >=0 for inner dimension */
 } VarDeclEntry;
 
 typedef struct {

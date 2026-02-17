@@ -55,6 +55,9 @@ typedef struct {
 static TypedefEntry typedefs[256];
 static int ntypedefs;
 
+/* Flag set by parse_base_type to indicate unsigned */
+static int last_type_unsigned;
+
 /* ---- Helpers ---- */
 
 static Tok *cur(void) {
@@ -269,10 +272,12 @@ static char *parse_base_type(void) {
     /* All integer-like types: int, char, void, unsigned, signed, long, short */
     /* Consume all type specifier keywords */
     int got_type = 0;
+    last_type_unsigned = 0;
     while (match(TK_KW, "int") || match(TK_KW, "char") || match(TK_KW, "void") ||
            match(TK_KW, "unsigned") || match(TK_KW, "signed") ||
            match(TK_KW, "long") || match(TK_KW, "short") ||
            match(TK_KW, "_Bool") || match(TK_KW, "bool")) {
+        if (match(TK_KW, "unsigned")) last_type_unsigned = 1;
         eat(TK_KW, NULL);
         got_type = 1;
     }
@@ -525,6 +530,7 @@ static Expr *parse_init_list(const char *struct_type_name) {
 
 static Stmt *parse_vardecl_stmt(int is_static) {
     char *stype = parse_base_type();
+    int base_unsigned = last_type_unsigned;
     VarDeclEntry *entries = NULL;
     int count = 0;
     int ecap = 0;
@@ -559,6 +565,7 @@ static Stmt *parse_vardecl_stmt(int is_static) {
             skip_param_list();
         }
         int arr_size = -1;
+        int arr_size2 = -1;
         if (match(TK_OP, "[")) {
             eat(TK_OP, "[");
             if (match(TK_OP, "]")) {
@@ -567,6 +574,12 @@ static Stmt *parse_vardecl_stmt(int is_static) {
                 arr_size = atoi(eat(TK_NUMBER, NULL)->value);
             }
             eat(TK_OP, "]");
+            /* Check for second dimension: int arr[N][M] */
+            if (match(TK_OP, "[")) {
+                eat(TK_OP, "[");
+                arr_size2 = atoi(eat(TK_NUMBER, NULL)->value);
+                eat(TK_OP, "]");
+            }
         }
         Expr *init = NULL;
         /* struct_type in decl: for struct variables, struct arrays, and pointer-to-struct */
@@ -605,6 +618,8 @@ static Stmt *parse_vardecl_stmt(int is_static) {
         entries[count].is_ptr = is_ptr;
         entries[count].init = init;
         entries[count].is_static = is_static;
+        entries[count].is_unsigned = base_unsigned;
+        entries[count].array_size2 = arr_size2;
         count++;
 
         if (stype)
@@ -805,22 +820,52 @@ static Expr *parse_primary(void) {
         e = parse_expr(-1);
         eat(TK_OP, ")");
     } else if (match(TK_KW, "sizeof")) {
-        /* Parse sizeof and return 8 (all our types are 8 bytes) */
+        /* Parse sizeof and resolve to correct size */
         eat(TK_KW, NULL);
+        int sz = 8; /* default */
         if (match(TK_OP, "(")) {
             eat(TK_OP, "(");
             /* Could be sizeof(type) or sizeof(expr) */
             if (is_type_start()) {
-                parse_base_type();
-                while (match(TK_OP, "*")) eat(TK_OP, "*");
+                int is_char = match(TK_KW, "char");
+                char *stype = parse_base_type();
+                int is_ptr = 0;
+                while (match(TK_OP, "*")) { eat(TK_OP, "*"); is_ptr = 1; }
+                if (is_ptr) {
+                    sz = 8;
+                } else if (is_char && !stype) {
+                    sz = 1;
+                } else if (stype) {
+                    /* struct type: look up nfields */
+                    StructDefInfo *sd = find_struct_def(stype);
+                    if (sd) {
+                        /* Check for bitfield packing (nwords) */
+                        /* We need to check program-level structs for nwords info.
+                           For now, just use nfields * 8 */
+                        sz = sd->nfields * 8;
+                    } else {
+                        sz = 8;
+                    }
+                } else {
+                    sz = 8; /* int, long, void, etc. */
+                }
+                /* Check for array dimension */
+                if (match(TK_OP, "[")) {
+                    eat(TK_OP, "[");
+                    int arr_sz = atoi(eat(TK_NUMBER, NULL)->value);
+                    eat(TK_OP, "]");
+                    sz = arr_sz * sz;
+                }
             } else {
                 parse_expr(0);
+                sz = 8;
             }
             eat(TK_OP, ")");
         } else {
             parse_unary();
+            sz = 8;
         }
-        e = new_num(8);
+        e = new_num(sz);
     } else {
         fatal("Unexpected token %s:'%s' at %d", tokkind_str(t->kind), t->value, t->pos);
         return NULL;
