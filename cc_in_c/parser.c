@@ -17,6 +17,7 @@ typedef struct {
     char *name;
     FieldInfo *fields;
     int nfields;
+    int nwords;     /* bitfield-packed word count; 0 = no bitfields */
 } StructDefInfo;
 
 typedef struct {
@@ -428,6 +429,8 @@ static StructDef parse_struct_or_union_def(int is_union) {
         }
         if (cur_bit > 0) cur_word++;  /* last partial word counts */
         sd.nwords = cur_word;
+        /* Update struct_defs entry with nwords */
+        struct_defs[nstruct_defs - 1].nwords = cur_word;
     }
 
     return sd;
@@ -914,10 +917,10 @@ static Expr *parse_primary(void) {
                     /* struct type: look up nfields */
                     StructDefInfo *sd = find_struct_def(stype);
                     if (sd) {
-                        /* Check for bitfield packing (nwords) */
-                        /* We need to check program-level structs for nwords info.
-                           For now, just use nfields * 8 */
-                        sz = sd->nfields * 8;
+                        if (sd->nwords > 0)
+                            sz = sd->nwords * 8;
+                        else
+                            sz = sd->nfields * 8;
                     } else {
                         sz = 8;
                     }
@@ -1325,6 +1328,7 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
     char **params = NULL;
     int nparams = 0;
     int pcap = 0;
+    int is_variadic = 0;
 
     if (!match(TK_OP, ")")) {
         /* Check for void parameter: foo(void) */
@@ -1338,6 +1342,7 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
                     eat(TK_OP, ".");
                     eat(TK_OP, ".");
                     eat(TK_OP, ".");
+                    is_variadic = 1;
                     break;
                 }
                 char *stype = parse_base_type();
@@ -1401,6 +1406,8 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
         if (proto) {
             proto->name = xstrdup(name_tok->value);
             proto->ret_is_ptr = ret_is_ptr;
+            proto->is_variadic = is_variadic;
+            proto->nparams = nparams;
         }
         return 0;
     }
@@ -1413,6 +1420,7 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
     fd->body = body;
     fd->is_static = is_static;
     fd->ret_is_ptr = ret_is_ptr;
+    fd->is_variadic = is_variadic;
     return 1;
 }
 

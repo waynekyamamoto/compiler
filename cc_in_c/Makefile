@@ -22,19 +22,23 @@ test: $(TARGET)
 	rm -f hello_test hanoi_test ptr_test_out ../hello.s ../hanoi.s ../ptr_test.s ../hello.o ../hanoi.o ../ptr_test.o
 
 test-new: $(TARGET)
-	@for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34; do \
+	@for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 37 38; do \
 		echo "=== test_batch$$n ==="; \
 		./cc tests/test_batch$$n.c -o tests/test_batch$${n}_out && ./tests/test_batch$${n}_out || exit 1; \
 	done
+	@echo "=== test_batch36 (with -D flags) ==="
+	@./cc -DTEST_VAL=42 -DFLAG tests/test_batch36.c -o tests/test_batch36_out && ./tests/test_batch36_out || exit 1
 	@rm -f tests/test_batch*_out tests/test_batch*.s tests/test_batch*.o
 	@echo "All batch tests passed."
 
 test-selfhost: $(TARGET)
 	./cc selfhost.c -o gen1
-	@for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34; do \
+	@for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 37 38; do \
 		echo "=== test_batch$$n (selfhost) ==="; \
 		./gen1 tests/test_batch$$n.c -o /tmp/test_batch$${n}_out && /tmp/test_batch$${n}_out || exit 1; \
 	done
+	@echo "=== test_batch36 (selfhost, with -D flags) ==="
+	@./gen1 -DTEST_VAL=42 -DFLAG tests/test_batch36.c -o /tmp/test_batch36_out && /tmp/test_batch36_out || exit 1
 	@rm -f gen1 /tmp/test_batch*_out
 	@echo "All selfhost batch tests passed."
 

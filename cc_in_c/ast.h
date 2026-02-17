@@ -137,6 +137,7 @@ typedef struct {
     Block body;
     int is_static;
     int ret_is_ptr;
+    int is_variadic;
 } FuncDef;
 
 typedef struct {
@@ -152,6 +153,8 @@ typedef struct {
 typedef struct {
     char *name;
     int ret_is_ptr;
+    int is_variadic;
+    int nparams;
 } FuncProto;
 
 typedef struct {

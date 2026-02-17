@@ -70,6 +70,10 @@ static int func_returns_ptr(const char *name) {
 static char *known_func_names[512];
 static int nknown_func_names;
 
+static char *variadic_funcs[256];
+static int variadic_nparams[256];
+static int nvariadic_funcs;
+
 static int is_known_func(const char *name) {
     for (int i = 0; i < nknown_func_names; i++)
         if (strcmp(known_func_names[i], name) == 0) return 1;
@@ -1039,29 +1043,54 @@ static void gen_value(Expr *e, FuncLayout *layout) {
             return;
         }
 
-        if (strcmp(name, "printf") == 0) {
-            if (nargs < 1) fatal("printf requires at least 1 argument");
-            if (args[0]->kind != ND_STRLIT) fatal("printf first arg must be string literal");
-
-            int n_var = nargs - 1;
-            if (n_var > 0) {
-                int var_space = ((n_var * 8 + 15) / 16) * 16;
-                emit("\tsub\tsp, sp, #%d", var_space);
-                for (int i = 0; i < n_var; i++) {
-                    gen_value(args[i + 1], layout);
-                    emit("\tstr\tx0, [sp, #%d]", i * 8);
+        /* Check for variadic function call */
+        {
+            int var_nparams = -1;
+            for (int vi = 0; vi < nvariadic_funcs; vi++) {
+                if (strcmp(variadic_funcs[vi], name) == 0) {
+                    var_nparams = variadic_nparams[vi];
+                    break;
                 }
             }
+            if (var_nparams >= 0) {
+                /* Variadic calling convention: named args in registers, variadic on stack */
+                int n_named = var_nparams < nargs ? var_nparams : nargs;
+                int n_var = nargs - n_named;
 
-            gen_value(args[0], layout);
-            emit("\tbl\t_printf");
-            emit("\tsxtw\tx0, w0");  /* printf returns int */
+                /* Allocate stack space for variadic args */
+                if (n_var > 0) {
+                    int var_space = ((n_var * 8 + 15) / 16) * 16;
+                    emit("\tsub\tsp, sp, #%d", var_space);
+                    /* Evaluate and store variadic args on stack */
+                    for (int i = 0; i < n_var; i++) {
+                        gen_value(args[n_named + i], layout);
+                        emit("\tstr\tx0, [sp, #%d]", i * 8);
+                    }
+                }
 
-            if (n_var > 0) {
-                int var_space = ((n_var * 8 + 15) / 16) * 16;
-                emit("\tadd\tsp, sp, #%d", var_space);
+                /* Evaluate named args, push to temp area */
+                for (int i = 0; i < n_named; i++) {
+                    gen_value(args[i], layout);
+                    emit("\tstr\tx0, [sp, #-16]!");
+                }
+                /* Load named args into registers */
+                for (int i = 0; i < n_named; i++) {
+                    int disp = (n_named - 1 - i) * 16;
+                    emit("\tldr\tx%d, [sp, #%d]", i, disp);
+                }
+                /* Pop named temp area so sp points to variadic args */
+                if (n_named > 0)
+                    emit("\tadd\tsp, sp, #%d", n_named * 16);
+                emit("\tbl\t_%s", name);
+                /* Clean up variadic stack space */
+                if (n_var > 0) {
+                    int var_space = ((n_var * 8 + 15) / 16) * 16;
+                    emit("\tadd\tsp, sp, #%d", var_space);
+                }
+                if (!func_returns_ptr(name))
+                    emit("\tsxtw\tx0, w0");
+                return;
             }
-            return;
         }
 
         /* Indirect call through arbitrary expression (e.g. s.field(args)) */
@@ -1822,6 +1851,23 @@ char *codegen_generate(Program *prog) {
     for (int i = 0; i < prog->nfuncs; i++) {
         if (prog->funcs[i].ret_is_ptr && nptr_ret_funcs < 256)
             ptr_ret_funcs[nptr_ret_funcs++] = prog->funcs[i].name;
+    }
+
+    /* Register variadic functions */
+    nvariadic_funcs = 0;
+    for (int i = 0; i < prog->nprotos; i++) {
+        if (prog->protos[i].is_variadic && nvariadic_funcs < 256) {
+            variadic_funcs[nvariadic_funcs] = prog->protos[i].name;
+            variadic_nparams[nvariadic_funcs] = prog->protos[i].nparams;
+            nvariadic_funcs++;
+        }
+    }
+    for (int i = 0; i < prog->nfuncs; i++) {
+        if (prog->funcs[i].is_variadic && nvariadic_funcs < 256) {
+            variadic_funcs[nvariadic_funcs] = prog->funcs[i].name;
+            variadic_nparams[nvariadic_funcs] = prog->funcs[i].nparams;
+            nvariadic_funcs++;
+        }
     }
 
     /* Register all known function names (for function pointer support) */

@@ -752,6 +752,18 @@ static void preprocess_file(const char *src, const char *filepath, int depth, Bu
                 if (*p == '\n') { buf_push(b, '\n'); p++; }
                 continue;
             }
+            /* #error */
+            if (strncmp(p, "error", 5) == 0 && (p[5] == ' ' || p[5] == '\t' || p[5] == '\n' || p[5] == '\0')) {
+                p += 5;
+                while (*p == ' ' || *p == '\t') p++;
+                const char *msg_start = p;
+                while (*p && *p != '\n') p++;
+                int mlen = p - msg_start;
+                char *msg = xmalloc(mlen + 1);
+                memcpy(msg, msg_start, mlen);
+                msg[mlen] = '\0';
+                fatal("#error: %s", msg);
+            }
             /* Other preprocessor directive — skip */
             while (*p && *p != '\n') p++;
             if (*p == '\n') { buf_push(b, '\n'); p++; }
@@ -785,8 +797,24 @@ static char *join_backslash_lines(const char *src) {
     return out;
 }
 
+static char *cmdline_defs[64];
+static int ncmdline_defs;
+
 static char *strip_preprocessor(const char *src, const char *filepath) {
     nmacros = 0;
+    /* Inject -D command-line macros */
+    for (int i = 0; i < ncmdline_defs; i++) {
+        char *def = cmdline_defs[i];
+        char *eq = strchr(def, '=');
+        if (eq) {
+            char *name = xmalloc(eq - def + 1);
+            memcpy(name, def, eq - def);
+            name[eq - def] = '\0';
+            add_macro(name, xstrdup(eq + 1));
+        } else {
+            add_macro(xstrdup(def), xstrdup("1"));
+        }
+    }
     if_depth = 0;
     char *joined = join_backslash_lines(src);
     Buf b;
@@ -881,6 +909,14 @@ int main(int argc, char **argv) {
             out_path = argv[++i];
         } else if (strcmp(argv[i], "-c") == 0) {
             cflag = 1;
+        } else if (strncmp(argv[i], "-D", 2) == 0) {
+            if (argv[i][2] != '\0') {
+                cmdline_defs[ncmdline_defs++] = argv[i] + 2;
+            } else if (i + 1 < argc) {
+                cmdline_defs[ncmdline_defs++] = argv[++i];
+            } else {
+                fatal("Missing argument for -D");
+            }
         } else if (argv[i][0] == '-') {
             fatal("Unknown option: %s", argv[i]);
         } else {

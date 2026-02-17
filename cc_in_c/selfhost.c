@@ -81,6 +81,7 @@ struct FuncDef {
   struct Stmt **body;
   int nbody;
   int ret_is_ptr;
+  int is_variadic;
 };
 
 struct SDef {
@@ -106,6 +107,7 @@ struct SDefInfo {
   int *name;
   struct SFieldInfo **flds;
   int nflds;
+  int nwords;
 };
 
 struct GDecl {
@@ -125,6 +127,8 @@ struct Program {
   int nfuncs;
   int **proto_names;
   int *proto_ret_is_ptr;
+  int *proto_is_variadic;
+  int *proto_nparams;
   int nprotos;
   struct GDecl **globals;
   int nglobals;
@@ -254,6 +258,11 @@ int include_depth;
 // Known function names (for function pointer support)
 int *known_funcs[512];
 int nknown_funcs;
+
+// Variadic function table
+int *var_funcs[256];
+int var_nparams[256];
+int nvar_funcs;
 
 // Static local variables
 int *sl_names[256];
@@ -1497,10 +1506,11 @@ int *parse_base_type() {
       }
       p_eat(TK_OP, "}");
       // Register in parser's struct table
-      struct SDefInfo *asdi = my_malloc(24);
+      struct SDefInfo *asdi = my_malloc(32);
       asdi->name = my_strdup(synth_name);
       asdi->flds = aflds;
       asdi->nflds = anf;
+      asdi->nwords = 0;
       p_sdefs[np_sdefs] = asdi;
       np_sdefs++;
       // Register for codegen
@@ -1868,13 +1878,17 @@ struct Expr *parse_unary() {
         } else if (is_char_type && sz_stype == 0) {
           sz = 1;
         } else if (sz_stype != 0) {
-          // Look up struct nfields
+          // Look up struct size (nwords for bitfield structs, nflds otherwise)
           int si = 0;
           int sfound = 0;
           while (si < np_sdefs) {
             struct SDefInfo *sdi = p_sdefs[si];
             if (my_strcmp(sdi->name, sz_stype) == 0) {
-              sz = sdi->nflds * 8;
+              if (sdi->nwords > 0) {
+                sz = sdi->nwords * 8;
+              } else {
+                sz = sdi->nflds * 8;
+              }
               sfound = 1;
               si = np_sdefs;
             }
@@ -2387,10 +2401,11 @@ struct SDef *parse_struct_or_union_def(int is_union) {
   p_eat(TK_OP, ";");
 
   // Register in parser struct defs
-  struct SDefInfo *sdi = my_malloc(24);
+  struct SDefInfo *sdi = my_malloc(32);
   sdi->name = my_strdup(name);
   sdi->flds = finfo;
   sdi->nflds = nf;
+  sdi->nwords = 0;
   p_sdefs[np_sdefs] = sdi;
   np_sdefs++;
 
@@ -2450,6 +2465,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     }
     if (cur_bit > 0) { cur_word++; }
     sd->nwords = cur_word;
+    sdi->nwords = cur_word;
   }
 
   return sd;
@@ -2466,6 +2482,7 @@ struct FuncDef *parse_func() {
 
   int **params = my_malloc(64 * 8);
   int np = 0;
+  int is_variadic = 0;
 
   if (!p_match(TK_OP, ")")) {
     while (1) {
@@ -2474,6 +2491,7 @@ struct FuncDef *parse_func() {
         p_eat(TK_OP, ".");
         p_eat(TK_OP, ".");
         p_eat(TK_OP, ".");
+        is_variadic = 1;
         break;
       }
       int *stype = parse_base_type();
@@ -2527,10 +2545,11 @@ struct FuncDef *parse_func() {
     fd = my_malloc(56);
     fd->name = name;
     fd->params = 0;
-    fd->nparams = 0;
+    fd->nparams = np;
     fd->body = 0;
     fd->nbody = 0 - 1;
     fd->ret_is_ptr = ret_is_ptr;
+    fd->is_variadic = is_variadic;
     return fd;
   }
 
@@ -2544,6 +2563,7 @@ struct FuncDef *parse_func() {
   fd->body = body;
   fd->nbody = blen;
   fd->ret_is_ptr = ret_is_ptr;
+  fd->is_variadic = is_variadic;
   return fd;
 }
 
@@ -2802,10 +2822,11 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
 
       // Register struct def
       if (tag_name != 0) {
-        sdi = my_malloc(24);
+        sdi = my_malloc(32);
         sdi->name = my_strdup(tag_name);
         sdi->flds = td_finfo;
         sdi->nflds = td_nf;
+        sdi->nwords = 0;
         p_sdefs[np_sdefs] = sdi;
         np_sdefs++;
 
@@ -2954,6 +2975,8 @@ struct Program *parse_program() {
   int nf = 0;
   int **proto_names = my_malloc(64 * 8);
   int *proto_rip = my_malloc(64 * 8);
+  int *proto_is_var = my_malloc(64 * 8);
+  int *proto_np = my_malloc(64 * 8);
   int nprotos = 0;
   struct GDecl **globals = my_malloc(1024 * 8);
   int ng = 0;
@@ -3000,6 +3023,8 @@ struct Program *parse_program() {
         if (fd->nbody == 0 - 1) {
           proto_names[nprotos] = fd->name;
           proto_rip[nprotos] = fd->ret_is_ptr;
+          proto_is_var[nprotos] = fd->is_variadic;
+          proto_np[nprotos] = fd->nparams;
           nprotos++;
         } else {
           funcs[nf] = fd;
@@ -3031,6 +3056,8 @@ struct Program *parse_program() {
           if (fd->nbody == 0 - 1) {
             proto_names[nprotos] = fd->name;
             proto_rip[nprotos] = fd->ret_is_ptr;
+            proto_is_var[nprotos] = fd->is_variadic;
+            proto_np[nprotos] = fd->nparams;
             nprotos++;
           } else {
             funcs[nf] = fd;
@@ -3047,6 +3074,8 @@ struct Program *parse_program() {
         if (fd->nbody == 0 - 1) {
           proto_names[nprotos] = fd->name;
           proto_rip[nprotos] = fd->ret_is_ptr;
+          proto_is_var[nprotos] = fd->is_variadic;
+          proto_np[nprotos] = fd->nparams;
           nprotos++;
         } else {
           funcs[nf] = fd;
@@ -3059,13 +3088,15 @@ struct Program *parse_program() {
     }
   }
 
-  struct Program *p = my_malloc(72);
+  struct Program *p = my_malloc(88);
   p->structs = structs;
   p->nstructs = ns;
   p->funcs = funcs;
   p->nfuncs = nf;
   p->proto_names = proto_names;
   p->proto_ret_is_ptr = proto_rip;
+  p->proto_is_variadic = proto_is_var;
+  p->proto_nparams = proto_np;
   p->nprotos = nprotos;
   p->globals = globals;
   p->nglobals = ng;
@@ -4085,30 +4116,69 @@ int gen_value(struct Expr *e) {
       return 0;
     }
 
-    // printf: Apple ARM64 variadic ABI
-    if (my_strcmp(name, "printf") == 0) {
-      if (nargs < 1) { my_fatal("printf needs args"); }
-      int n_var = nargs - 1;
+    // Generic variadic function call (Apple ARM64 variadic ABI)
+    int vnp = 0 - 1;
+    int vfi = 0;
+    while (vfi < nvar_funcs) {
+      if (my_strcmp(var_funcs[vfi], name) == 0) {
+        vnp = var_nparams[vfi];
+        vfi = nvar_funcs;
+      }
+      vfi++;
+    }
+    if (vnp >= 0) {
+      int n_named = vnp;
+      if (n_named > nargs) { n_named = nargs; }
+      int n_var = nargs - n_named;
+      // Allocate stack for variadic args
       if (n_var > 0) {
         var_space = ((n_var * 8 + 15) / 16) * 16;
         emit_s("\tsub\tsp, sp, #");
         emit_num(var_space);
         emit_ch('\n');
-        for (int vi = 0; vi < n_var; vi++) {
-          gen_value(e->args[vi + 1]);
+        int vsi = 0;
+        while (vsi < n_var) {
+          gen_value(e->args[n_named + vsi]);
           emit_s("\tstr\tx0, [sp, #");
-          emit_num(vi * 8);
+          emit_num(vsi * 8);
           emit_line("]");
+          vsi++;
         }
       }
-      gen_value(e->args[0]);
-      emit_line("\tbl\t_printf");
-      emit_line("\tsxtw\tx0, w0");
+      // Push named args to temp area
+      int nai = 0;
+      while (nai < n_named) {
+        gen_value(e->args[nai]);
+        emit_line("\tstr\tx0, [sp, #-16]!");
+        nai++;
+      }
+      // Load named args into registers
+      nai = 0;
+      while (nai < n_named) {
+        emit_s("\tldr\tx");
+        emit_num(nai);
+        emit_s(", [sp, #");
+        emit_num((n_named - 1 - nai) * 16);
+        emit_line("]");
+        nai++;
+      }
+      // Pop named temp area so sp points to variadic args
+      if (n_named > 0) {
+        emit_s("\tadd\tsp, sp, #");
+        emit_num(n_named * 16);
+        emit_ch('\n');
+      }
+      emit_s("\tbl\t_");
+      emit_line(name);
+      // Clean up variadic stack
       if (n_var > 0) {
         var_space = ((n_var * 8 + 15) / 16) * 16;
         emit_s("\tadd\tsp, sp, #");
         emit_num(var_space);
         emit_ch('\n');
+      }
+      if (func_returns_ptr(name) == 0) {
+        emit_line("\tsxtw\tx0, w0");
       }
       return 0;
     }
@@ -4688,6 +4758,28 @@ int codegen(struct Program *prog) {
     pi++;
   }
 
+  // Register variadic functions
+  nvar_funcs = 0;
+  pi = 0;
+  while (pi < prog->nprotos) {
+    if (prog->proto_is_variadic[pi] != 0) {
+      var_funcs[nvar_funcs] = prog->proto_names[pi];
+      var_nparams[nvar_funcs] = prog->proto_nparams[pi];
+      nvar_funcs++;
+    }
+    pi++;
+  }
+  pi = 0;
+  while (pi < prog->nfuncs) {
+    fd = prog->funcs[pi];
+    if (fd->is_variadic != 0) {
+      var_funcs[nvar_funcs] = fd->name;
+      var_nparams[nvar_funcs] = fd->nparams;
+      nvar_funcs++;
+    }
+    pi++;
+  }
+
   // Register all known function names (for function pointer support)
   nknown_funcs = 0;
   pi = 0;
@@ -5169,6 +5261,21 @@ int pp_preprocess(int *src, int srclen, int *filepath, int *out, int co, int dep
         if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
       }
 
+      // Check for "error"
+      else if (si + 5 <= srclen &&
+          __read_byte(src, si) == 'e' && __read_byte(src, si+1) == 'r' &&
+          __read_byte(src, si+2) == 'r' && __read_byte(src, si+3) == 'o' &&
+          __read_byte(src, si+4) == 'r' &&
+          (__read_byte(src, si+5) == ' ' || __read_byte(src, si+5) == '\t' || __read_byte(src, si+5) == '\n')) {
+        si += 5;
+        while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) { si++; }
+        int msg_start = si;
+        while (si < srclen && __read_byte(src, si) != '\n') { si++; }
+        int *msg = make_str(src, msg_start, si - msg_start);
+        printf("cc: #error: %s\n", msg);
+        exit(1);
+      }
+
       else {
         // Other preprocessor directive — skip
         while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
@@ -5200,6 +5307,9 @@ int pp_preprocess(int *src, int srclen, int *filepath, int *out, int co, int dep
 
 // ---- Driver ----
 
+int *cmdline_defs[64];
+int ncmdline_defs;
+
 int main(int argc, int *argv) {
   int *out_path = "a.out";
   int *c_path = 0;
@@ -5211,6 +5321,20 @@ int main(int argc, int *argv) {
       if (i + 1 >= argc) { my_fatal("missing arg for -o"); }
       i++;
       out_path = argv[i];
+    } else if (__read_byte(arg, 0) == '-' && __read_byte(arg, 1) == 'D') {
+      if (__read_byte(arg, 2) != 0) {
+        // Extract substring starting at byte 2
+        int dlen = 0;
+        while (__read_byte(arg, 2 + dlen) != 0) { dlen++; }
+        cmdline_defs[ncmdline_defs] = make_str(arg, 2, dlen);
+        ncmdline_defs++;
+      } else if (i + 1 < argc) {
+        i++;
+        cmdline_defs[ncmdline_defs] = argv[i];
+        ncmdline_defs++;
+      } else {
+        my_fatal("missing arg for -D");
+      }
     } else if (__read_byte(arg, 0) == '-') {
       printf("Unknown option: %s\n", arg);
       exit(1);
@@ -5253,6 +5377,40 @@ int main(int argc, int *argv) {
 
   // Strip preprocessor lines and collect #define macros
   nmacros = 0;
+  // Inject -D command-line macros
+  int di = 0;
+  while (di < ncmdline_defs) {
+    int *def = cmdline_defs[di];
+    // Find '=' in the string
+    int eqpos = 0;
+    int found_eq = 0;
+    while (__read_byte(def, eqpos) != 0) {
+      if (__read_byte(def, eqpos) == '=') { found_eq = 1; break; }
+      eqpos++;
+    }
+    if (found_eq) {
+      // Split at '='
+      int *dm_name = make_str(def, 0, eqpos);
+      int dm_vs = eqpos + 1;
+      int dm_vl = 0;
+      while (__read_byte(def, dm_vs + dm_vl) != 0) { dm_vl++; }
+      int *dm_val = make_str(def, dm_vs, dm_vl);
+      macro_names[nmacros] = dm_name;
+      macro_values[nmacros] = dm_val;
+      macro_nparams[nmacros] = 0 - 1;
+      macro_params[nmacros] = 0;
+      macro_bodies[nmacros] = 0;
+      nmacros++;
+    } else {
+      macro_names[nmacros] = my_strdup(def);
+      macro_values[nmacros] = my_strdup("1");
+      macro_nparams[nmacros] = 0 - 1;
+      macro_params[nmacros] = 0;
+      macro_bodies[nmacros] = 0;
+      nmacros++;
+    }
+    di++;
+  }
   if_depth = 0;
   int *cleaned = my_malloc(srclen * 4 + 1);
   int co = 0;
