@@ -18,6 +18,7 @@ typedef enum {
     ND_POSTDEC,
     ND_TERNARY,
     ND_INITLIST,
+    ND_COMPOUND_LIT,
 } ExprKind;
 
 typedef struct Expr Expr;
@@ -42,6 +43,8 @@ struct Expr {
         struct { Expr *target; Expr *rhs; } assign;   /* ND_ASSIGN */
         Expr *postinc_operand;      /* ND_POSTINC, ND_POSTDEC */
         struct { Expr *cond; Expr *then_expr; Expr *else_expr; } ternary; /* ND_TERNARY */
+        struct { ExprArray elems; int *desig_indices; } initlist; /* ND_INITLIST */
+        struct { char *struct_type; Expr *init; } compound_lit; /* ND_COMPOUND_LIT */
     } u;
 };
 
@@ -81,6 +84,7 @@ typedef struct {
     int array_size;     /* -1 if not an array */
     int is_ptr;         /* 1 if pointer type */
     Expr *init;         /* NULL if no initializer */
+    int is_static;      /* 1 if static local */
 } VarDeclEntry;
 
 typedef struct {
@@ -118,6 +122,10 @@ typedef struct {
     char **field_types;  /* NULL entry = int, non-NULL = struct type name */
     int nfields;
     int is_union;
+    int *bit_widths;     /* 0 = regular field, >0 = bitfield width (per-field) */
+    int *bit_offsets;    /* bit offset within containing word (per-field) */
+    int *word_indices;   /* which 8-byte word this field maps to (per-field) */
+    int nwords;          /* 0 = nfields, >0 = packed word count */
 } StructDef;
 
 typedef struct {
@@ -170,6 +178,8 @@ Expr *new_assign(Expr *target, Expr *rhs);
 Expr *new_postinc(Expr *operand);
 Expr *new_postdec(Expr *operand);
 Expr *new_ternary(Expr *cond, Expr *then_expr, Expr *else_expr);
+
+Expr *new_compound_lit(const char *struct_type, Expr *init);
 
 Stmt *new_return(Expr *e);
 Stmt *new_if(Expr *cond, Block then_blk, Block *else_blk);

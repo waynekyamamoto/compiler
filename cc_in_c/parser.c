@@ -2,6 +2,7 @@
 #include "util.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 /* ---- Parser state ---- */
 
@@ -9,6 +10,7 @@ typedef struct {
     char *name;         /* field name */
     char *struct_type;  /* NULL for int fields */
     int is_ptr;
+    int bit_width;      /* 0 = normal field, >0 = bitfield width */
 } FieldInfo;
 
 typedef struct {
@@ -34,6 +36,9 @@ static int pos;
 
 static StructDefInfo struct_defs[64];
 static int nstruct_defs;
+
+static StructDef inline_structs[64];
+static int ninline_structs;
 
 static LocalVar local_vars[256];
 static int nlocal_vars;
@@ -188,16 +193,70 @@ static int is_type_start(void) {
 }
 
 /* Returns struct name (allocated) or NULL for int/char/void/unsigned/etc */
+static int anon_struct_counter;
+
 static char *parse_base_type(void) {
     skip_qualifiers();
 
-    if (match(TK_KW, "struct")) {
-        eat(TK_KW, "struct");
-        Tok *name = eat(TK_ID, NULL);
-        return xstrdup(name->value);
-    }
-    if (match(TK_KW, "union")) {
-        eat(TK_KW, "union");
+    if (match(TK_KW, "struct") || match(TK_KW, "union")) {
+        int is_union = match(TK_KW, "union");
+        eat(TK_KW, is_union ? "union" : "struct");
+        if (match(TK_OP, "{")) {
+            /* Anonymous/inline struct: struct { ... } */
+            char synth_name[64];
+            snprintf(synth_name, sizeof(synth_name), "__anon_%d", anon_struct_counter++);
+            /* Put back synthetic name so parse_struct_or_union_def can handle it.
+               Instead, parse inline. */
+            eat(TK_OP, "{");
+            FieldInfo *finfo = NULL;
+            int nfields = 0, fcap = 0;
+            while (!match(TK_OP, "}")) {
+                char *ftype = parse_base_type();
+                int is_ptr = 0;
+                int is_funcptr = 0;
+                if (is_funcptr_decl()) {
+                    eat(TK_OP, "("); eat(TK_OP, "*");
+                    is_ptr = 1; is_funcptr = 1;
+                }
+                while (match(TK_OP, "*")) { eat(TK_OP, "*"); is_ptr = 1; }
+                Tok *fname_tok = eat(TK_ID, NULL);
+                if (is_funcptr) { eat(TK_OP, ")"); skip_param_list(); }
+                if (match(TK_OP, "[")) {
+                    eat(TK_OP, "[");
+                    if (!match(TK_OP, "]")) eat(TK_NUMBER, NULL);
+                    eat(TK_OP, "]");
+                }
+                eat(TK_OP, ";");
+                if (nfields >= fcap) {
+                    fcap = fcap ? fcap * 2 : 8;
+                    finfo = realloc(finfo, fcap * sizeof(FieldInfo));
+                }
+                finfo[nfields].name = xstrdup(fname_tok->value);
+                finfo[nfields].struct_type = ftype ? xstrdup(ftype) : NULL;
+                finfo[nfields].is_ptr = is_ptr;
+                nfields++;
+            }
+            eat(TK_OP, "}");
+            /* Register in parser's struct table */
+            if (nstruct_defs >= 64) fatal("Too many struct defs");
+            struct_defs[nstruct_defs].name = xstrdup(synth_name);
+            struct_defs[nstruct_defs].fields = finfo;
+            struct_defs[nstruct_defs].nfields = nfields;
+            nstruct_defs++;
+            /* Also register for codegen */
+            if (ninline_structs >= 64) fatal("Too many inline structs");
+            StructDef *isd = &inline_structs[ninline_structs++];
+            isd->name = xstrdup(synth_name);
+            isd->fields = xmalloc(nfields * sizeof(char *));
+            isd->field_types = xmalloc(nfields * sizeof(char *));
+            isd->nfields = nfields;
+            isd->is_union = is_union;
+            for (int k = 0; k < nfields; k++) {
+                isd->fields[k] = xstrdup(finfo[k].name);
+                isd->field_types[k] = finfo[k].struct_type ? xstrdup(finfo[k].struct_type) : NULL;
+            }
+            return xstrdup(synth_name);
+        }
         Tok *name = eat(TK_ID, NULL);
         return xstrdup(name->value);
     }
@@ -282,6 +341,12 @@ static StructDef parse_struct_or_union_def(int is_union) {
                 eat(TK_NUMBER, NULL);
             eat(TK_OP, "]");
         }
+        /* Bitfield: field : width */
+        int bit_width = 0;
+        if (match(TK_OP, ":")) {
+            eat(TK_OP, ":");
+            bit_width = atoi(eat(TK_NUMBER, NULL)->value);
+        }
         eat(TK_OP, ";");
 
         if (nfields >= fcap) {
@@ -293,6 +358,7 @@ static StructDef parse_struct_or_union_def(int is_union) {
         finfo[nfields].name = xstrdup(fname_tok->value);
         finfo[nfields].struct_type = ftype;
         finfo[nfields].is_ptr = is_ptr;
+        finfo[nfields].bit_width = bit_width;
         nfields++;
     }
     eat(TK_OP, "}");
@@ -310,12 +376,55 @@ static StructDef parse_struct_or_union_def(int is_union) {
     for (int i = 0; i < nfields; i++)
         ftypes[i] = (finfo[i].struct_type && !finfo[i].is_ptr) ? xstrdup(finfo[i].struct_type) : NULL;
 
+    /* Compute bitfield packing */
+    int has_bitfields = 0;
+    for (int i = 0; i < nfields; i++)
+        if (finfo[i].bit_width > 0) { has_bitfields = 1; break; }
+
     StructDef sd;
     sd.name = name;
     sd.fields = fields;
     sd.field_types = ftypes;
     sd.nfields = nfields;
     sd.is_union = is_union;
+    sd.bit_widths = NULL;
+    sd.bit_offsets = NULL;
+    sd.word_indices = NULL;
+    sd.nwords = 0;
+
+    if (has_bitfields) {
+        sd.bit_widths = xmalloc(nfields * sizeof(int));
+        sd.bit_offsets = xmalloc(nfields * sizeof(int));
+        sd.word_indices = xmalloc(nfields * sizeof(int));
+        int cur_word = 0;
+        int cur_bit = 0;
+        for (int i = 0; i < nfields; i++) {
+            sd.bit_widths[i] = finfo[i].bit_width;
+            if (finfo[i].bit_width > 0) {
+                /* Bitfield: pack into current word */
+                if (cur_bit + finfo[i].bit_width > 64) {
+                    /* Doesn't fit, start new word */
+                    cur_word++;
+                    cur_bit = 0;
+                }
+                sd.bit_offsets[i] = cur_bit;
+                sd.word_indices[i] = cur_word;
+                cur_bit += finfo[i].bit_width;
+            } else {
+                /* Regular field: always gets its own word */
+                if (cur_bit > 0) {
+                    cur_word++;
+                    cur_bit = 0;
+                }
+                sd.bit_offsets[i] = 0;
+                sd.word_indices[i] = cur_word;
+                cur_word++;
+            }
+        }
+        if (cur_bit > 0) cur_word++;  /* last partial word counts */
+        sd.nwords = cur_word;
+    }
+
     return sd;
 }
 
@@ -353,23 +462,68 @@ static void parse_enum_def(void) {
 
 /* ---- VarDecl ---- */
 
-/* Parse brace initializer list: { expr, expr, ... } */
-static Expr *parse_init_list(void) {
+/* Parse brace initializer list: { expr, expr, ... }
+   Also supports designated initializers: { .field = val, [idx] = val }
+   struct_type_name is optional (NULL for arrays/non-struct), used for .field resolution */
+static Expr *parse_init_list(const char *struct_type_name) {
     eat(TK_OP, "{");
     ExprArray elems = {NULL, 0, 0};
+    int *desig = NULL;
+    int desig_cap = 0;
+    int ndesig = 0;
+    int has_desig = 0;
+
     while (!match(TK_OP, "}")) {
+        int di = -1; /* -1 = positional */
+        if (match(TK_OP, ".")) {
+            /* Field designator: .field = expr */
+            eat(TK_OP, ".");
+            Tok *fname = eat(TK_ID, NULL);
+            eat(TK_OP, "=");
+            has_desig = 1;
+            /* Resolve field name to index using parser's struct_defs */
+            if (struct_type_name) {
+                StructDefInfo *sd = find_struct_def(struct_type_name);
+                if (sd) {
+                    for (int fi = 0; fi < sd->nfields; fi++) {
+                        if (strcmp(sd->fields[fi].name, fname->value) == 0) {
+                            di = fi;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (di < 0) fatal("Unknown field '%s' in designated initializer", fname->value);
+        } else if (match(TK_OP, "[")) {
+            /* Array index designator: [idx] = expr */
+            eat(TK_OP, "[");
+            di = atoi(eat(TK_NUMBER, NULL)->value);
+            eat(TK_OP, "]");
+            eat(TK_OP, "=");
+            has_desig = 1;
+        }
+
         exprarray_push(&elems, parse_expr(0));
+        /* Track designator index */
+        if (ndesig >= desig_cap) {
+            desig_cap = desig_cap ? desig_cap * 2 : 16;
+            desig = realloc(desig, desig_cap * sizeof(int));
+        }
+        desig[ndesig++] = di;
+
         if (match(TK_OP, ",")) { eat(TK_OP, ","); continue; }
         break;
     }
     eat(TK_OP, "}");
+
     Expr *e = calloc(1, sizeof(Expr));
     e->kind = ND_INITLIST;
-    e->u.call.args = elems;
+    e->u.initlist.elems = elems;
+    e->u.initlist.desig_indices = has_desig ? desig : NULL;
     return e;
 }
 
-static Stmt *parse_vardecl_stmt(void) {
+static Stmt *parse_vardecl_stmt(int is_static) {
     char *stype = parse_base_type();
     VarDeclEntry *entries = NULL;
     int count = 0;
@@ -428,14 +582,14 @@ static Stmt *parse_vardecl_stmt(void) {
                 if (arr_size == 0) arr_size = slen;
                 init = new_strlit(str);
             } else {
-                init = parse_init_list();
+                init = parse_init_list(decl_stype);
                 if (arr_size == 0)
-                    arr_size = init->u.call.args.len; /* infer size */
+                    arr_size = init->u.initlist.elems.len; /* infer size */
             }
         } else if (decl_stype && !is_ptr && arr_size < 0 && match(TK_OP, "=")) {
             /* Struct initializer: struct Point p = {1, 2}; */
             eat(TK_OP, "=");
-            init = parse_init_list();
+            init = parse_init_list(decl_stype);
         } else if ((!decl_stype || is_ptr) && arr_size < 0 && match(TK_OP, "=")) {
             eat(TK_OP, "=");
             init = parse_expr(0);
@@ -450,6 +604,7 @@ static Stmt *parse_vardecl_stmt(void) {
         entries[count].array_size = arr_size;
         entries[count].is_ptr = is_ptr;
         entries[count].init = init;
+        entries[count].is_static = is_static;
         count++;
 
         if (stype)
@@ -584,7 +739,7 @@ static Expr *parse_unary(void) {
         skip_qualifiers();
         if (is_type_start()) {
             /* It's a cast — consume the type and closing paren, then parse unary */
-            parse_base_type();
+            char *cast_stype = parse_base_type();
             /* Function pointer cast: (type (*)(params))expr */
             if (is_funcptr_decl()) {
                 eat(TK_OP, "(");
@@ -595,6 +750,11 @@ static Expr *parse_unary(void) {
                 while (match(TK_OP, "*")) eat(TK_OP, "*");
             }
             eat(TK_OP, ")");
+            /* Compound literal: (struct Type){init} */
+            if (cast_stype && match(TK_OP, "{")) {
+                Expr *init = parse_init_list(cast_stype);
+                return new_compound_lit(cast_stype, init);
+            }
             Expr *operand = parse_unary();
             return operand; /* cast is a no-op for now */
         }
@@ -877,7 +1037,7 @@ static Stmt *parse_stmt(void) {
 
         Stmt *init = NULL;
         if (starts_type()) {
-            init = parse_vardecl_stmt();
+            init = parse_vardecl_stmt(0);
         } else if (match(TK_OP, ";")) {
             eat(TK_OP, ";");
         } else {
@@ -1010,9 +1170,12 @@ static Stmt *parse_stmt(void) {
 
     /* Variable declaration: starts with a type keyword */
     if (starts_type()) {
-        /* skip 'static' for local statics (treat as regular local) */
-        if (match(TK_KW, "static")) eat(TK_KW, "static");
-        return parse_vardecl_stmt();
+        int local_static = 0;
+        if (match(TK_KW, "static")) {
+            eat(TK_KW, "static");
+            local_static = 1;
+        }
+        return parse_vardecl_stmt(local_static);
     }
 
     /* empty statement */
@@ -1245,9 +1408,9 @@ static GlobalDecl parse_global_decl(int is_static) {
             if (arr_size == 0) arr_size = slen;
             init = new_strlit(str_tok->value);
         } else {
-            init = parse_init_list();
+            init = parse_init_list(stype);
             if (arr_size == 0)
-                arr_size = init->u.call.args.len;
+                arr_size = init->u.initlist.elems.len;
         }
     } else if (arr_size < 0 && match(TK_OP, "=")) {
         eat(TK_OP, "=");
@@ -1574,6 +1737,15 @@ Program *parse_program(TokArray tokarr) {
             /* type-based return: could be function, prototype, or global */
             parse_func_or_global(0, &funcs, &nfuncs, &fcap, &globals, &nglobals, &gcap, &protos, &nprotos, &pcap2);
         }
+    }
+
+    /* Merge inline anonymous structs */
+    for (int k = 0; k < ninline_structs; k++) {
+        if (nstructs >= scap) {
+            scap = scap ? scap * 2 : 4;
+            structs = realloc(structs, scap * sizeof(StructDef));
+        }
+        structs[nstructs++] = inline_structs[k];
     }
 
     Program *prog = xmalloc(sizeof(Program));

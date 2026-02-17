@@ -18,7 +18,7 @@ typedef struct {
     char *label;
 } StrPoolEntry;
 
-static StrPoolEntry str_pool[256];
+static StrPoolEntry str_pool[512];
 static int nstr_pool;
 
 /* Loop/switch stack (break target) */
@@ -37,6 +37,10 @@ typedef struct {
     char **field_types;  /* NULL = int, non-NULL = struct type name */
     int nfields;
     int is_union;
+    int *bit_widths;     /* NULL if no bitfields */
+    int *bit_offsets;
+    int *word_indices;
+    int nwords;          /* 0 = use nfields, >0 = packed word count */
 } CgStructDef;
 
 static CgStructDef cg_structs[64];
@@ -70,6 +74,37 @@ static int is_known_func(const char *name) {
     for (int i = 0; i < nknown_func_names; i++)
         if (strcmp(known_func_names[i], name) == 0) return 1;
     return 0;
+}
+
+/* ---- Static local variables ---- */
+
+typedef struct {
+    char *name;
+    char *label;
+    int init_val;
+    int has_init;
+} StaticLocalEntry;
+
+static StaticLocalEntry static_locals[256];
+static int nstatic_locals;
+
+static int is_static_local(const char *name) {
+    /* Match by name within current function only (use label which includes func name) */
+    char expected[128];
+    snprintf(expected, sizeof(expected), "_sl_%s.%s", cur_func_name, name);
+    for (int i = 0; i < nstatic_locals; i++)
+        if (strcmp(static_locals[i].label, expected) == 0)
+            return 1;
+    return 0;
+}
+
+static const char *find_static_local_label(const char *name) {
+    char expected[128];
+    snprintf(expected, sizeof(expected), "_sl_%s.%s", cur_func_name, name);
+    for (int i = 0; i < nstatic_locals; i++)
+        if (strcmp(static_locals[i].label, expected) == 0)
+            return static_locals[i].label;
+    return NULL;
 }
 
 /* ---- Function layout ---- */
@@ -174,6 +209,14 @@ static int field_index(const char *struct_name, const char *field_name) {
     if (!sd) fatal("Unknown struct '%s' in codegen", struct_name);
     /* For unions, all fields are at offset 0 */
     if (sd->is_union) return 0;
+    /* Bitfield struct: use word_indices */
+    if (sd->word_indices) {
+        for (int i = 0; i < sd->nfields; i++) {
+            if (strcmp(sd->fields[i], field_name) == 0)
+                return sd->word_indices[i];
+        }
+        fatal("Struct '%s' has no field '%s'", struct_name, field_name);
+    }
     int slot = 0;
     for (int i = 0; i < sd->nfields; i++) {
         if (strcmp(sd->fields[i], field_name) == 0)
@@ -192,6 +235,8 @@ static int cg_struct_nfields(const char *name) {
     if (!sd) fatal("Unknown struct '%s' for nfields", name);
     /* Unions: all fields overlap, allocate 1 slot */
     if (sd->is_union) return 1;
+    /* Bitfield-packed struct: use nwords */
+    if (sd->nwords > 0) return sd->nwords;
     int total = 0;
     for (int i = 0; i < sd->nfields; i++) {
         if (sd->field_types[i])
@@ -200,6 +245,20 @@ static int cg_struct_nfields(const char *name) {
             total += 1;
     }
     return total;
+}
+
+/* Returns bitfield info: bit_width (0 if not bitfield), bit_offset */
+static int get_bitfield_info(const char *struct_name, const char *field_name, int *out_bit_offset) {
+    CgStructDef *sd = find_cg_struct(struct_name);
+    if (!sd || !sd->bit_widths) { *out_bit_offset = 0; return 0; }
+    for (int i = 0; i < sd->nfields; i++) {
+        if (strcmp(sd->fields[i], field_name) == 0) {
+            *out_bit_offset = sd->bit_offsets[i];
+            return sd->bit_widths[i];
+        }
+    }
+    *out_bit_offset = 0;
+    return 0;
 }
 
 static GlobalVarEntry *find_global(const char *name) {
@@ -213,7 +272,7 @@ static char *intern_string(const char *decoded) {
     for (int i = 0; i < nstr_pool; i++)
         if (strcmp(str_pool[i].decoded, decoded) == 0)
             return str_pool[i].label;
-    if (nstr_pool >= 256) fatal("Too many string literals");
+    if (nstr_pool >= 512) fatal("Too many string literals");
     char tmp[32];
     snprintf(tmp, sizeof(tmp), "l_.str_%d", nstr_pool + 1);
     str_pool[nstr_pool].decoded = xstrdup(decoded);
@@ -312,6 +371,66 @@ static void layout_add_slot(FuncLayout *layout, const char *name, int offset) {
     layout->nslots++;
 }
 
+static int compound_lit_counter;
+static int compound_lit_gen_counter;
+
+static void walk_expr_for_compound_lits(Expr *e, FuncLayout *layout, int *offset) {
+    if (!e) return;
+    if (e->kind == ND_COMPOUND_LIT) {
+        char name[64];
+        snprintf(name, sizeof(name), "__cl_%d", compound_lit_counter++);
+        int nf = cg_struct_nfields(e->u.compound_lit.struct_type);
+        *offset += nf * 8;
+        layout_add_slot(layout, name, *offset);
+        if (layout->nstructvars >= 64) fatal("Too many struct vars");
+        layout->structvars[layout->nstructvars].name = xstrdup(name);
+        layout->structvars[layout->nstructvars].struct_type = xstrdup(e->u.compound_lit.struct_type);
+        layout->nstructvars++;
+        /* Walk the init list elements too */
+        if (e->u.compound_lit.init) {
+            Expr *init = e->u.compound_lit.init;
+            if (init->kind == ND_INITLIST) {
+                for (int i = 0; i < init->u.initlist.elems.len; i++)
+                    walk_expr_for_compound_lits(init->u.initlist.elems.data[i], layout, offset);
+            }
+        }
+        return;
+    }
+    switch (e->kind) {
+        case ND_BINARY:
+            walk_expr_for_compound_lits(e->u.binary.lhs, layout, offset);
+            walk_expr_for_compound_lits(e->u.binary.rhs, layout, offset);
+            break;
+        case ND_UNARY:
+            walk_expr_for_compound_lits(e->u.unary.rhs, layout, offset);
+            break;
+        case ND_ASSIGN:
+            walk_expr_for_compound_lits(e->u.assign.target, layout, offset);
+            walk_expr_for_compound_lits(e->u.assign.rhs, layout, offset);
+            break;
+        case ND_CALL:
+            for (int i = 0; i < e->u.call.args.len; i++)
+                walk_expr_for_compound_lits(e->u.call.args.data[i], layout, offset);
+            break;
+        case ND_INDEX:
+            walk_expr_for_compound_lits(e->u.index.base, layout, offset);
+            walk_expr_for_compound_lits(e->u.index.index, layout, offset);
+            break;
+        case ND_FIELD: case ND_ARROW:
+            walk_expr_for_compound_lits(e->u.field.obj, layout, offset);
+            break;
+        case ND_TERNARY:
+            walk_expr_for_compound_lits(e->u.ternary.cond, layout, offset);
+            walk_expr_for_compound_lits(e->u.ternary.then_expr, layout, offset);
+            walk_expr_for_compound_lits(e->u.ternary.else_expr, layout, offset);
+            break;
+        case ND_POSTINC: case ND_POSTDEC:
+            walk_expr_for_compound_lits(e->u.postinc_operand, layout, offset);
+            break;
+        default: break;
+    }
+}
+
 static void walk_block_for_layout(Block *b, FuncLayout *layout, int *offset);
 
 static void walk_stmts_for_layout(StmtArray *stmts, FuncLayout *layout, int *offset) {
@@ -322,6 +441,24 @@ static void walk_stmts_for_layout(StmtArray *stmts, FuncLayout *layout, int *off
                 VarDeclEntry *e = &st->u.vardecl.entries[j];
                 if (find_slot(layout, e->name) >= 0)
                     continue; /* already laid out (e.g. redecl in nested scope) */
+                if (e->is_static) {
+                    /* Static local: emit in .data section, not on stack */
+                    if (nstatic_locals >= 256) fatal("Too many static locals");
+                    char label[128];
+                    snprintf(label, sizeof(label), "_sl_%s.%s", cur_func_name, e->name);
+                    static_locals[nstatic_locals].name = xstrdup(e->name);
+                    static_locals[nstatic_locals].label = xstrdup(label);
+                    static_locals[nstatic_locals].has_init = 0;
+                    static_locals[nstatic_locals].init_val = 0;
+                    if (e->init && e->init->kind == ND_NUM) {
+                        static_locals[nstatic_locals].has_init = 1;
+                        static_locals[nstatic_locals].init_val = e->init->u.num;
+                    }
+                    nstatic_locals++;
+                    /* Use offset -1 as sentinel for static local */
+                    layout_add_slot(layout, e->name, -1);
+                    continue;
+                }
                 if (e->struct_type && !e->is_ptr && e->array_size >= 0) {
                     /* struct array */
                     int nf = cg_struct_nfields(e->struct_type);
@@ -387,6 +524,23 @@ static void walk_stmts_for_layout(StmtArray *stmts, FuncLayout *layout, int *off
                 walk_stmts_for_layout(&tmp, layout, offset);
             }
         }
+        /* Scan all expressions in this statement for compound literals */
+        if (st->kind == ST_EXPR)
+            walk_expr_for_compound_lits(st->u.expr, layout, offset);
+        else if (st->kind == ST_RETURN)
+            walk_expr_for_compound_lits(st->u.ret_expr, layout, offset);
+        else if (st->kind == ST_VARDECL) {
+            for (int j = 0; j < st->u.vardecl.count; j++)
+                if (st->u.vardecl.entries[j].init)
+                    walk_expr_for_compound_lits(st->u.vardecl.entries[j].init, layout, offset);
+        } else if (st->kind == ST_IF)
+            walk_expr_for_compound_lits(st->u.if_s.cond, layout, offset);
+        else if (st->kind == ST_WHILE)
+            walk_expr_for_compound_lits(st->u.while_s.cond, layout, offset);
+        else if (st->kind == ST_FOR) {
+            walk_expr_for_compound_lits(st->u.for_s.cond, layout, offset);
+            walk_expr_for_compound_lits(st->u.for_s.post, layout, offset);
+        }
     }
 }
 
@@ -400,8 +554,15 @@ static FuncLayout layout_func(FuncDef *f) {
     int offset = 0;
 
     for (int i = 0; i < f->nparams; i++) {
-        offset += 8;
-        layout_add_slot(&layout, f->params[i], offset);
+        if (i < 8) {
+            offset += 8;
+            layout_add_slot(&layout, f->params[i], offset);
+        } else {
+            /* Stack-passed params: at [x29+16+(i-8)*8] after prologue.
+               Use negative offset to signal "above x29". */
+            int above_off = 16 + (i - 8) * 8;
+            layout_add_slot(&layout, f->params[i], -above_off);
+        }
     }
 
     walk_block_for_layout(&f->body, &layout, &offset);
@@ -420,6 +581,19 @@ static void gen_block(Block *b, FuncLayout *layout, const char *ret_label);
 static void gen_addr(Expr *e, FuncLayout *layout) {
     if (e->kind == ND_VAR) {
         int off = find_slot(layout, e->u.var_name);
+        if (off == -1 && is_static_local(e->u.var_name)) {
+            /* Static local variable */
+            const char *lab = find_static_local_label(e->u.var_name);
+            emit("\tadrp\tx0, %s@PAGE", lab);
+            emit("\tadd\tx0, x0, %s@PAGEOFF", lab);
+            return;
+        }
+        if (off <= -2) {
+            /* Stack-passed parameter: at positive offset from x29 */
+            int pos_off = -off;
+            emit("\tadd\tx0, x29, #%d", pos_off);
+            return;
+        }
         if (off >= 0) {
             emit("\tsub\tx0, x29, #%d", off);
             return;
@@ -480,6 +654,11 @@ static void gen_addr(Expr *e, FuncLayout *layout) {
             emit("\tadd\tx0, x0, #%d", fi * 8);
         return;
     }
+    if (e->kind == ND_COMPOUND_LIT) {
+        /* Compound literal is an lvalue — gen_value already leaves address in x0 */
+        gen_value(e, layout);
+        return;
+    }
     fatal("Expression is not an lvalue");
 }
 
@@ -524,8 +703,21 @@ static void gen_value(Expr *e, FuncLayout *layout) {
     }
 
     if (e->kind == ND_FIELD || e->kind == ND_ARROW) {
+        int bf_bit_off;
+        int bf_width = get_bitfield_info(e->u.field.struct_type, e->u.field.field, &bf_bit_off);
         gen_addr(e, layout);
         emit("\tldr\tx0, [x0]");
+        if (bf_width > 0) {
+            if (bf_bit_off > 0)
+                emit("\tlsr\tx0, x0, #%d", bf_bit_off);
+            long long mask = (1LL << bf_width) - 1;
+            if (mask <= 0xFFFF) {
+                emit("\tand\tx0, x0, #%lld", mask);
+            } else {
+                emit("\tmov\tx9, #%lld", mask);
+                emit("\tand\tx0, x0, x9");
+            }
+        }
         return;
     }
 
@@ -536,6 +728,35 @@ static void gen_value(Expr *e, FuncLayout *layout) {
     }
 
     if (e->kind == ND_ASSIGN) {
+        /* Check if target is a bitfield */
+        Expr *tgt = e->u.assign.target;
+        if ((tgt->kind == ND_FIELD || tgt->kind == ND_ARROW) && tgt->u.field.struct_type) {
+            int bf_bit_off;
+            int bf_width = get_bitfield_info(tgt->u.field.struct_type, tgt->u.field.field, &bf_bit_off);
+            if (bf_width > 0) {
+                /* Bitfield assignment */
+                gen_addr(tgt, layout);   /* x0 = address of containing word */
+                emit("\tstr\tx0, [sp, #-16]!");  /* save addr */
+                gen_value(e->u.assign.rhs, layout);  /* x0 = new value */
+                emit("\tldr\tx1, [sp], #16");    /* x1 = addr */
+                long long mask = (1LL << bf_width) - 1;
+                emit("\tand\tx0, x0, #%lld", mask);  /* mask new value */
+                if (bf_bit_off > 0)
+                    emit("\tlsl\tx0, x0, #%d", bf_bit_off);  /* shift to position */
+                emit("\tldr\tx9, [x1]");          /* load old word */
+                long long clear_mask = mask << bf_bit_off;
+                emit("\tmov\tx10, #%lld", clear_mask);
+                emit("\tbic\tx9, x9, x10");       /* clear old bits */
+                emit("\torr\tx0, x9, x0");        /* merge new bits */
+                emit("\tstr\tx0, [x1]");          /* store back */
+                /* x0 has the full word, but caller may want the stored value.
+                   Re-extract the stored value for consistency. */
+                if (bf_bit_off > 0)
+                    emit("\tlsr\tx0, x0, #%d", bf_bit_off);
+                emit("\tand\tx0, x0, #%lld", mask);
+                return;
+            }
+        }
         gen_addr(e->u.assign.target, layout);
         emit("\tstr\tx0, [sp, #-16]!");
         gen_value(e->u.assign.rhs, layout);
@@ -596,6 +817,37 @@ static void gen_value(Expr *e, FuncLayout *layout) {
         emit("\tldr\tx1, [sp, #16]");        /* load addr */
         emit("\tstr\tx0, [x1]");             /* store new value */
         emit("\tldr\tx0, [sp], #32");        /* pop old value */
+        return;
+    }
+
+    if (e->kind == ND_COMPOUND_LIT) {
+        char name[64];
+        snprintf(name, sizeof(name), "__cl_%d", compound_lit_gen_counter++);
+        int base_off = find_slot(layout, name);
+        Expr *init = e->u.compound_lit.init;
+        if (init && init->kind == ND_INITLIST) {
+            int nelem = init->u.initlist.elems.len;
+            int *di = init->u.initlist.desig_indices;
+            int pos_idx = 0;
+            for (int k = 0; k < nelem; k++) {
+                gen_value(init->u.initlist.elems.data[k], layout);
+                int target = (di && di[k] >= 0) ? di[k] : pos_idx;
+                pos_idx = target + 1;
+                int elem_off = base_off - target * 8;
+                if (elem_off <= 255) {
+                    emit("\tstr\tx0, [x29, #-%d]", elem_off);
+                } else {
+                    emit("\tsub\tx9, x29, #%d", elem_off);
+                    emit("\tstr\tx0, [x9]");
+                }
+            }
+        }
+        /* Leave address in x0 */
+        if (base_off <= 255) {
+            emit("\tsub\tx0, x29, #%d", base_off);
+        } else {
+            emit("\tsub\tx0, x29, #%d", base_off);
+        }
         return;
     }
 
@@ -752,13 +1004,10 @@ static void gen_value(Expr *e, FuncLayout *layout) {
             return;
         }
 
-        if (nargs > 8) fatal("Supports up to 8 call arguments");
-
         /* Indirect call through arbitrary expression (e.g. s.field(args)) */
         if (strcmp(name, "__indirect_call") == 0) {
             /* args[0] is the function pointer expression, args[1..n] are actual args */
             int real_nargs = nargs - 1;
-            if (real_nargs > 8) fatal("Supports up to 8 call arguments");
             /* Load function pointer expression, push to stack */
             gen_value(args[0], layout);
             emit("\tstr\tx0, [sp, #-16]!");
@@ -767,16 +1016,29 @@ static void gen_value(Expr *e, FuncLayout *layout) {
                 gen_value(args[1 + i], layout);
                 emit("\tstr\tx0, [sp, #-16]!");
             }
-            /* Load function pointer from bottom of stack into x8 */
-            emit("\tldr\tx8, [sp, #%d]", real_nargs * 16);
-            /* Load args from stack into registers */
-            for (int i = 0; i < real_nargs; i++) {
-                int disp = (real_nargs - 1 - i) * 16;
+            int reg_nargs = real_nargs > 8 ? 8 : real_nargs;
+            int extra = real_nargs > 8 ? real_nargs - 8 : 0;
+            int stack_arg_space = extra > 0 ? ((extra * 8 + 15) / 16) * 16 : 0;
+            if (stack_arg_space > 0)
+                emit("\tsub\tsp, sp, #%d", stack_arg_space);
+            /* Place extra args on stack for callee */
+            for (int i = 0; i < extra; i++) {
+                int src_disp = (real_nargs - 1 - (8 + i)) * 16 + stack_arg_space;
+                emit("\tldr\tx9, [sp, #%d]", src_disp);
+                emit("\tstr\tx9, [sp, #%d]", i * 8);
+            }
+            /* Load function pointer from stack into x8 */
+            emit("\tldr\tx8, [sp, #%d]", real_nargs * 16 + stack_arg_space);
+            /* Load register args from stack */
+            for (int i = 0; i < reg_nargs; i++) {
+                int disp = (real_nargs - 1 - i) * 16 + stack_arg_space;
                 emit("\tldr\tx%d, [sp, #%d]", i, disp);
             }
+            emit("\tblr\tx8");
+            if (stack_arg_space > 0)
+                emit("\tadd\tsp, sp, #%d", stack_arg_space);
             /* Pop all (args + function pointer) */
             emit("\tadd\tsp, sp, #%d", (real_nargs + 1) * 16);
-            emit("\tblr\tx8");
             return;
         }
 
@@ -791,30 +1053,56 @@ static void gen_value(Expr *e, FuncLayout *layout) {
                 gen_value(args[i], layout);
                 emit("\tstr\tx0, [sp, #-16]!");
             }
-            /* Load function pointer from bottom of stack into x8 */
-            emit("\tldr\tx8, [sp, #%d]", nargs * 16);
-            /* Load args from stack into registers */
-            for (int i = 0; i < nargs; i++) {
-                int disp = (nargs - 1 - i) * 16;
+            int reg_nargs = nargs > 8 ? 8 : nargs;
+            int extra = nargs > 8 ? nargs - 8 : 0;
+            int stack_arg_space = extra > 0 ? ((extra * 8 + 15) / 16) * 16 : 0;
+            if (stack_arg_space > 0)
+                emit("\tsub\tsp, sp, #%d", stack_arg_space);
+            for (int i = 0; i < extra; i++) {
+                int src_disp = (nargs - 1 - (8 + i)) * 16 + stack_arg_space;
+                emit("\tldr\tx9, [sp, #%d]", src_disp);
+                emit("\tstr\tx9, [sp, #%d]", i * 8);
+            }
+            emit("\tldr\tx8, [sp, #%d]", nargs * 16 + stack_arg_space);
+            for (int i = 0; i < reg_nargs; i++) {
+                int disp = (nargs - 1 - i) * 16 + stack_arg_space;
                 emit("\tldr\tx%d, [sp, #%d]", i, disp);
             }
-            /* Pop all (args + function pointer) */
-            emit("\tadd\tsp, sp, #%d", (nargs + 1) * 16);
             emit("\tblr\tx8");
+            if (stack_arg_space > 0)
+                emit("\tadd\tsp, sp, #%d", stack_arg_space);
+            emit("\tadd\tsp, sp, #%d", (nargs + 1) * 16);
             return;
         }
 
+        /* Direct call */
         for (int i = 0; i < nargs; i++) {
             gen_value(args[i], layout);
             emit("\tstr\tx0, [sp, #-16]!");
         }
-        for (int i = 0; i < nargs; i++) {
-            int disp = (nargs - 1 - i) * 16;
-            emit("\tldr\tx%d, [sp, #%d]", i, disp);
+        {
+            int reg_nargs = nargs > 8 ? 8 : nargs;
+            int extra = nargs > 8 ? nargs - 8 : 0;
+            int stack_arg_space = extra > 0 ? ((extra * 8 + 15) / 16) * 16 : 0;
+            if (stack_arg_space > 0)
+                emit("\tsub\tsp, sp, #%d", stack_arg_space);
+            /* Place extra args on the stack for callee */
+            for (int i = 0; i < extra; i++) {
+                int src_disp = (nargs - 1 - (8 + i)) * 16 + stack_arg_space;
+                emit("\tldr\tx9, [sp, #%d]", src_disp);
+                emit("\tstr\tx9, [sp, #%d]", i * 8);
+            }
+            /* Load register args */
+            for (int i = 0; i < reg_nargs; i++) {
+                int disp = (nargs - 1 - i) * 16 + stack_arg_space;
+                emit("\tldr\tx%d, [sp, #%d]", i, disp);
+            }
+            emit("\tbl\t_%s", name);
+            if (stack_arg_space > 0)
+                emit("\tadd\tsp, sp, #%d", stack_arg_space);
         }
         if (nargs > 0)
             emit("\tadd\tsp, sp, #%d", nargs * 16);
-        emit("\tbl\t_%s", name);
         if (!func_returns_ptr(name))
             emit("\tsxtw\tx0, w0");
         return;
@@ -840,14 +1128,20 @@ static void gen_stmt(Stmt *st, FuncLayout *layout, const char *ret_label) {
     if (st->kind == ST_VARDECL) {
         for (int i = 0; i < st->u.vardecl.count; i++) {
             VarDeclEntry *e = &st->u.vardecl.entries[i];
+            /* Static locals: init handled in .data section */
+            if (e->is_static) continue;
             /* Struct initializer: struct Foo x = {a, b, c}; */
             if (e->struct_type && !e->is_ptr && e->array_size < 0) {
                 if (e->init && e->init->kind == ND_INITLIST) {
                     int base_off = find_slot(layout, e->name);
-                    int nelem = e->init->u.call.args.len;
+                    int nelem = e->init->u.initlist.elems.len;
+                    int *di = e->init->u.initlist.desig_indices;
+                    int pos_idx = 0;
                     for (int k = 0; k < nelem; k++) {
-                        gen_value(e->init->u.call.args.data[k], layout);
-                        int elem_off = base_off - k * 8;
+                        gen_value(e->init->u.initlist.elems.data[k], layout);
+                        int target = (di && di[k] >= 0) ? di[k] : pos_idx;
+                        pos_idx = target + 1;
+                        int elem_off = base_off - target * 8;
                         if (elem_off <= 255) {
                             emit("\tstr\tx0, [x29, #-%d]", elem_off);
                         } else {
@@ -862,10 +1156,14 @@ static void gen_stmt(Stmt *st, FuncLayout *layout, const char *ret_label) {
             if (e->array_size >= 0) {
                 if (e->init && e->init->kind == ND_INITLIST) {
                     int base_off = find_slot(layout, e->name);
-                    int nelem = e->init->u.call.args.len;
+                    int nelem = e->init->u.initlist.elems.len;
+                    int *di = e->init->u.initlist.desig_indices;
+                    int pos_idx = 0;
                     for (int k = 0; k < nelem; k++) {
-                        gen_value(e->init->u.call.args.data[k], layout);
-                        int elem_off = base_off - k * 8;
+                        gen_value(e->init->u.initlist.elems.data[k], layout);
+                        int target = (di && di[k] >= 0) ? di[k] : pos_idx;
+                        pos_idx = target + 1;
+                        int elem_off = base_off - target * 8;
                         if (elem_off <= 255) {
                             emit("\tstr\tx0, [x29, #-%d]", elem_off);
                         } else {
@@ -1408,9 +1706,11 @@ static void gen_block(Block *b, FuncLayout *layout, const char *ret_label) {
 }
 
 static void gen_func(FuncDef *f) {
+    cur_func_name = f->name;
+    compound_lit_counter = 0;
+    compound_lit_gen_counter = 0;
     FuncLayout layout = layout_func(f);
     char *ret_label = gen_label("ret");
-    cur_func_name = f->name;
 
     emit("");
     emit("\t.p2align\t2");
@@ -1422,7 +1722,7 @@ static void gen_func(FuncDef *f) {
     if (layout.stack_size)
         emit("\tsub\tsp, sp, #%d", layout.stack_size);
 
-    for (int i = 0; i < f->nparams; i++) {
+    for (int i = 0; i < f->nparams && i < 8; i++) {
         int off = find_slot(&layout, f->params[i]);
         if (off <= 255) {
             emit("\tstr\tx%d, [x29, #-%d]", i, off);
@@ -1431,6 +1731,7 @@ static void gen_func(FuncDef *f) {
             emit("\tstr\tx%d, [x9]", i);
         }
     }
+    /* Params 8+ are already on stack at [x29+16], [x29+24], etc. */
 
     gen_block(&f->body, &layout, ret_label);
 
@@ -1447,6 +1748,7 @@ char *codegen_generate(Program *prog) {
     label_id = 0;
     nstr_pool = 0;
     nloop_stack = 0;
+    nstatic_locals = 0;
     ncg_structs = 0;
     nglobal_vars = 0;
     nptr_ret_funcs = 0;
@@ -1481,6 +1783,10 @@ char *codegen_generate(Program *prog) {
         cg_structs[ncg_structs].field_types = prog->structs[i].field_types;
         cg_structs[ncg_structs].nfields = prog->structs[i].nfields;
         cg_structs[ncg_structs].is_union = prog->structs[i].is_union;
+        cg_structs[ncg_structs].bit_widths = prog->structs[i].bit_widths;
+        cg_structs[ncg_structs].bit_offsets = prog->structs[i].bit_offsets;
+        cg_structs[ncg_structs].word_indices = prog->structs[i].word_indices;
+        cg_structs[ncg_structs].nwords = prog->structs[i].nwords;
         ncg_structs++;
     }
 
@@ -1521,8 +1827,8 @@ char *codegen_generate(Program *prog) {
                     emit("\t.globl\t_%s", gd->name);
                 emit("\t.p2align\t3");
                 emit("_%s:", gd->name);
-                for (int k = 0; k < gd->init->u.call.args.len; k++) {
-                    Expr *elem = gd->init->u.call.args.data[k];
+                for (int k = 0; k < gd->init->u.initlist.elems.len; k++) {
+                    Expr *elem = gd->init->u.initlist.elems.data[k];
                     if (elem->kind == ND_NUM) {
                         emit("\t.quad\t%d", elem->u.num);
                     } else if (elem->kind == ND_UNARY && elem->u.unary.op == '-' &&
@@ -1574,6 +1880,20 @@ char *codegen_generate(Program *prog) {
                     emit("\t.comm\t_%s, 8, 3", gd->name);
                 }
             }
+        }
+    }
+
+    /* Emit static local variables */
+    if (nstatic_locals > 0) {
+        emit("");
+        emit("\t.data");
+        for (int i = 0; i < nstatic_locals; i++) {
+            emit("\t.p2align\t3");
+            emit("%s:", static_locals[i].label);
+            if (static_locals[i].has_init)
+                emit("\t.quad\t%d", static_locals[i].init_val);
+            else
+                emit("\t.quad\t0");
         }
     }
 

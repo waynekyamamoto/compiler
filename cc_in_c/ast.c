@@ -124,6 +124,14 @@ Expr *new_ternary(Expr *cond, Expr *then_expr, Expr *else_expr) {
     return e;
 }
 
+Expr *new_compound_lit(const char *struct_type, Expr *init) {
+    Expr *e = xmalloc(sizeof(Expr));
+    e->kind = ND_COMPOUND_LIT;
+    e->u.compound_lit.struct_type = xstrdup(struct_type);
+    e->u.compound_lit.init = init;
+    return e;
+}
+
 Stmt *new_return(Expr *e) {
     Stmt *s = xmalloc(sizeof(Stmt));
     s->kind = ST_RETURN;

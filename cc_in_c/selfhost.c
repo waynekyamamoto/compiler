@@ -26,7 +26,7 @@ int system(int *cmd);
 enum { TK_NUM, TK_ID, TK_STR, TK_KW, TK_OP, TK_EOF };
 enum { ND_NUM, ND_VAR, ND_STRLIT, ND_CALL, ND_UNARY, ND_BINARY,
        ND_INDEX, ND_FIELD, ND_ARROW, ND_ASSIGN, ND_POSTINC, ND_POSTDEC,
-       ND_TERNARY, ND_INITLIST };
+       ND_TERNARY, ND_INITLIST, ND_COMPOUND_LIT };
 enum { ST_RETURN, ST_IF, ST_WHILE, ST_FOR, ST_BREAK, ST_CONTINUE,
        ST_EXPR, ST_VARDECL, ST_DOWHILE, ST_GOTO, ST_LABEL, ST_SWITCH };
 
@@ -40,6 +40,7 @@ struct Expr {
   struct Expr *right;
   struct Expr **args;
   int nargs;
+  int *desig;
 };
 
 struct VarDecl {
@@ -48,6 +49,7 @@ struct VarDecl {
   int arr_size;
   int is_ptr;
   struct Expr *init;
+  int is_static;
 };
 
 struct Stmt {
@@ -85,12 +87,17 @@ struct SDef {
   int **field_types;
   int nfields;
   int is_union;
+  int *bit_widths;
+  int *bit_offsets;
+  int *word_indices;
+  int nwords;
 };
 
 struct SFieldInfo {
   int *name;
   int *stype;
   int is_ptr;
+  int bit_width;
 };
 
 struct SDefInfo {
@@ -135,8 +142,8 @@ int n_ptr_ret;
 int label_id;
 
 // String pool
-int *sp_decoded[256];
-int *sp_label[256];
+int *sp_decoded[512];
+int *sp_label[512];
 int nsp;
 
 // Loop stack
@@ -155,6 +162,10 @@ int **cg_sfields[64];
 int **cg_sfield_types[64];
 int cg_snfields[64];
 int cg_s_is_union[64];
+int *cg_s_bw[64];     // bit_widths
+int *cg_s_bo[64];     // bit_offsets
+int *cg_s_wi[64];     // word_indices
+int cg_s_nw[64];      // nwords
 int ncg_s;
 
 // Token arrays
@@ -204,6 +215,17 @@ int ntd;
 // Current function name for goto label mangling
 int *cg_cur_func_name;
 
+// Compound literal counters
+int cg_cl_counter;
+int cg_cl_gen_counter;
+
+// Anonymous struct counter
+int anon_struct_counter;
+
+// Inline struct defs for anonymous structs
+struct SDef *inline_sdefs[64];
+int ninline_sdefs;
+
 // Macro table for #define
 int *macro_names[256];
 int *macro_values[256];
@@ -221,6 +243,13 @@ int include_depth;
 // Known function names (for function pointer support)
 int *known_funcs[512];
 int nknown_funcs;
+
+// Static local variables
+int *sl_names[256];
+int *sl_labels[256];
+int sl_init_vals[256];
+int sl_has_init[256];
+int nsl;
 
 // ---- Utility functions ----
 
@@ -1227,15 +1256,64 @@ int *parse_base_type() {
     skip_qualifiers();
     return 0;
   }
-  if (p_match(TK_KW, "struct")) {
-    p_eat(TK_KW, "struct");
+  if (p_match(TK_KW, "struct") || p_match(TK_KW, "union")) {
+    int is_union_kw = p_match(TK_KW, "union");
+    if (is_union_kw) { p_eat(TK_KW, "union"); }
+    else { p_eat(TK_KW, "struct"); }
+    if (p_match(TK_OP, "{")) {
+      // Anonymous struct/union
+      int *synth_name = build_str2("__anon_", int_to_str(anon_struct_counter));
+      anon_struct_counter++;
+      p_eat(TK_OP, "{");
+      struct SFieldInfo **aflds = my_malloc(64 * 8);
+      int **afields = my_malloc(64 * 8);
+      int **afield_types = my_malloc(64 * 8);
+      int anf = 0;
+      while (!p_match(TK_OP, "}")) {
+        int *aftype = parse_base_type();
+        int aptr = 0;
+        int afp = 0;
+        if (is_funcptr_decl()) { p_eat(TK_OP, "("); p_eat(TK_OP, "*"); aptr = 1; afp = 1; }
+        while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); aptr = 1; }
+        int *afname = my_strdup(p_eat(TK_ID, 0));
+        if (afp) { p_eat(TK_OP, ")"); skip_param_list(); }
+        if (p_match(TK_OP, "[")) { p_eat(TK_OP, "["); if (!p_match(TK_OP, "]")) { p_eat(TK_NUM, 0); } p_eat(TK_OP, "]"); }
+        p_eat(TK_OP, ";");
+        struct SFieldInfo *afi = my_malloc(32);
+        afi->name = afname;
+        afi->stype = aftype;
+        afi->is_ptr = aptr;
+        afi->bit_width = 0;
+        aflds[anf] = afi;
+        afields[anf] = afname;
+        afield_types[anf] = aftype;
+        anf++;
+      }
+      p_eat(TK_OP, "}");
+      // Register in parser's struct table
+      struct SDefInfo *asdi = my_malloc(24);
+      asdi->name = my_strdup(synth_name);
+      asdi->flds = aflds;
+      asdi->nflds = anf;
+      p_sdefs[np_sdefs] = asdi;
+      np_sdefs++;
+      // Register for codegen
+      struct SDef *asd = my_malloc(72);
+      asd->name = my_strdup(synth_name);
+      asd->fields = afields;
+      asd->field_types = afield_types;
+      asd->nfields = anf;
+      asd->is_union = is_union_kw;
+      asd->bit_widths = 0;
+      asd->bit_offsets = 0;
+      asd->word_indices = 0;
+      asd->nwords = 0;
+      inline_sdefs[ninline_sdefs] = asd;
+      ninline_sdefs++;
+      skip_qualifiers();
+      return my_strdup(synth_name);
+    }
     int *name = p_eat(TK_ID, 0);
-    skip_qualifiers();
-    return my_strdup(name);
-  }
-  if (p_match(TK_KW, "union")) {
-    p_eat(TK_KW, "union");
-    name = p_eat(TK_ID, 0);
     skip_qualifiers();
     return my_strdup(name);
   }
@@ -1290,36 +1368,76 @@ struct Stmt **parse_block_or_stmt(int *out_len) {
   return stmts;
 }
 
-struct VarDecl *make_vd(int *name, int *stype, int arr_size, int is_ptr, struct Expr *init) {
-  struct VarDecl *vd = my_malloc(40);
+struct VarDecl *make_vd(int *name, int *stype, int arr_size, int is_ptr, struct Expr *init, int is_static) {
+  struct VarDecl *vd = my_malloc(48);
   vd->name = name;
   vd->stype = stype;
   vd->arr_size = arr_size;
   vd->is_ptr = is_ptr;
   vd->init = init;
+  vd->is_static = is_static;
   return vd;
 }
 
 // Parse brace initializer list: { expr, expr, ... }
-struct Expr *parse_init_list() {
+struct Expr *parse_init_list(int *stype_name) {
   struct Expr **elems = my_malloc(64 * 8);
+  int **desig = my_malloc(64 * 8);
   int nelems = 0;
+  int has_desig = 0;
+  int di = 0;
+  int *fname = 0;
+  struct SDefInfo *sd = 0;
+  int fi = 0;
   p_eat(TK_OP, "{");
   while (!p_match(TK_OP, "}")) {
+    di = 0 - 1;
+    if (p_match(TK_OP, ".")) {
+      p_eat(TK_OP, ".");
+      fname = p_eat(TK_ID, 0);
+      p_eat(TK_OP, "=");
+      has_desig = 1;
+      if (stype_name != 0) {
+        sd = find_sdef(stype_name);
+        if (sd != 0) {
+          fi = 0;
+          while (fi < sd->nflds) {
+            if (my_strcmp(sd->flds[fi]->name, fname) == 0) {
+              di = fi;
+              break;
+            }
+            fi++;
+          }
+        }
+      }
+      if (di < 0) my_fatal("Unknown field in designated init");
+    } else if (p_match(TK_OP, "[")) {
+      p_eat(TK_OP, "[");
+      di = my_atoi(p_eat(TK_NUM, 0));
+      p_eat(TK_OP, "]");
+      p_eat(TK_OP, "=");
+      has_desig = 1;
+    }
     elems[nelems] = parse_expr(0);
+    desig[nelems] = di;
     nelems++;
     if (p_match(TK_OP, ",")) { p_eat(TK_OP, ","); continue; }
     break;
   }
   p_eat(TK_OP, "}");
-  struct Expr *e = my_malloc(64);
+  struct Expr *e = my_malloc(80);
   e->kind = ND_INITLIST;
   e->args = elems;
   e->nargs = nelems;
+  if (has_desig) {
+    e->desig = desig;
+  } else {
+    e->desig = 0;
+  }
   return e;
 }
 
-struct Stmt *parse_vardecl_stmt() {
+struct Stmt *parse_vardecl_stmt(int vd_is_static) {
   int *stype = parse_base_type();
   struct VarDecl **decls = my_malloc(64 * 8);
   int ndecls = 0;
@@ -1376,18 +1494,18 @@ struct Stmt *parse_vardecl_stmt() {
         if (arr_size == 0) { arr_size = slen; }
         init = new_strlit(str_val);
       } else {
-        init = parse_init_list();
+        init = parse_init_list(decl_stype);
         if (arr_size == 0) { arr_size = init->nargs; }
       }
     } else if (decl_stype != 0 && is_ptr == 0 && arr_size < 0 && p_match(TK_OP, "=")) {
       // Struct initializer
       p_eat(TK_OP, "=");
-      init = parse_init_list();
+      init = parse_init_list(decl_stype);
     } else if ((decl_stype == 0 || is_ptr != 0) && arr_size < 0 && p_match(TK_OP, "=")) {
       p_eat(TK_OP, "=");
       init = parse_expr(0);
     }
-    decls[ndecls] = make_vd(my_strdup(name), decl_stype, arr_size, is_ptr, init);
+    decls[ndecls] = make_vd(my_strdup(name), decl_stype, arr_size, is_ptr, init, vd_is_static);
     ndecls++;
     if (stype != 0) {
       add_lv(name, stype, is_ptr);
@@ -1540,7 +1658,16 @@ struct Expr *parse_unary() {
     cast_saved = cur_pos;
     p_eat(TK_OP, "(");
     if (tok_kind[cur_pos] == TK_KW && is_type_keyword(tok_val[cur_pos])) {
-      // Skip the type, handling nested parens for funcptr casts
+      // Check for compound literal: (struct Name){...}
+      int *cl_stype = 0;
+      if (p_match(TK_KW, "struct") || p_match(TK_KW, "union")) {
+        cur_pos = cur_pos + 1;
+        if (tok_kind[cur_pos] == TK_ID) {
+          cl_stype = my_strdup(tok_val[cur_pos]);
+          cur_pos = cur_pos + 1;
+        }
+      }
+      // Skip the rest of the type, handling nested parens for funcptr casts
       int cast_depth = 1;
       while (cast_depth > 0) {
         if (p_match(TK_OP, "(")) { cast_depth = cast_depth + 1; }
@@ -1548,6 +1675,15 @@ struct Expr *parse_unary() {
         if (cast_depth > 0) { cur_pos = cur_pos + 1; }
       }
       p_eat(TK_OP, ")");
+      // Check for compound literal
+      if (cl_stype != 0 && p_match(TK_OP, "{")) {
+        struct Expr *cl_init = parse_init_list(cl_stype);
+        struct Expr *cl_e = my_malloc(80);
+        cl_e->kind = ND_COMPOUND_LIT;
+        cl_e->sval = cl_stype;
+        cl_e->left = cl_init;
+        return cl_e;
+      }
       return parse_unary();
     }
     cur_pos = cast_saved;
@@ -1780,7 +1916,7 @@ struct Stmt *parse_stmt() {
         p_match(TK_KW, "const") || p_match(TK_KW, "volatile") ||
         p_match(TK_KW, "register") || p_match(TK_KW, "enum") ||
         p_match(TK_KW, "_Bool") || p_match(TK_KW, "bool")) {
-      init = parse_vardecl_stmt();
+      init = parse_vardecl_stmt(0);
     } else if (p_match(TK_OP, ";")) {
       p_eat(TK_OP, ";");
     } else {
@@ -1904,7 +2040,7 @@ struct Stmt *parse_stmt() {
   // static before vardecl
   if (p_match(TK_KW, "static")) {
     p_eat(TK_KW, "static");
-    return parse_vardecl_stmt();
+    return parse_vardecl_stmt(1);
   }
 
   // type-keyword variable declarations
@@ -1916,7 +2052,7 @@ struct Stmt *parse_stmt() {
       p_match(TK_KW, "register") || p_match(TK_KW, "enum") ||
       p_match(TK_KW, "_Bool") || p_match(TK_KW, "bool") ||
       (tok_kind[cur_pos] == TK_ID && has_typedef(tok_val[cur_pos]))) {
-    return parse_vardecl_stmt();
+    return parse_vardecl_stmt(0);
   }
 
   // label: identifier followed by ':'
@@ -1971,10 +2107,16 @@ struct SDef *parse_struct_or_union_def(int is_union) {
       if (!p_match(TK_OP, "]")) { p_eat(TK_NUM, 0); }
       p_eat(TK_OP, "]");
     }
+    // Bitfield: field : width
+    int bw = 0;
+    if (p_match(TK_OP, ":")) {
+      p_eat(TK_OP, ":");
+      bw = my_atoi(p_eat(TK_NUM, 0));
+    }
     p_eat(TK_OP, ";");
 
     fields[nf] = fname;
-    struct SFieldInfo *fi = my_malloc(24);
+    struct SFieldInfo *fi = my_malloc(32);
     fi->name = my_strdup(fname);
     if (ftype != 0) {
       fi->stype = my_strdup(ftype);
@@ -1982,6 +2124,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
       fi->stype = 0;
     }
     fi->is_ptr = is_ptr;
+    fi->bit_width = bw;
     finfo[nf] = fi;
     nf++;
   }
@@ -2006,12 +2149,54 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     }
   }
 
-  struct SDef *sd = my_malloc(48);
+  // Compute bitfield packing
+  int has_bf = 0;
+  int bfi = 0;
+  while (bfi < nf) {
+    if (finfo[bfi]->bit_width > 0) { has_bf = 1; }
+    bfi++;
+  }
+
+  struct SDef *sd = my_malloc(72);
   sd->name = name;
   sd->fields = fields;
   sd->field_types = ftypes;
   sd->nfields = nf;
   sd->is_union = is_union;
+  sd->bit_widths = 0;
+  sd->bit_offsets = 0;
+  sd->word_indices = 0;
+  sd->nwords = 0;
+
+  if (has_bf) {
+    sd->bit_widths = my_malloc(nf * 8);
+    sd->bit_offsets = my_malloc(nf * 8);
+    sd->word_indices = my_malloc(nf * 8);
+    int cur_word = 0;
+    int cur_bit = 0;
+    bfi = 0;
+    while (bfi < nf) {
+      sd->bit_widths[bfi] = finfo[bfi]->bit_width;
+      if (finfo[bfi]->bit_width > 0) {
+        if (cur_bit + finfo[bfi]->bit_width > 64) {
+          cur_word++;
+          cur_bit = 0;
+        }
+        sd->bit_offsets[bfi] = cur_bit;
+        sd->word_indices[bfi] = cur_word;
+        cur_bit = cur_bit + finfo[bfi]->bit_width;
+      } else {
+        if (cur_bit > 0) { cur_word++; cur_bit = 0; }
+        sd->bit_offsets[bfi] = 0;
+        sd->word_indices[bfi] = cur_word;
+        cur_word++;
+      }
+      bfi++;
+    }
+    if (cur_bit > 0) { cur_word++; }
+    sd->nwords = cur_word;
+  }
+
   return sd;
 }
 
@@ -2151,7 +2336,7 @@ struct GDecl *parse_global_decl() {
       int slen = my_strlen(init_str) + 1;
       if (array_size == 0) { array_size = slen; }
     } else {
-      init_list = parse_init_list();
+      init_list = parse_init_list(0);
       if (array_size == 0) { array_size = init_list->nargs; }
     }
   } else if (p_match(TK_OP, "=")) {
@@ -2649,12 +2834,26 @@ int cg_struct_nfields(int *sname);
 
 int cg_field_index(int *sname, int *fname) {
   int i = 0;
+  int j = 0;
+  int slot = 0;
   while (i < ncg_s) {
     if (my_strcmp(cg_sname[i], sname) == 0) {
       // For unions, all fields are at offset 0
       if (cg_s_is_union[i]) { return 0; }
-      int slot = 0;
-      int j = 0;
+      // Bitfield struct: use word_indices
+      if (cg_s_wi[i] != 0) {
+        int *wi_arr = cg_s_wi[i];
+        j = 0;
+        while (j < cg_snfields[i]) {
+          if (my_strcmp(cg_sfields[i][j], fname) == 0) {
+            return wi_arr[j];
+          }
+          j++;
+        }
+        my_fatal("field not found in codegen");
+      }
+      slot = 0;
+      j = 0;
       while (j < cg_snfields[i]) {
         if (my_strcmp(cg_sfields[i][j], fname) == 0) {
           return slot;
@@ -2676,23 +2875,56 @@ int cg_field_index(int *sname, int *fname) {
 
 int cg_struct_nfields(int *sname) {
   int i = 0;
+  int j = 0;
+  int total = 0;
   while (i < ncg_s) {
     if (my_strcmp(cg_sname[i], sname) == 0) {
       // Unions: all fields overlap, allocate 1 slot
       if (cg_s_is_union[i]) { return 1; }
-      int total = 0;
-      for (int j = 0; j < cg_snfields[i]; j++) {
+      // Bitfield struct: use nwords
+      if (cg_s_nw[i] > 0) { return cg_s_nw[i]; }
+      total = 0;
+      j = 0;
+      while (j < cg_snfields[i]) {
         if (cg_sfield_types[i][j] != 0) {
           total += cg_struct_nfields(cg_sfield_types[i][j]);
         } else {
           total++;
         }
+        j++;
       }
       return total;
     }
     i++;
   }
   my_fatal("struct not found for nfields");
+  return 0;
+}
+
+// Returns bit_width (0 if not a bitfield). Sets *out_bit_offset.
+int cg_get_bitfield_info(int *sname, int *fname, int *out_bit_offset) {
+  int i = 0;
+  int *bw_arr = 0;
+  int *bo_arr = 0;
+  while (i < ncg_s) {
+    if (my_strcmp(cg_sname[i], sname) == 0) {
+      bw_arr = cg_s_bw[i];
+      bo_arr = cg_s_bo[i];
+      if (bw_arr == 0) { *out_bit_offset = 0; return 0; }
+      int j = 0;
+      while (j < cg_snfields[i]) {
+        if (my_strcmp(cg_sfields[i][j], fname) == 0) {
+          *out_bit_offset = bo_arr[j];
+          return bw_arr[j];
+        }
+        j++;
+      }
+      *out_bit_offset = 0;
+      return 0;
+    }
+    i++;
+  }
+  *out_bit_offset = 0;
   return 0;
 }
 
@@ -2806,6 +3038,58 @@ int lay_add_slot(int *name, int off) {
   return 0;
 }
 
+int lay_walk_expr_cl(struct Expr *e, int *offset) {
+  int ci = 0;
+  if (e == 0) return 0;
+  if (e->kind == ND_COMPOUND_LIT) {
+    int *cl_name = build_str2("__cl_", int_to_str(cg_cl_counter));
+    cg_cl_counter++;
+    int nf = cg_struct_nfields(e->sval);
+    *offset = *offset + nf * 8;
+    lay_add_slot(cl_name, *offset);
+    if (nlay_sv >= 64) my_fatal("too many struct vars");
+    lay_sv_name[nlay_sv] = my_strdup(cl_name);
+    lay_sv_type[nlay_sv] = my_strdup(e->sval);
+    nlay_sv++;
+    // Walk init list elements
+    if (e->left != 0 && e->left->kind == ND_INITLIST) {
+      ci = 0;
+      while (ci < e->left->nargs) {
+        lay_walk_expr_cl(e->left->args[ci], offset);
+        ci++;
+      }
+    }
+    return 0;
+  }
+  if (e->kind == ND_BINARY) {
+    lay_walk_expr_cl(e->left, offset);
+    lay_walk_expr_cl(e->right, offset);
+  } else if (e->kind == ND_UNARY) {
+    lay_walk_expr_cl(e->left, offset);
+  } else if (e->kind == ND_ASSIGN) {
+    lay_walk_expr_cl(e->left, offset);
+    lay_walk_expr_cl(e->right, offset);
+  } else if (e->kind == ND_CALL) {
+    ci = 0;
+    while (ci < e->nargs) {
+      lay_walk_expr_cl(e->args[ci], offset);
+      ci++;
+    }
+  } else if (e->kind == ND_INDEX) {
+    lay_walk_expr_cl(e->left, offset);
+    lay_walk_expr_cl(e->right, offset);
+  } else if (e->kind == ND_FIELD || e->kind == ND_ARROW) {
+    lay_walk_expr_cl(e->left, offset);
+  } else if (e->kind == ND_TERNARY) {
+    lay_walk_expr_cl(e->left, offset);
+    lay_walk_expr_cl(e->right, offset);
+    lay_walk_expr_cl(e->args[0], offset);
+  } else if (e->kind == ND_POSTINC || e->kind == ND_POSTDEC) {
+    lay_walk_expr_cl(e->left, offset);
+  }
+  return 0;
+}
+
 int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
   int nf = 0;
   int i = 0;
@@ -2818,6 +3102,19 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
           printf("cc: duplicate variable '%s'\n", vd->name);
           exit(1);
         }
+        if (vd->is_static) {
+          // Static local: record in static local table, use sentinel offset -1
+          sl_names[nsl] = my_strdup(vd->name);
+          sl_labels[nsl] = build_str2(build_str2("_sl_", cg_cur_func_name), build_str2(".", vd->name));
+          sl_has_init[nsl] = 0;
+          sl_init_vals[nsl] = 0;
+          if (vd->init != 0 && vd->init->kind == ND_NUM) {
+            sl_has_init[nsl] = 1;
+            sl_init_vals[nsl] = vd->init->ival;
+          }
+          nsl++;
+          lay_add_slot(vd->name, 0 - 1);
+        } else
         if (vd->stype != 0 && vd->is_ptr == 0 && vd->arr_size >= 0) {
           // struct array: allocate arr_size * nfields slots
           nf = cg_struct_nfields(vd->stype);
@@ -2875,6 +3172,20 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
         lay_walk_stmts(st->default_body, st->ndefault, offset);
       }
     }
+    // Scan expressions for compound literals
+    if (st->kind == ST_EXPR || st->kind == ST_RETURN ||
+        st->kind == ST_IF || st->kind == ST_WHILE) {
+      lay_walk_expr_cl(st->expr, offset);
+    } else if (st->kind == ST_VARDECL) {
+      for (int vi = 0; vi < st->ndecls; vi++) {
+        if (st->decls[vi]->init != 0) {
+          lay_walk_expr_cl(st->decls[vi]->init, offset);
+        }
+      }
+    } else if (st->kind == ST_FOR) {
+      lay_walk_expr_cl(st->expr, offset);
+      lay_walk_expr_cl(st->expr2, offset);
+    }
     i++;
   }
   return 0;
@@ -2888,8 +3199,14 @@ int layout_func(struct FuncDef *f) {
   int offset = 0;
 
   for (int i = 0; i < f->nparams; i++) {
-    offset += 8;
-    lay_add_slot(f->params[i], offset);
+    if (i < 8) {
+      offset += 8;
+      lay_add_slot(f->params[i], offset);
+    } else {
+      // Stack-passed params: at [x29+16+(i-8)*8]. Use negative offset as signal.
+      int above_off = 16 + (i - 8) * 8;
+      lay_add_slot(f->params[i], 0 - above_off);
+    }
   }
 
   lay_walk_stmts(f->body, f->nbody, &offset);
@@ -2903,6 +3220,30 @@ int gen_addr(struct Expr *e) {
   int fi = 0;
   if (e->kind == ND_VAR) {
     int off = cg_find_slot(e->sval);
+    // Stack-passed parameter: offset <= -2 means positive offset from x29
+    if (off <= (0 - 2)) {
+      int pos_off = 0 - off;
+      emit_s("\tadd\tx0, x29, #"); emit_num(pos_off); emit_ch('\n');
+      return 0;
+    }
+    // Check for static local (sentinel offset -1)
+    if (off == (0 - 1)) {
+      // Find the static local label matching current function + var name
+      int *sl_expected = build_str2(build_str2("_sl_", cg_cur_func_name), build_str2(".", e->sval));
+      int sli = 0;
+      while (sli < nsl) {
+        if (my_strcmp(sl_labels[sli], sl_expected) == 0) {
+          emit_s("\tadrp\tx0, ");
+          emit_s(sl_labels[sli]);
+          emit_line("@PAGE");
+          emit_s("\tadd\tx0, x0, ");
+          emit_s(sl_labels[sli]);
+          emit_line("@PAGEOFF");
+          return 0;
+        }
+        sli++;
+      }
+    }
     if (off < 0) {
       // Check if it's a global variable
       if (cg_is_global(e->sval)) {
@@ -2990,6 +3331,10 @@ int gen_addr(struct Expr *e) {
     }
     return 0;
   }
+  if (e->kind == ND_COMPOUND_LIT) {
+    gen_value(e);
+    return 0;
+  }
   my_fatal("not an lvalue");
   return 0;
 }
@@ -3001,6 +3346,10 @@ int gen_value(struct Expr *e) {
   int *rhs_l = 0;
   int *else_l = 0;
   int var_space = 0;
+  int bf_bit_off = 0;
+  int bf_width = 0;
+  int bf_mask = 0;
+  int bf_clear_mask = 0;
   if (e->kind == ND_NUM) {
     int val = e->ival;
     if (val >= -65535 && val <= 65535) {
@@ -3036,8 +3385,28 @@ int gen_value(struct Expr *e) {
   }
 
   if (e->kind == ND_FIELD || e->kind == ND_ARROW) {
+    bf_bit_off = 0;
+    bf_width = cg_get_bitfield_info(e->sval2, e->sval, &bf_bit_off);
     gen_addr(e);
     emit_line("\tldr\tx0, [x0]");
+    if (bf_width > 0) {
+      if (bf_bit_off > 0) {
+        emit_s("\tlsr\tx0, x0, #");
+        emit_num(bf_bit_off);
+        emit_ch('\n');
+      }
+      bf_mask = (1 << bf_width) - 1;
+      if (bf_mask <= 65535) {
+        emit_s("\tand\tx0, x0, #");
+        emit_num(bf_mask);
+        emit_ch('\n');
+      } else {
+        emit_s("\tmov\tx9, #");
+        emit_num(bf_mask);
+        emit_ch('\n');
+        emit_line("\tand\tx0, x0, x9");
+      }
+    }
     return 0;
   }
 
@@ -3048,6 +3417,44 @@ int gen_value(struct Expr *e) {
   }
 
   if (e->kind == ND_ASSIGN) {
+    // Check if target is a bitfield
+    if (e->left->kind == ND_FIELD || e->left->kind == ND_ARROW) {
+      bf_bit_off = 0;
+      bf_width = cg_get_bitfield_info(e->left->sval2, e->left->sval, &bf_bit_off);
+      if (bf_width > 0) {
+        bf_mask = (1 << bf_width) - 1;
+        bf_clear_mask = bf_mask << bf_bit_off;
+        gen_addr(e->left);
+        emit_line("\tstr\tx0, [sp, #-16]!");
+        gen_value(e->right);
+        emit_line("\tldr\tx1, [sp], #16");
+        emit_s("\tand\tx0, x0, #");
+        emit_num(bf_mask);
+        emit_ch('\n');
+        if (bf_bit_off > 0) {
+          emit_s("\tlsl\tx0, x0, #");
+          emit_num(bf_bit_off);
+          emit_ch('\n');
+        }
+        emit_line("\tldr\tx9, [x1]");
+        emit_s("\tmov\tx10, #");
+        emit_num(bf_clear_mask);
+        emit_ch('\n');
+        emit_line("\tbic\tx9, x9, x10");
+        emit_line("\torr\tx0, x9, x0");
+        emit_line("\tstr\tx0, [x1]");
+        // Re-extract stored value
+        if (bf_bit_off > 0) {
+          emit_s("\tlsr\tx0, x0, #");
+          emit_num(bf_bit_off);
+          emit_ch('\n');
+        }
+        emit_s("\tand\tx0, x0, #");
+        emit_num(bf_mask);
+        emit_ch('\n');
+        return 0;
+      }
+    }
     gen_addr(e->left);
     emit_line("\tstr\tx0, [sp, #-16]!");
     gen_value(e->right);
@@ -3076,6 +3483,43 @@ int gen_value(struct Expr *e) {
     emit_line("\tldr\tx1, [sp, #16]");
     emit_line("\tstr\tx0, [x1]");
     emit_line("\tldr\tx0, [sp], #32");
+    return 0;
+  }
+
+  if (e->kind == ND_COMPOUND_LIT) {
+    int *cl_name = build_str2("__cl_", int_to_str(cg_cl_gen_counter));
+    cg_cl_gen_counter++;
+    int cl_base = cg_find_slot(cl_name);
+    struct Expr *cl_init = e->left;
+    if (cl_init != 0 && cl_init->kind == ND_INITLIST) {
+      int *cl_di = cl_init->desig;
+      int cl_pos = 0;
+      int cl_k = 0;
+      int cl_target = 0;
+      int cl_off = 0;
+      while (cl_k < cl_init->nargs) {
+        gen_value(cl_init->args[cl_k]);
+        cl_target = cl_pos;
+        if (cl_di != 0 && cl_di[cl_k] >= 0) { cl_target = cl_di[cl_k]; }
+        cl_pos = cl_target + 1;
+        cl_off = cl_base - cl_target * 8;
+        if (cl_off <= 255) {
+          emit_s("\tstr\tx0, [x29, #-");
+          emit_num(cl_off);
+          emit_line("]");
+        } else {
+          emit_s("\tsub\tx9, x29, #");
+          emit_num(cl_off);
+          emit_ch('\n');
+          emit_line("\tstr\tx0, [x9]");
+        }
+        cl_k++;
+      }
+    }
+    // Leave address in x0
+    emit_s("\tsub\tx0, x29, #");
+    emit_num(cl_base);
+    emit_ch('\n');
     return 0;
   }
 
@@ -3268,80 +3712,92 @@ int gen_value(struct Expr *e) {
     }
 
     // Regular function call
-    if (nargs > 8) { my_fatal("too many args"); }
     int ai = 0;
     int disp = 0;
     int real_nargs = 0;
+    int reg_nargs = 0;
+    int extra = 0;
+    int stack_arg_space = 0;
+    int src_disp = 0;
 
     // Indirect call through arbitrary expression (e.g. s.field(args))
     if (my_strcmp(name, "__indirect_call") == 0) {
       real_nargs = nargs - 1;
-      if (real_nargs > 8) { my_fatal("too many args"); }
-      // Load function pointer expression (args[0]), push to stack
       gen_value(e->args[0]);
       emit_line("\tstr\tx0, [sp, #-16]!");
-      // Push actual args to stack
       ai = 0;
       while (ai < real_nargs) {
         gen_value(e->args[1 + ai]);
         emit_line("\tstr\tx0, [sp, #-16]!");
         ai++;
       }
-      // Load function pointer from bottom of stack into x8
-      emit_s("\tldr\tx8, [sp, #");
-      emit_num(real_nargs * 16);
-      emit_line("]");
-      // Load args from stack into registers
+      reg_nargs = real_nargs;
+      if (reg_nargs > 8) { reg_nargs = 8; }
+      extra = real_nargs - reg_nargs;
+      stack_arg_space = 0;
+      if (extra > 0) { stack_arg_space = ((extra * 8 + 15) / 16) * 16; }
+      if (stack_arg_space > 0) {
+        emit_s("\tsub\tsp, sp, #"); emit_num(stack_arg_space); emit_ch('\n');
+      }
       ai = 0;
-      while (ai < real_nargs) {
-        disp = (real_nargs - 1 - ai) * 16;
-        emit_s("\tldr\tx");
-        emit_num(ai);
-        emit_s(", [sp, #");
-        emit_num(disp);
-        emit_line("]");
+      while (ai < extra) {
+        src_disp = (real_nargs - 1 - (8 + ai)) * 16 + stack_arg_space;
+        emit_s("\tldr\tx9, [sp, #"); emit_num(src_disp); emit_line("]");
+        emit_s("\tstr\tx9, [sp, #"); emit_num(ai * 8); emit_line("]");
         ai++;
       }
-      // Pop all (args + function pointer)
-      emit_s("\tadd\tsp, sp, #");
-      emit_num((real_nargs + 1) * 16);
-      emit_ch('\n');
+      emit_s("\tldr\tx8, [sp, #"); emit_num(real_nargs * 16 + stack_arg_space); emit_line("]");
+      ai = 0;
+      while (ai < reg_nargs) {
+        disp = (real_nargs - 1 - ai) * 16 + stack_arg_space;
+        emit_s("\tldr\tx"); emit_num(ai); emit_s(", [sp, #"); emit_num(disp); emit_line("]");
+        ai++;
+      }
       emit_line("\tblr\tx8");
+      if (stack_arg_space > 0) {
+        emit_s("\tadd\tsp, sp, #"); emit_num(stack_arg_space); emit_ch('\n');
+      }
+      emit_s("\tadd\tsp, sp, #"); emit_num((real_nargs + 1) * 16); emit_ch('\n');
       return 0;
     }
 
     // Indirect call through function pointer variable
     if (is_known_func(name) == 0 && (cg_find_slot(name) >= 0 || cg_is_global(name))) {
-      // Load function pointer into x0, push to stack
       gen_value(new_var(name));
       emit_line("\tstr\tx0, [sp, #-16]!");
-      // Push args to stack
       ai = 0;
       while (ai < nargs) {
         gen_value(e->args[ai]);
         emit_line("\tstr\tx0, [sp, #-16]!");
         ai++;
       }
-      // Load function pointer from bottom of our stack into x8
-      emit_s("\tldr\tx8, [sp, #");
-      emit_num(nargs * 16);
-      emit_line("]");
-      // Load args from stack into registers
+      reg_nargs = nargs;
+      if (reg_nargs > 8) { reg_nargs = 8; }
+      extra = nargs - reg_nargs;
+      stack_arg_space = 0;
+      if (extra > 0) { stack_arg_space = ((extra * 8 + 15) / 16) * 16; }
+      if (stack_arg_space > 0) {
+        emit_s("\tsub\tsp, sp, #"); emit_num(stack_arg_space); emit_ch('\n');
+      }
       ai = 0;
-      while (ai < nargs) {
-        disp = (nargs - 1 - ai) * 16;
-        emit_s("\tldr\tx");
-        emit_num(ai);
-        emit_s(", [sp, #");
-        emit_num(disp);
-        emit_line("]");
+      while (ai < extra) {
+        src_disp = (nargs - 1 - (8 + ai)) * 16 + stack_arg_space;
+        emit_s("\tldr\tx9, [sp, #"); emit_num(src_disp); emit_line("]");
+        emit_s("\tstr\tx9, [sp, #"); emit_num(ai * 8); emit_line("]");
         ai++;
       }
-      // Pop all (args + function pointer)
-      emit_s("\tadd\tsp, sp, #");
-      emit_num((nargs + 1) * 16);
-      emit_ch('\n');
+      emit_s("\tldr\tx8, [sp, #"); emit_num(nargs * 16 + stack_arg_space); emit_line("]");
+      ai = 0;
+      while (ai < reg_nargs) {
+        disp = (nargs - 1 - ai) * 16 + stack_arg_space;
+        emit_s("\tldr\tx"); emit_num(ai); emit_s(", [sp, #"); emit_num(disp); emit_line("]");
+        ai++;
+      }
       emit_line("\tblr\tx8");
+      if (stack_arg_space > 0) {
+        emit_s("\tadd\tsp, sp, #"); emit_num(stack_arg_space); emit_ch('\n');
+      }
+      emit_s("\tadd\tsp, sp, #"); emit_num((nargs + 1) * 16); emit_ch('\n');
       return 0;
     }
 
@@ -3352,21 +3808,34 @@ int gen_value(struct Expr *e) {
       emit_line("\tstr\tx0, [sp, #-16]!");
       ai++;
     }
+    reg_nargs = nargs;
+    if (reg_nargs > 8) { reg_nargs = 8; }
+    extra = nargs - reg_nargs;
+    stack_arg_space = 0;
+    if (extra > 0) { stack_arg_space = ((extra * 8 + 15) / 16) * 16; }
+    if (stack_arg_space > 0) {
+      emit_s("\tsub\tsp, sp, #"); emit_num(stack_arg_space); emit_ch('\n');
+    }
     ai = 0;
-    while (ai < nargs) {
-      disp = (nargs - 1 - ai) * 16;
-      emit_s("\tldr\tx");
-      emit_num(ai);
-      emit_s(", [sp, #");
-      emit_num(disp);
-      emit_line("]");
+    while (ai < extra) {
+      src_disp = (nargs - 1 - (8 + ai)) * 16 + stack_arg_space;
+      emit_s("\tldr\tx9, [sp, #"); emit_num(src_disp); emit_line("]");
+      emit_s("\tstr\tx9, [sp, #"); emit_num(ai * 8); emit_line("]");
       ai++;
     }
-    emit_s("\tadd\tsp, sp, #");
-    emit_num(nargs * 16);
-    emit_ch('\n');
-    emit_s("\tbl\t_");
-    emit_line(name);
+    ai = 0;
+    while (ai < reg_nargs) {
+      disp = (nargs - 1 - ai) * 16 + stack_arg_space;
+      emit_s("\tldr\tx"); emit_num(ai); emit_s(", [sp, #"); emit_num(disp); emit_line("]");
+      ai++;
+    }
+    emit_s("\tbl\t_"); emit_line(name);
+    if (stack_arg_space > 0) {
+      emit_s("\tadd\tsp, sp, #"); emit_num(stack_arg_space); emit_ch('\n');
+    }
+    if (nargs > 0) {
+      emit_s("\tadd\tsp, sp, #"); emit_num(nargs * 16); emit_ch('\n');
+    }
     if (func_returns_ptr(name) == 0) {
       emit_line("\tsxtw\tx0, w0");
     }
@@ -3415,16 +3884,26 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
     int base_off = 0;
     int elem_off = 0;
     int k = 0;
+    int *vd_di = 0;
+    int vd_pos_idx = 0;
+    int vd_target = 0;
     while (i < st->ndecls) {
       struct VarDecl *vd = st->decls[i];
+      // Skip static locals (init handled in .data section)
+      if (vd->is_static) { i++; continue; }
       // Struct initializer: struct Foo x = {a, b, c};
       if (vd->stype != 0 && vd->is_ptr == 0 && vd->arr_size < 0) {
         if (vd->init != 0 && vd->init->kind == ND_INITLIST) {
           base_off = cg_find_slot(vd->name);
+          vd_di = vd->init->desig;
+          vd_pos_idx = 0;
           k = 0;
           while (k < vd->init->nargs) {
             gen_value(vd->init->args[k]);
-            elem_off = base_off - k * 8;
+            vd_target = vd_pos_idx;
+            if (vd_di != 0 && vd_di[k] >= 0) { vd_target = vd_di[k]; }
+            vd_pos_idx = vd_target + 1;
+            elem_off = base_off - vd_target * 8;
             if (elem_off <= 255) {
               emit_s("\tstr\tx0, [x29, #-");
               emit_num(elem_off);
@@ -3445,10 +3924,15 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
       if (vd->arr_size >= 0) {
         if (vd->init != 0 && vd->init->kind == ND_INITLIST) {
           base_off = cg_find_slot(vd->name);
+          vd_di = vd->init->desig;
+          vd_pos_idx = 0;
           k = 0;
           while (k < vd->init->nargs) {
             gen_value(vd->init->args[k]);
-            elem_off = base_off - k * 8;
+            vd_target = vd_pos_idx;
+            if (vd_di != 0 && vd_di[k] >= 0) { vd_target = vd_di[k]; }
+            vd_pos_idx = vd_target + 1;
+            elem_off = base_off - vd_target * 8;
             if (elem_off <= 255) {
               emit_s("\tstr\tx0, [x29, #-");
               emit_num(elem_off);
@@ -3704,8 +4188,10 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
 }
 
 int gen_func(struct FuncDef *f) {
-  layout_func(f);
   cg_cur_func_name = f->name;
+  cg_cl_counter = 0;
+  cg_cl_gen_counter = 0;
+  layout_func(f);
   int *ret_label = cg_new_label("ret");
 
   emit_ch('\n');
@@ -3727,7 +4213,7 @@ int gen_func(struct FuncDef *f) {
     }
   }
 
-  for (int i = 0; i < f->nparams; i++) {
+  for (int i = 0; i < f->nparams && i < 8; i++) {
     int off = cg_find_slot(f->params[i]);
     if (off <= 255) {
       emit_s("\tstr\tx");
@@ -3745,6 +4231,7 @@ int gen_func(struct FuncDef *f) {
       emit_line(", [x9]");
     }
   }
+  // Params 8+ are already on stack at [x29+16], [x29+24], etc.
 
   gen_block(f->body, f->nbody, ret_label);
 
@@ -3777,6 +4264,7 @@ int codegen(struct Program *prog) {
   nloop = 0;
   ncg_s = 0;
   n_ptr_ret = 0;
+  nsl = 0;
 
   // Register ptr-returning functions from prototypes
   int pi = 0;
@@ -3826,13 +4314,34 @@ int codegen(struct Program *prog) {
 
   // Register struct/union definitions
   int i = 0;
+  struct SDef *sd = 0;
   while (i < prog->nstructs) {
-    struct SDef *sd = prog->structs[i];
+    sd = prog->structs[i];
     cg_sname[ncg_s] = sd->name;
     cg_sfields[ncg_s] = sd->fields;
     cg_sfield_types[ncg_s] = sd->field_types;
     cg_snfields[ncg_s] = sd->nfields;
     cg_s_is_union[ncg_s] = sd->is_union;
+    cg_s_bw[ncg_s] = sd->bit_widths;
+    cg_s_bo[ncg_s] = sd->bit_offsets;
+    cg_s_wi[ncg_s] = sd->word_indices;
+    cg_s_nw[ncg_s] = sd->nwords;
+    ncg_s++;
+    i++;
+  }
+  // Register inline anonymous structs
+  i = 0;
+  while (i < ninline_sdefs) {
+    sd = inline_sdefs[i];
+    cg_sname[ncg_s] = sd->name;
+    cg_sfields[ncg_s] = sd->fields;
+    cg_sfield_types[ncg_s] = sd->field_types;
+    cg_snfields[ncg_s] = sd->nfields;
+    cg_s_is_union[ncg_s] = sd->is_union;
+    cg_s_bw[ncg_s] = sd->bit_widths;
+    cg_s_bo[ncg_s] = sd->bit_offsets;
+    cg_s_wi[ncg_s] = sd->word_indices;
+    cg_s_nw[ncg_s] = sd->nwords;
     ncg_s++;
     i++;
   }
@@ -3925,6 +4434,26 @@ int codegen(struct Program *prog) {
         emit_s("\t.comm\t_");
         emit_s(gd->name);
         emit_line(", 8, 3");
+      }
+      i++;
+    }
+  }
+
+  // Emit static local variables
+  if (nsl > 0) {
+    emit_ch('\n');
+    emit_line("\t.data");
+    i = 0;
+    while (i < nsl) {
+      emit_line("\t.p2align\t3");
+      emit_s(sl_labels[i]);
+      emit_line(":");
+      if (sl_has_init[i]) {
+        emit_s("\t.quad\t");
+        emit_num(sl_init_vals[i]);
+        emit_ch('\n');
+      } else {
+        emit_line("\t.quad\t0");
       }
       i++;
     }
