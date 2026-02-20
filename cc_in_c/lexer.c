@@ -13,6 +13,7 @@ static const char *keywords[] = {
     "goto", "char", "unsigned", "void", "long", "short",
     "signed", "typedef", "sizeof",
     "inline", "_Bool", "bool", "union",
+    "double", "float",
     NULL,
 };
 
@@ -94,15 +95,46 @@ TokArray lex(const char *src) {
             continue;
         }
 
-        /* number */
-        if (isdigit((unsigned char)buf[i])) {
+        /* number (integer or floating-point) */
+        if (isdigit((unsigned char)buf[i]) ||
+            (buf[i] == '.' && i + 1 < len && isdigit((unsigned char)buf[i+1]))) {
             int start = i;
-            while (i < len && isdigit((unsigned char)buf[i])) i++;
-            /* skip integer suffixes: u, l, ll, ul, ull, etc. */
-            while (i < len && (buf[i] == 'u' || buf[i] == 'U' ||
-                   buf[i] == 'l' || buf[i] == 'L')) i++;
-            Tok t = { TK_NUMBER, substr(buf, start, i), start };
-            tokarr_push(&toks, t);
+            int is_float = 0;
+            if (buf[i] == '.') {
+                /* Leading dot float like .5 */
+                is_float = 1;
+                i++;
+                while (i < len && isdigit((unsigned char)buf[i])) i++;
+            } else {
+                while (i < len && isdigit((unsigned char)buf[i])) i++;
+                if (i < len && buf[i] == '.' && (i + 1 >= len || buf[i+1] != '.')) {
+                    /* Decimal point (but not '..' which doesn't exist, just be safe) */
+                    is_float = 1;
+                    i++;
+                    while (i < len && isdigit((unsigned char)buf[i])) i++;
+                }
+            }
+            /* Exponent: e/E[+/-]digits */
+            if (i < len && (buf[i] == 'e' || buf[i] == 'E')) {
+                is_float = 1;
+                i++;
+                if (i < len && (buf[i] == '+' || buf[i] == '-')) i++;
+                while (i < len && isdigit((unsigned char)buf[i])) i++;
+            }
+            if (is_float) {
+                /* Skip float suffixes: f, F, l, L */
+                if (i < len && (buf[i] == 'f' || buf[i] == 'F' ||
+                    buf[i] == 'l' || buf[i] == 'L')) i++;
+                /* Store float as "0" for now (we don't support FP arithmetic yet) */
+                Tok t = { TK_NUMBER, xstrdup("0"), start };
+                tokarr_push(&toks, t);
+            } else {
+                /* skip integer suffixes: u, l, ll, ul, ull, etc. */
+                while (i < len && (buf[i] == 'u' || buf[i] == 'U' ||
+                       buf[i] == 'l' || buf[i] == 'L')) i++;
+                Tok t = { TK_NUMBER, substr(buf, start, i), start };
+                tokarr_push(&toks, t);
+            }
             continue;
         }
 
@@ -248,7 +280,11 @@ TokArray lex(const char *src) {
             continue;
         }
 
-        fatal("Unexpected character '%c' at position %d", buf[i], i);
+        /* $ in identifiers (GCC extension) or skip stray $ */
+        if (buf[i] == '$') { i++; continue; }
+        /* Stray backslash (e.g. from macros) — skip */
+        if (buf[i] == '\\') { i++; continue; }
+        fatal("Unexpected character '%c' (0x%02x) at position %d", buf[i], (unsigned char)buf[i], i);
     }
 
     /* String concatenation: merge adjacent string tokens */

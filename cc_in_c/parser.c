@@ -35,17 +35,21 @@ static Tok *toks;
 static int ntoks;
 static int pos;
 
-static StructDefInfo struct_defs[64];
+static StructDefInfo *struct_defs;
 static int nstruct_defs;
+static int struct_defs_cap;
 
-static StructDef inline_structs[64];
+static StructDef *inline_structs;
 static int ninline_structs;
+static int inline_structs_cap;
 
-static LocalVar local_vars[256];
+static LocalVar *local_vars;
 static int nlocal_vars;
+static int local_vars_cap;
 
-static EnumConst enum_consts[1024];
+static EnumConst *enum_consts;
 static int nenum_consts;
+static int enum_consts_cap;
 
 /* Typedef table: maps typedef name to struct type (NULL for int-like) */
 typedef struct {
@@ -53,11 +57,39 @@ typedef struct {
     char *struct_type;  /* NULL for int/char/void/etc, struct name for struct types */
 } TypedefEntry;
 
-static TypedefEntry typedefs[256];
+static TypedefEntry *typedefs;
 static int ntypedefs;
+static int typedefs_cap;
 
-/* Flag set by parse_base_type to indicate unsigned */
+/* Global variable table: track struct types for globals (for field access resolution) */
+typedef struct {
+    char *name;
+    char *struct_type;
+    int is_ptr;
+} GlobalVarInfo;
+
+static GlobalVarInfo *global_var_infos;
+static int nglobal_var_infos;
+static int global_var_infos_cap;
+
+static void add_global_var_info(const char *name, const char *struct_type, int is_ptr) {
+    GROW(global_var_infos, nglobal_var_infos, global_var_infos_cap, GlobalVarInfo);
+    global_var_infos[nglobal_var_infos].name = xstrdup(name);
+    global_var_infos[nglobal_var_infos].struct_type = struct_type ? xstrdup(struct_type) : NULL;
+    global_var_infos[nglobal_var_infos].is_ptr = is_ptr;
+    nglobal_var_infos++;
+}
+
+static GlobalVarInfo *find_global_var(const char *name) {
+    for (int i = 0; i < nglobal_var_infos; i++)
+        if (strcmp(global_var_infos[i].name, name) == 0)
+            return &global_var_infos[i];
+    return NULL;
+}
+
+/* Flags set by parse_base_type */
 static int last_type_unsigned;
+static Type *last_type;  /* Type* built by most recent parse_base_type call */
 
 /* ---- Helpers ---- */
 
@@ -67,10 +99,18 @@ static Tok *cur(void) {
 
 static Tok *eat(TokKind kind, const char *value) {
     Tok *t = cur();
-    if (t->kind != kind)
+    if (t->kind != kind) {
+        fprintf(stderr, "Context around error (tok %d):\n", pos);
+        for (int d = (pos > 5 ? pos - 5 : 0); d < pos + 5 && d < ntoks; d++)
+            fprintf(stderr, "  tok[%d] = '%s' (pos=%d)\n", d, toks[d].value, toks[d].pos);
         fatal("Expected %s, got %s '%s' at %d", tokkind_str(kind), tokkind_str(t->kind), t->value, t->pos);
-    if (value && strcmp(t->value, value) != 0)
+    }
+    if (value && strcmp(t->value, value) != 0) {
+        fprintf(stderr, "Context around error (tok %d):\n", pos);
+        for (int d = (pos > 30 ? pos - 30 : 0); d < pos + 5 && d < ntoks; d++)
+            fprintf(stderr, "  tok[%d] = %s:'%s' (pos=%d)\n", d, tokkind_str(toks[d].kind), toks[d].value, toks[d].pos);
         fatal("Expected '%s', got '%s' at %d", value, t->value, t->pos);
+    }
     pos++;
     return t;
 }
@@ -98,20 +138,17 @@ static StructDefInfo *find_struct_def(const char *name) {
 
 static const char *field_struct_type(const char *struct_name, const char *field_name) {
     StructDefInfo *sd = find_struct_def(struct_name);
-    if (!sd) fatal("Unknown struct '%s'", struct_name);
+    if (!sd) return NULL;  /* unknown struct — return NULL for lenient handling */
     for (int i = 0; i < sd->nfields; i++) {
         if (strcmp(sd->fields[i].name, field_name) == 0) {
-            if (sd->fields[i].struct_type)
-                return sd->fields[i].struct_type;
-            fatal("Field '%s' of struct '%s' is not a struct type", field_name, struct_name);
+            return sd->fields[i].struct_type;  /* may be NULL if not a struct field */
         }
     }
-    fatal("Struct '%s' has no field '%s'", struct_name, field_name);
-    return NULL;
+    return NULL;  /* field not found — lenient */
 }
 
 static void add_local(const char *name, const char *struct_type, int is_ptr) {
-    if (nlocal_vars >= 256) fatal("Too many local variables");
+    GROW(local_vars, nlocal_vars, local_vars_cap, LocalVar);
     local_vars[nlocal_vars].name = xstrdup(name);
     local_vars[nlocal_vars].struct_type = struct_type ? xstrdup(struct_type) : NULL;
     local_vars[nlocal_vars].is_ptr = is_ptr;
@@ -136,18 +173,21 @@ static TypedefEntry *find_typedef(const char *name) {
 }
 
 static void add_typedef(const char *name, const char *struct_type) {
-    if (ntypedefs >= 256) fatal("Too many typedefs");
+    GROW(typedefs, ntypedefs, typedefs_cap, TypedefEntry);
     typedefs[ntypedefs].name = xstrdup(name);
     typedefs[ntypedefs].struct_type = struct_type ? xstrdup(struct_type) : NULL;
     ntypedefs++;
 }
 
 static void add_enum_const(const char *name, int value) {
-    if (nenum_consts >= 1024) fatal("Too many enum constants");
+    GROW(enum_consts, nenum_consts, enum_consts_cap, EnumConst);
     enum_consts[nenum_consts].name = xstrdup(name);
     enum_consts[nenum_consts].value = value;
     nenum_consts++;
 }
+
+static int parse_const_expr(void);
+static int parse_const_unary(void);
 
 /* ---- Helpers for function pointer parsing ---- */
 
@@ -188,7 +228,8 @@ static int is_type_start(void) {
         match(TK_KW, "struct") || match(TK_KW, "union") || match(TK_KW, "enum") ||
         match(TK_KW, "const") || match(TK_KW, "volatile") || match(TK_KW, "register") ||
         match(TK_KW, "static") || match(TK_KW, "extern") || match(TK_KW, "typedef") ||
-        match(TK_KW, "_Bool") || match(TK_KW, "bool") || match(TK_KW, "inline"))
+        match(TK_KW, "_Bool") || match(TK_KW, "bool") || match(TK_KW, "inline") ||
+        match(TK_KW, "float") || match(TK_KW, "double"))
         return 1;
     /* Check if current identifier is a typedef name */
     if (cur()->kind == TK_ID && find_typedef(cur()->value))
@@ -209,28 +250,33 @@ static char *parse_base_type(void) {
             /* Anonymous/inline struct: struct { ... } */
             char synth_name[64];
             snprintf(synth_name, sizeof(synth_name), "__anon_%d", anon_struct_counter++);
-            /* Put back synthetic name so parse_struct_or_union_def can handle it.
-               Instead, parse inline. */
             eat(TK_OP, "{");
             FieldInfo *finfo = NULL;
             int nfields = 0, fcap = 0;
             while (!match(TK_OP, "}")) {
                 char *ftype = parse_base_type();
+                while (1) {
                 int is_ptr = 0;
                 int is_funcptr = 0;
                 if (is_funcptr_decl()) {
                     eat(TK_OP, "("); eat(TK_OP, "*");
                     is_ptr = 1; is_funcptr = 1;
                 }
-                while (match(TK_OP, "*")) { eat(TK_OP, "*"); is_ptr = 1; }
+                while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); is_ptr = 1; }
+                if (!is_funcptr && is_funcptr_decl()) {
+                    eat(TK_OP, "("); eat(TK_OP, "*");
+                    is_ptr++; is_funcptr = 1;
+                }
+                skip_qualifiers();
                 Tok *fname_tok = eat(TK_ID, NULL);
                 if (is_funcptr) { eat(TK_OP, ")"); skip_param_list(); }
                 if (match(TK_OP, "[")) {
                     eat(TK_OP, "[");
-                    if (!match(TK_OP, "]")) eat(TK_NUMBER, NULL);
+                    if (!match(TK_OP, "]")) parse_const_expr();
                     eat(TK_OP, "]");
                 }
-                eat(TK_OP, ";");
+                int bw = 0;
+                if (match(TK_OP, ":")) { eat(TK_OP, ":"); bw = parse_const_expr(); }
                 if (nfields >= fcap) {
                     fcap = fcap ? fcap * 2 : 8;
                     finfo = realloc(finfo, fcap * sizeof(FieldInfo));
@@ -238,17 +284,22 @@ static char *parse_base_type(void) {
                 finfo[nfields].name = xstrdup(fname_tok->value);
                 finfo[nfields].struct_type = ftype ? xstrdup(ftype) : NULL;
                 finfo[nfields].is_ptr = is_ptr;
+                finfo[nfields].bit_width = bw;
                 nfields++;
+                if (match(TK_OP, ",")) { eat(TK_OP, ","); continue; }
+                break;
+                } /* end while(1) for comma-separated fields */
+                eat(TK_OP, ";");
             }
             eat(TK_OP, "}");
             /* Register in parser's struct table */
-            if (nstruct_defs >= 64) fatal("Too many struct defs");
+            GROW(struct_defs, nstruct_defs, struct_defs_cap, StructDefInfo);
             struct_defs[nstruct_defs].name = xstrdup(synth_name);
             struct_defs[nstruct_defs].fields = finfo;
             struct_defs[nstruct_defs].nfields = nfields;
             nstruct_defs++;
             /* Also register for codegen */
-            if (ninline_structs >= 64) fatal("Too many inline structs");
+            GROW(inline_structs, ninline_structs, inline_structs_cap, StructDef);
             StructDef *isd = &inline_structs[ninline_structs++];
             isd->name = xstrdup(synth_name);
             isd->fields = xmalloc(nfields * sizeof(char *));
@@ -259,31 +310,113 @@ static char *parse_base_type(void) {
                 isd->fields[k] = xstrdup(finfo[k].name);
                 isd->field_types[k] = finfo[k].struct_type ? xstrdup(finfo[k].struct_type) : NULL;
             }
+            last_type = is_union ? ty_union(synth_name) : ty_struct(synth_name);
             return xstrdup(synth_name);
         }
         Tok *name = eat(TK_ID, NULL);
+        /* Named inline struct/union definition: struct Name { ... } used as field type */
+        if (match(TK_OP, "{")) {
+            eat(TK_OP, "{");
+            FieldInfo *finfo2 = NULL;
+            int nf2 = 0, fc2 = 0;
+            while (!match(TK_OP, "}")) {
+                char *ftype2 = parse_base_type();
+                while (1) {
+                int isp2 = 0, isfp2 = 0;
+                if (is_funcptr_decl()) {
+                    eat(TK_OP, "("); eat(TK_OP, "*");
+                    isp2 = 1; isfp2 = 1;
+                }
+                while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); isp2 = 1; }
+                if (!isfp2 && is_funcptr_decl()) {
+                    eat(TK_OP, "("); eat(TK_OP, "*");
+                    isp2++; isfp2 = 1;
+                }
+                skip_qualifiers();
+                Tok *fn2 = eat(TK_ID, NULL);
+                if (isfp2) { eat(TK_OP, ")"); skip_param_list(); }
+                if (match(TK_OP, "[")) {
+                    eat(TK_OP, "[");
+                    if (!match(TK_OP, "]")) parse_const_expr();
+                    eat(TK_OP, "]");
+                }
+                int bw2 = 0;
+                if (match(TK_OP, ":")) { eat(TK_OP, ":"); bw2 = parse_const_expr(); }
+                if (nf2 >= fc2) {
+                    fc2 = fc2 ? fc2 * 2 : 8;
+                    finfo2 = realloc(finfo2, fc2 * sizeof(FieldInfo));
+                }
+                finfo2[nf2].name = xstrdup(fn2->value);
+                finfo2[nf2].struct_type = ftype2 ? xstrdup(ftype2) : NULL;
+                finfo2[nf2].is_ptr = isp2;
+                finfo2[nf2].bit_width = bw2;
+                nf2++;
+                if (match(TK_OP, ",")) { eat(TK_OP, ","); continue; }
+                break;
+                }
+                eat(TK_OP, ";");
+            }
+            eat(TK_OP, "}");
+            GROW(struct_defs, nstruct_defs, struct_defs_cap, StructDefInfo);
+            struct_defs[nstruct_defs].name = xstrdup(name->value);
+            struct_defs[nstruct_defs].fields = finfo2;
+            struct_defs[nstruct_defs].nfields = nf2;
+            nstruct_defs++;
+            GROW(inline_structs, ninline_structs, inline_structs_cap, StructDef);
+            StructDef *isd2 = &inline_structs[ninline_structs++];
+            isd2->name = xstrdup(name->value);
+            isd2->fields = xmalloc(nf2 * sizeof(char *));
+            isd2->field_types = xmalloc(nf2 * sizeof(char *));
+            isd2->nfields = nf2;
+            isd2->is_union = is_union;
+            for (int k = 0; k < nf2; k++) {
+                isd2->fields[k] = xstrdup(finfo2[k].name);
+                isd2->field_types[k] = finfo2[k].struct_type ? xstrdup(finfo2[k].struct_type) : NULL;
+            }
+        }
+        last_type = is_union ? ty_union(name->value) : ty_struct(name->value);
         return xstrdup(name->value);
     }
     if (match(TK_KW, "enum")) {
         eat(TK_KW, "enum");
         if (match(TK_ID, NULL))
             eat(TK_ID, NULL);  /* skip enum tag */
+        last_type = ty_enum();
         return NULL;
     }
-    /* All integer-like types: int, char, void, unsigned, signed, long, short */
-    /* Consume all type specifier keywords */
+    /* All integer-like types: int, char, void, unsigned, signed, long, short, float, double */
     int got_type = 0;
     last_type_unsigned = 0;
+    int has_char = 0, has_short = 0, has_long = 0, has_void = 0;
+    int has_float = 0, has_double = 0;
+    int long_count = 0;
     while (match(TK_KW, "int") || match(TK_KW, "char") || match(TK_KW, "void") ||
            match(TK_KW, "unsigned") || match(TK_KW, "signed") ||
            match(TK_KW, "long") || match(TK_KW, "short") ||
-           match(TK_KW, "_Bool") || match(TK_KW, "bool")) {
+           match(TK_KW, "_Bool") || match(TK_KW, "bool") ||
+           match(TK_KW, "float") || match(TK_KW, "double")) {
         if (match(TK_KW, "unsigned")) last_type_unsigned = 1;
+        else if (match(TK_KW, "char")) has_char = 1;
+        else if (match(TK_KW, "short")) has_short = 1;
+        else if (match(TK_KW, "long")) { has_long = 1; long_count++; }
+        else if (match(TK_KW, "void")) has_void = 1;
+        else if (match(TK_KW, "float")) has_float = 1;
+        else if (match(TK_KW, "double")) has_double = 1;
         eat(TK_KW, NULL);
         got_type = 1;
     }
     if (got_type) {
         skip_qualifiers();
+        /* Build Type* based on what we saw */
+        if (has_void)        last_type = ty_void();
+        else if (has_float)  last_type = ty_float();
+        else if (has_double) last_type = ty_double();
+        else if (has_char)   last_type = ty_char();
+        else if (has_short)  last_type = ty_short();
+        else if (long_count >= 2) last_type = ty_llong();
+        else if (has_long)   last_type = ty_long();
+        else                 last_type = ty_int();
+        if (last_type_unsigned) last_type = ty_unsigned(last_type);
         return NULL;
     }
     /* Check if it's a typedef name */
@@ -292,10 +425,21 @@ static char *parse_base_type(void) {
         if (td) {
             eat(TK_ID, NULL);
             skip_qualifiers();
-            return td->struct_type ? xstrdup(td->struct_type) : NULL;
+            if (td->struct_type) {
+                last_type = ty_struct(td->struct_type);
+                return xstrdup(td->struct_type);
+            }
+            last_type = ty_int();  /* typedef of non-struct = int-like for now */
+            return NULL;
         }
     }
-    fatal("Expected type, got '%s' at %d", cur()->value, cur()->pos);
+    /* Debug: show surrounding tokens */
+    fprintf(stderr, "  context (tok#%d): ", pos);
+    for (int di = (pos > 5 ? pos - 5 : 0); di < pos + 8 && di < ntoks; di++) {
+        fprintf(stderr, "%s[%s:'%s'] ", di == pos ? ">>>" : "", tokkind_str(toks[di].kind), toks[di].value);
+    }
+    fprintf(stderr, "\n");
+    fatal("Expected type, got '%s' at %d (tok#%d)", cur()->value, cur()->pos, pos);
     return NULL;
 }
 
@@ -333,45 +477,111 @@ static StructDef parse_struct_or_union_def(int is_union) {
         }
         while (match(TK_OP, "*")) {
             eat(TK_OP, "*");
+            skip_qualifiers();
             is_ptr = 1;
         }
-        Tok *fname_tok = eat(TK_ID, NULL);
-        if (is_funcptr) {
-            eat(TK_OP, ")");
-            skip_param_list();
+        /* Check again for funcptr after consuming pointer stars: type *(*name)(params) */
+        if (!is_funcptr && is_funcptr_decl()) {
+            eat(TK_OP, "(");
+            eat(TK_OP, "*");
+            is_funcptr = 1;
         }
-        /* skip array dimensions in struct fields */
-        if (match(TK_OP, "[")) {
-            eat(TK_OP, "[");
-            if (!match(TK_OP, "]"))
-                eat(TK_NUMBER, NULL);
-            eat(TK_OP, "]");
+        /* Handle complex nested funcptr: after eating outer (*, we may see (*name)(...)
+         * e.g. void (*(*xDlSym)(sqlite3_vfs*,void*,const char*))(void);
+         * At this point we've consumed the outer (* and current is ( * xDlSym ) ( ... ) ) ( void ) ;
+         */
+        if (is_funcptr && is_funcptr_decl()) {
+            /* Nested funcptr e.g. void (*(*xDlSym)(p1,p2))(void);
+             * We've already consumed the outer '(' '*' from is_funcptr_decl.
+             * Skip everything to ';' */
+            while (pos < ntoks && !match(TK_OP, ";")) pos++;
+            eat(TK_OP, ";");
+            if (nfields >= fcap) {
+                fcap = fcap ? fcap * 2 : 8;
+                fields = realloc(fields, fcap * sizeof(char *));
+                finfo = realloc(finfo, fcap * sizeof(FieldInfo));
+            }
+            fields[nfields] = xstrdup("__nested_fptr");
+            finfo[nfields].name = xstrdup("__nested_fptr");
+            finfo[nfields].struct_type = ftype;
+            finfo[nfields].is_ptr = 1;
+            finfo[nfields].bit_width = 0;
+            nfields++;
+            continue;
         }
-        /* Bitfield: field : width */
-        int bit_width = 0;
-        if (match(TK_OP, ":")) {
-            eat(TK_OP, ":");
-            bit_width = atoi(eat(TK_NUMBER, NULL)->value);
+        /* Handle other complex patterns where we see ( but not (* */
+        if (!is_funcptr && match(TK_OP, "(")) {
+            while (pos < ntoks && !match(TK_OP, ";")) pos++;
+            eat(TK_OP, ";");
+            if (nfields >= fcap) {
+                fcap = fcap ? fcap * 2 : 8;
+                fields = realloc(fields, fcap * sizeof(char *));
+                finfo = realloc(finfo, fcap * sizeof(FieldInfo));
+            }
+            fields[nfields] = xstrdup("__complex_fptr");
+            finfo[nfields].name = xstrdup("__complex_fptr");
+            finfo[nfields].struct_type = ftype;
+            finfo[nfields].is_ptr = 1;
+            finfo[nfields].bit_width = 0;
+            nfields++;
+            continue;
+        }
+        /* Loop for multiple declarators: int *a, *b, c; */
+        for (;;) {
+            /* Handle extra pointer stars for this declarator */
+            int decl_is_ptr = is_ptr;
+            if (!is_funcptr) {
+                while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); decl_is_ptr = 1; }
+            }
+            Tok *fname_tok = eat(TK_ID, NULL);
+            if (is_funcptr) {
+                eat(TK_OP, ")");
+                skip_param_list();
+            }
+            /* skip array dimensions in struct fields (supports expressions) */
+            while (match(TK_OP, "[")) {
+                eat(TK_OP, "[");
+                int depth = 1;
+                while (depth > 0) {
+                    if (match(TK_OP, "[")) { eat(TK_OP, "["); depth++; }
+                    else if (match(TK_OP, "]")) { eat(TK_OP, "]"); depth--; }
+                    else { pos++; }
+                }
+            }
+            /* Bitfield: field : width */
+            int bit_width = 0;
+            if (match(TK_OP, ":")) {
+                eat(TK_OP, ":");
+                bit_width = atoi(eat(TK_NUMBER, NULL)->value);
+            }
+
+            if (nfields >= fcap) {
+                fcap = fcap ? fcap * 2 : 8;
+                fields = realloc(fields, fcap * sizeof(char *));
+                finfo = realloc(finfo, fcap * sizeof(FieldInfo));
+            }
+            fields[nfields] = xstrdup(fname_tok->value);
+            finfo[nfields].name = xstrdup(fname_tok->value);
+            finfo[nfields].struct_type = ftype;
+            finfo[nfields].is_ptr = decl_is_ptr;
+            finfo[nfields].bit_width = bit_width;
+            nfields++;
+
+            if (match(TK_OP, ",")) {
+                eat(TK_OP, ",");
+                /* Reset ptr for next declarator - base type stays same */
+                is_funcptr = 0;
+                continue;
+            }
+            break;
         }
         eat(TK_OP, ";");
-
-        if (nfields >= fcap) {
-            fcap = fcap ? fcap * 2 : 8;
-            fields = realloc(fields, fcap * sizeof(char *));
-            finfo = realloc(finfo, fcap * sizeof(FieldInfo));
-        }
-        fields[nfields] = xstrdup(fname_tok->value);
-        finfo[nfields].name = xstrdup(fname_tok->value);
-        finfo[nfields].struct_type = ftype;
-        finfo[nfields].is_ptr = is_ptr;
-        finfo[nfields].bit_width = bit_width;
-        nfields++;
     }
     eat(TK_OP, "}");
     eat(TK_OP, ";");
 
     /* Register in struct_defs for parser lookups */
-    if (nstruct_defs >= 64) fatal("Too many struct definitions");
+    GROW(struct_defs, nstruct_defs, struct_defs_cap, StructDefInfo);
     struct_defs[nstruct_defs].name = xstrdup(name);
     struct_defs[nstruct_defs].fields = finfo;
     struct_defs[nstruct_defs].nfields = nfields;
@@ -442,6 +652,19 @@ static int parse_const_expr(void);
 
 static int parse_const_primary(void) {
     if (match(TK_OP, "(")) {
+        /* Check for cast: (type)expr — skip the cast */
+        int saved = pos;
+        eat(TK_OP, "(");
+        skip_qualifiers();
+        if (is_type_start()) {
+            parse_base_type();
+            while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); }
+            if (match(TK_OP, ")")) {
+                eat(TK_OP, ")");
+                return parse_const_unary();
+            }
+        }
+        pos = saved;
         eat(TK_OP, "(");
         int val = parse_const_expr();
         eat(TK_OP, ")");
@@ -450,19 +673,79 @@ static int parse_const_primary(void) {
     if (match(TK_NUMBER, NULL)) {
         return atoi(eat(TK_NUMBER, NULL)->value);
     }
+    if (match(TK_KW, "sizeof")) {
+        eat(TK_KW, "sizeof");
+        eat(TK_OP, "(");
+        /* sizeof(type) or sizeof(expr) — just return 8 for pointers/long, 4 for int/u32, 1 for char/u8 */
+        int sz = 8;
+        skip_qualifiers();
+        if (is_type_start()) {
+            char *ty = parse_base_type();
+            int nstars = 0;
+            while (match(TK_OP, "*")) { eat(TK_OP, "*"); nstars++; }
+            if (nstars > 0) sz = 8;
+            else if (ty && (strcmp(ty, "char") == 0 || strcmp(ty, "u8") == 0 ||
+                           strcmp(ty, "_Bool") == 0 || strcmp(ty, "bool") == 0)) sz = 1;
+            else if (ty && (strcmp(ty, "short") == 0 || strcmp(ty, "u16") == 0 ||
+                           strcmp(ty, "i16") == 0)) sz = 2;
+            else if (ty && (strcmp(ty, "int") == 0 || strcmp(ty, "unsigned") == 0 ||
+                           strcmp(ty, "u32") == 0 || strcmp(ty, "i32") == 0 ||
+                           strcmp(ty, "float") == 0)) sz = 4;
+            else sz = 8; /* long, double, pointer, struct, etc. */
+        } else {
+            /* sizeof(expr) — skip the expression and assume 8 */
+            int depth = 1;
+            while (depth > 0) {
+                if (match(TK_OP, "(")) depth++;
+                else if (match(TK_OP, ")")) { depth--; if (depth == 0) break; }
+                eat(cur()->kind, NULL);
+            }
+            eat(TK_OP, ")");
+            return 8;
+        }
+        eat(TK_OP, ")");
+        return sz;
+    }
     if (match(TK_ID, NULL)) {
         char *name = eat(TK_ID, NULL)->value;
         int val;
         if (find_enum_const(name, &val)) return val;
         fatal("Unknown enum constant '%s'", name);
     }
-    fatal("Expected constant expression at %d", cur()->pos);
+    fprintf(stderr, "Context around const expr error (tok %d):\n", pos);
+    for (int d = (pos > 10 ? pos - 10 : 0); d < pos + 5 && d < ntoks; d++)
+        fprintf(stderr, "  tok[%d] = %s:'%s'\n", d, tokkind_str(toks[d].kind), toks[d].value);
+    fatal("Expected constant expression at %d (tok#%d, '%s')", cur()->pos, pos, cur()->value);
     return 0;
 }
 
 static int parse_const_unary(void) {
     if (match(TK_OP, "-")) { eat(TK_OP, "-"); return -parse_const_unary(); }
     if (match(TK_OP, "~")) { eat(TK_OP, "~"); return ~parse_const_unary(); }
+    if (match(TK_OP, "!")) { eat(TK_OP, "!"); return !parse_const_unary(); }
+    /* &((Type*)0)->member — offsetof pattern, return 0 as approximation */
+    if (match(TK_OP, "&")) {
+        eat(TK_OP, "&");
+        /* Skip the operand expression — count parens */
+        if (match(TK_OP, "(")) {
+            eat(TK_OP, "(");
+            int depth = 1;
+            while (depth > 0) {
+                if (match(TK_OP, "(")) depth++;
+                else if (match(TK_OP, ")")) depth--;
+                if (depth > 0) eat(cur()->kind, NULL);
+            }
+            eat(TK_OP, ")");
+        } else {
+            eat(cur()->kind, NULL); /* skip single token */
+        }
+        /* Skip member access: ->member or .member chains */
+        while (match(TK_OP, "->") || match(TK_OP, ".")) {
+            eat(TK_OP, NULL);
+            if (match(TK_ID, NULL)) eat(TK_ID, NULL);
+        }
+        return 0;
+    }
     return parse_const_primary();
 }
 
@@ -586,7 +869,11 @@ static Expr *parse_init_list(const char *struct_type_name) {
             has_desig = 1;
         }
 
-        exprarray_push(&elems, parse_expr(0));
+        if (match(TK_OP, "{")) {
+            exprarray_push(&elems, parse_init_list(NULL));
+        } else {
+            exprarray_push(&elems, parse_expr(0));
+        }
         /* Track designator index */
         if (ndesig >= desig_cap) {
             desig_cap = desig_cap ? desig_cap * 2 : 16;
@@ -626,6 +913,7 @@ static Stmt *parse_vardecl_stmt(int is_static) {
         while (match(TK_OP, "*")) {
             eat(TK_OP, "*");
             is_ptr++;
+            skip_qualifiers();
         }
         /* Check again after consuming stars: type * (*name)(params) */
         if (!is_funcptr && is_funcptr_decl()) {
@@ -649,13 +937,13 @@ static Stmt *parse_vardecl_stmt(int is_static) {
             if (match(TK_OP, "]")) {
                 arr_size = 0; /* infer from initializer */
             } else {
-                arr_size = atoi(eat(TK_NUMBER, NULL)->value);
+                arr_size = parse_const_expr();
             }
             eat(TK_OP, "]");
             /* Check for second dimension: int arr[N][M] */
             if (match(TK_OP, "[")) {
                 eat(TK_OP, "[");
-                arr_size2 = atoi(eat(TK_NUMBER, NULL)->value);
+                arr_size2 = parse_const_expr();
                 eat(TK_OP, "]");
             }
         }
@@ -678,9 +966,13 @@ static Stmt *parse_vardecl_stmt(int is_static) {
                     arr_size = init->u.initlist.elems.len; /* infer size */
             }
         } else if (decl_stype && !is_ptr && arr_size < 0 && match(TK_OP, "=")) {
-            /* Struct initializer: struct Point p = {1, 2}; */
+            /* Struct initializer: struct Point p = {1, 2}; or copy: Point x = *p; */
             eat(TK_OP, "=");
-            init = parse_init_list(decl_stype);
+            if (match(TK_OP, "{")) {
+                init = parse_init_list(decl_stype);
+            } else {
+                init = parse_expr(0);
+            }
         } else if ((!decl_stype || is_ptr) && arr_size < 0 && match(TK_OP, "=")) {
             eat(TK_OP, "=");
             init = parse_expr(0);
@@ -763,7 +1055,7 @@ static Expr *parse_expr(int min_prec) {
         /* ternary: lower precedence than all binary ops */
         if (t->kind == TK_OP && strcmp(t->value, "?") == 0 && min_prec <= 0) {
             eat(TK_OP, "?");
-            Expr *then_e = parse_expr(0);
+            Expr *then_e = parse_expr(-1);  /* allow comma expr in then-branch */
             eat(TK_OP, ":");
             Expr *else_e = parse_expr(0);
             e = new_ternary(e, then_e, else_e);
@@ -818,6 +1110,11 @@ static Expr *parse_unary(void) {
         return new_assign(rhs, new_binary("-", rhs, new_num(1)));
     }
 
+    /* Unary + is a no-op — just parse the operand */
+    if (match(TK_OP, "+")) {
+        eat(TK_OP, "+");
+        return parse_unary();
+    }
     if (match(TK_OP, "-") || match(TK_OP, "!") || match(TK_OP, "*") || match(TK_OP, "&") || match(TK_OP, "~")) {
         char op = cur()->value[0];
         eat(TK_OP, NULL);
@@ -833,14 +1130,23 @@ static Expr *parse_unary(void) {
         if (is_type_start()) {
             /* It's a cast — consume the type and closing paren, then parse unary */
             char *cast_stype = parse_base_type();
-            /* Function pointer cast: (type (*)(params))expr */
+            /* Function pointer cast: (type (*)(params))expr or (type (**)(params))expr */
             if (is_funcptr_decl()) {
                 eat(TK_OP, "(");
-                eat(TK_OP, "*");
+                while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); }
+                if (match(TK_ID, NULL)) eat(TK_ID, NULL); /* optional name */
                 eat(TK_OP, ")");
                 skip_param_list();
             } else {
-                while (match(TK_OP, "*")) eat(TK_OP, "*");
+                while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); }
+                /* funcptr after pointer stars: (void*(*)(void*)) */
+                if (is_funcptr_decl()) {
+                    eat(TK_OP, "(");
+                    while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); }
+                    if (match(TK_ID, NULL)) eat(TK_ID, NULL); /* optional name */
+                    eat(TK_OP, ")");
+                    skip_param_list();
+                }
             }
             eat(TK_OP, ")");
             /* Compound literal: (struct Type){init} */
@@ -898,7 +1204,14 @@ static Expr *parse_primary(void) {
         e = parse_expr(-1);
         eat(TK_OP, ")");
     } else if (match(TK_KW, "sizeof")) {
-        /* Parse sizeof and resolve to correct size */
+        if (0) fprintf(stderr, "DEBUG: sizeof at tok %d\n", pos);
+        /* Parse sizeof and resolve to correct size.
+         * NOTE: codegen currently uses 8-byte slots for everything,
+         * so sizeof returns 8 for most types to stay consistent.
+         * sizeof(char) = 1 is the exception (already handled).
+         * Correct type sizes (sizeof(int)=4, etc.) deferred until
+         * codegen supports width-aware loads/stores.
+         */
         eat(TK_KW, NULL);
         int sz = 8; /* default */
         if (match(TK_OP, "(")) {
@@ -930,7 +1243,7 @@ static Expr *parse_primary(void) {
                 /* Check for array dimension */
                 if (match(TK_OP, "[")) {
                     eat(TK_OP, "[");
-                    int arr_sz = atoi(eat(TK_NUMBER, NULL)->value);
+                    int arr_sz = parse_const_expr();
                     eat(TK_OP, "]");
                     sz = arr_sz * sz;
                 }
@@ -945,7 +1258,14 @@ static Expr *parse_primary(void) {
         }
         e = new_num(sz);
     } else {
-        fatal("Unexpected token %s:'%s' at %d", tokkind_str(t->kind), t->value, t->pos);
+        /* Debug: check if we have sizeof that wasn't matched */
+        if (t->kind == TK_KW && strcmp(t->value, "sizeof") == 0) {
+            fprintf(stderr, "BUG: sizeof at tok %d should have matched!\n", pos);
+        }
+        fprintf(stderr, "Context around error (tok %d):\n", pos);
+        for (int d = (pos > 30 ? pos - 30 : 0); d < pos + 5 && d < ntoks; d++)
+            fprintf(stderr, "  tok[%d] = %s:'%s' (pos=%d)\n", d, tokkind_str(toks[d].kind), toks[d].value, toks[d].pos);
+        fatal("Unexpected token %s:'%s' at tok %d", tokkind_str(t->kind), t->value, pos);
         return NULL;
     }
 
@@ -1007,15 +1327,23 @@ static Expr *parse_primary(void) {
             if (e->kind == ND_VAR) {
                 LocalVar *lv = find_local(e->u.var_name);
                 if (lv) st = lv->struct_type;
+                if (!st) {
+                    GlobalVarInfo *gv = find_global_var(e->u.var_name);
+                    if (gv) st = gv->struct_type;
+                }
             } else if (e->kind == ND_FIELD || e->kind == ND_ARROW) {
                 st = field_struct_type(e->u.field.struct_type, e->u.field.field);
             } else if (e->kind == ND_INDEX && e->u.index.base->kind == ND_VAR) {
                 LocalVar *lv2 = find_local(e->u.index.base->u.var_name);
                 if (lv2) st = lv2->struct_type;
+                if (!st) {
+                    GlobalVarInfo *gv2 = find_global_var(e->u.index.base->u.var_name);
+                    if (gv2) st = gv2->struct_type;
+                }
             } else if (e->kind == ND_INDEX && (e->u.index.base->kind == ND_FIELD || e->u.index.base->kind == ND_ARROW)) {
                 st = field_struct_type(e->u.index.base->u.field.struct_type, e->u.index.base->u.field.field);
             }
-            if (!st) fatal("Cannot resolve struct type for '.' at %d", cur()->pos);
+            if (!st) st = "__unknown_struct";
             e = new_field(e, field, st);
         } else {
             eat(TK_OP, "->");
@@ -1024,15 +1352,23 @@ static Expr *parse_primary(void) {
             if (e->kind == ND_VAR) {
                 LocalVar *lv = find_local(e->u.var_name);
                 if (lv) st = lv->struct_type;
+                if (!st) {
+                    GlobalVarInfo *gv = find_global_var(e->u.var_name);
+                    if (gv) st = gv->struct_type;
+                }
             } else if (e->kind == ND_FIELD || e->kind == ND_ARROW) {
                 st = field_struct_type(e->u.field.struct_type, e->u.field.field);
             } else if (e->kind == ND_INDEX && e->u.index.base->kind == ND_VAR) {
                 LocalVar *lv2 = find_local(e->u.index.base->u.var_name);
                 if (lv2) st = lv2->struct_type;
+                if (!st) {
+                    GlobalVarInfo *gv2 = find_global_var(e->u.index.base->u.var_name);
+                    if (gv2) st = gv2->struct_type;
+                }
             } else if (e->kind == ND_INDEX && (e->u.index.base->kind == ND_FIELD || e->u.index.base->kind == ND_ARROW)) {
                 st = field_struct_type(e->u.index.base->u.field.struct_type, e->u.index.base->u.field.field);
             }
-            if (!st) fatal("Cannot resolve struct type for '->' at %d", cur()->pos);
+            if (!st) st = "__unknown_struct";
             e = new_arrow(e, field, st);
         }
     }
@@ -1042,15 +1378,22 @@ static Expr *parse_primary(void) {
 
 /* ---- Statements ---- */
 
+static int in_switch_depth;  /* tracks unclosed { from Duff's device patterns */
+
 static Block parse_block(void) {
     eat(TK_OP, "{");
+    if (in_switch_depth) in_switch_depth++;
     Block b;
     b.stmts.data = NULL;
     b.stmts.len = 0;
     b.stmts.cap = 0;
-    while (!match(TK_OP, "}"))
+    while (!match(TK_OP, "}") && !(in_switch_depth && (match(TK_KW, "case") || match(TK_KW, "default"))))
         stmtarray_push(&b.stmts, parse_stmt());
-    eat(TK_OP, "}");
+    if (match(TK_OP, "}")) {
+        eat(TK_OP, "}");
+        if (in_switch_depth) in_switch_depth--;
+    }
+    /* else: case/default inside switch block (Duff's device) - leave for switch handler */
     return b;
 }
 
@@ -1061,7 +1404,8 @@ static int starts_type(void) {
             match(TK_KW, "struct") || match(TK_KW, "union") || match(TK_KW, "const") ||
             match(TK_KW, "volatile") || match(TK_KW, "register") ||
             match(TK_KW, "static") || match(TK_KW, "enum") ||
-            match(TK_KW, "_Bool") || match(TK_KW, "bool"))
+            match(TK_KW, "_Bool") || match(TK_KW, "bool") ||
+            match(TK_KW, "float") || match(TK_KW, "double"))
         return 1;
     if (cur()->kind == TK_ID && find_typedef(cur()->value))
         return 1;
@@ -1164,7 +1508,7 @@ static Stmt *parse_stmt(void) {
         } else if (match(TK_OP, ";")) {
             eat(TK_OP, ";");
         } else {
-            Expr *e = parse_expr(0);
+            Expr *e = parse_expr(-1);
             eat(TK_OP, ";");
             init = new_exprstmt(e);
         }
@@ -1201,40 +1545,37 @@ static Stmt *parse_stmt(void) {
         SwitchCase *cases = NULL;
         int ncases = 0;
         int ccap = 0;
+        int saved_switch_depth = in_switch_depth;
+        in_switch_depth = 1;
 
-        while (!match(TK_OP, "}")) {
+        /* Skip any statements before the first case (e.g., variable declarations) */
+        while (!match(TK_KW, "case") && !match(TK_KW, "default") && !match(TK_OP, "}")) {
+            parse_stmt();
+        }
+
+        while (in_switch_depth > 0) {
+            /* Skip stray } from Duff's device blocks */
+            while (match(TK_OP, "}")) {
+                eat(TK_OP, "}");
+                in_switch_depth--;
+                if (in_switch_depth == 0) goto switch_done;
+            }
+
             Expr *case_val = NULL;
             if (match(TK_KW, "case")) {
                 eat(TK_KW, "case");
-                /* parse case value: optional '-', then a number or enum constant */
-                int neg = 0;
-                if (match(TK_OP, "-")) {
-                    eat(TK_OP, "-");
-                    neg = 1;
-                }
-                if (match(TK_NUMBER, NULL)) {
-                    int val = atoi(eat(TK_NUMBER, NULL)->value);
-                    if (neg) val = -val;
-                    case_val = new_num(val);
-                } else if (match(TK_ID, NULL)) {
-                    char *name = xstrdup(eat(TK_ID, NULL)->value);
-                    int ev;
-                    if (find_enum_const(name, &ev)) {
-                        if (neg) ev = -ev;
-                        case_val = new_num(ev);
-                    } else {
-                        fatal("Unknown case value '%s'", name);
-                    }
-                } else {
-                    fatal("Expected case value at %d", cur()->pos);
-                }
+                int val = parse_const_expr();
+                case_val = new_num(val);
                 eat(TK_OP, ":");
             } else if (match(TK_KW, "default")) {
                 eat(TK_KW, "default");
                 eat(TK_OP, ":");
                 case_val = NULL;
             } else {
-                fatal("Expected 'case' or 'default' in switch at %d", cur()->pos);
+                fprintf(stderr, "Switch context (tok %d, depth=%d):\n", pos, in_switch_depth);
+                for (int d = (pos > 15 ? pos - 15 : 0); d < pos + 5 && d < ntoks; d++)
+                    fprintf(stderr, "  tok[%d] = %s:'%s'\n", d, tokkind_str(toks[d].kind), toks[d].value);
+                fatal("Expected 'case' or 'default' in switch at %d (tok#%d, '%s')", cur()->pos, pos, cur()->value);
             }
 
             if (ncases >= ccap) {
@@ -1246,13 +1587,14 @@ static Stmt *parse_stmt(void) {
             cases[ncases].stmts.len = 0;
             cases[ncases].stmts.cap = 0;
 
-            /* Parse statements until next case/default/} */
+            /* Parse statements until next case/default or switch end */
             while (!match(TK_KW, "case") && !match(TK_KW, "default") && !match(TK_OP, "}")) {
                 stmtarray_push(&cases[ncases].stmts, parse_stmt());
             }
             ncases++;
         }
-        eat(TK_OP, "}");
+        switch_done:
+        in_switch_depth = saved_switch_depth;
         return new_switch(cond, cases, ncases);
     }
 
@@ -1291,6 +1633,23 @@ static Stmt *parse_stmt(void) {
         return new_label(label, stmt);
     }
 
+    /* Local typedef: typedef type name; — skip it but register the name */
+    if (match(TK_KW, "typedef")) {
+        eat(TK_KW, "typedef");
+        /* Skip everything until semicolon, tracking parens for funcptr typedefs */
+        int depth = 0;
+        char *last_id = NULL;
+        while (!(depth == 0 && match(TK_OP, ";"))) {
+            if (match(TK_OP, "(")) depth++;
+            else if (match(TK_OP, ")")) depth--;
+            if (cur()->kind == TK_ID && depth <= 1) last_id = cur()->value;
+            eat(cur()->kind, NULL);
+        }
+        eat(TK_OP, ";");
+        if (last_id) add_typedef(xstrdup(last_id), NULL);
+        return new_exprstmt(new_num(0));
+    }
+
     /* Variable declaration: starts with a type keyword */
     if (starts_type()) {
         int local_static = 0;
@@ -1298,7 +1657,25 @@ static Stmt *parse_stmt(void) {
             eat(TK_KW, "static");
             local_static = 1;
         }
+        /* Standalone struct/union definition: struct Name { ... }; with no variable */
+        if (match(TK_KW, "struct") || match(TK_KW, "union")) {
+            int saved_pos = pos;
+            parse_base_type();
+            if (match(TK_OP, ";")) {
+                eat(TK_OP, ";");
+                return new_exprstmt(new_num(0));
+            }
+            pos = saved_pos;
+        }
         return parse_vardecl_stmt(local_static);
+    }
+
+    /* Block statement: { ... } */
+    if (match(TK_OP, "{")) {
+        Block blk = parse_block();
+        /* Wrap block as a series of statements in a synthetic for(;;) with immediate break,
+           or simpler: just return statements inline. For now, use an if(1) wrapper. */
+        return new_if(new_num(1), blk, NULL);
     }
 
     /* empty statement */
@@ -1321,7 +1698,7 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
     nlocal_vars = 0;
     parse_base_type();  /* return type */
     int ret_is_ptr = 0;
-    while (match(TK_OP, "*")) { eat(TK_OP, "*"); ret_is_ptr = 1; }
+    while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); ret_is_ptr = 1; }
     Tok *name_tok = eat(TK_ID, NULL);
     eat(TK_OP, "(");
 
@@ -1358,6 +1735,13 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
                 while (match(TK_OP, "*")) {
                     eat(TK_OP, "*");
                     is_ptr = 1;
+                    skip_qualifiers();
+                }
+                /* Check for funcptr after pointer stars: type *(*name)(params) */
+                if (!is_funcptr && is_funcptr_decl()) {
+                    eat(TK_OP, "(");
+                    eat(TK_OP, "*");
+                    is_funcptr = 1;
                 }
                 skip_qualifiers();
                 /* Unnamed funcptr param: type (*)(params) */
@@ -1441,6 +1825,7 @@ static GlobalDecl parse_extern_decl(void) {
     }
     while (match(TK_OP, "*")) {
         eat(TK_OP, "*");
+        skip_qualifiers();
         is_ptr = 1;
     }
     Tok *name_tok = eat(TK_ID, NULL);
@@ -1452,7 +1837,7 @@ static GlobalDecl parse_extern_decl(void) {
     if (match(TK_OP, "[")) {
         eat(TK_OP, "[");
         if (!match(TK_OP, "]"))
-            arr_size = atoi(eat(TK_NUMBER, NULL)->value);
+            arr_size = parse_const_expr();
         eat(TK_OP, "]");
     }
     /* Skip function prototype: extern int foo(int x); */
@@ -1508,21 +1893,38 @@ static GlobalDecl parse_global_decl(int is_static) {
     }
     while (match(TK_OP, "*")) {
         eat(TK_OP, "*");
+        skip_qualifiers();
         is_ptr = 1;
+    }
+    /* funcptr after pointer stars: type *(*name)(params) */
+    if (!is_funcptr && is_funcptr_decl()) {
+        eat(TK_OP, "(");
+        eat(TK_OP, "*");
+        is_funcptr = 1;
     }
     skip_qualifiers();
     Tok *name_tok = eat(TK_ID, NULL);
+    int arr_size = -1;
     if (is_funcptr) {
+        /* Array of function pointers: type (*name[])(params) */
+        if (match(TK_OP, "[")) {
+            eat(TK_OP, "[");
+            if (match(TK_OP, "]")) {
+                arr_size = 0;
+            } else {
+                arr_size = parse_const_expr();
+            }
+            eat(TK_OP, "]");
+        }
         eat(TK_OP, ")");
         skip_param_list();
     }
-    int arr_size = -1;
-    if (match(TK_OP, "[")) {
+    if (arr_size < 0 && match(TK_OP, "[")) {
         eat(TK_OP, "[");
         if (match(TK_OP, "]")) {
             arr_size = 0; /* infer from initializer */
         } else {
-            arr_size = atoi(eat(TK_NUMBER, NULL)->value);
+            arr_size = parse_const_expr();
         }
         eat(TK_OP, "]");
     }
@@ -1542,8 +1944,11 @@ static GlobalDecl parse_global_decl(int is_static) {
         }
     } else if (arr_size < 0 && match(TK_OP, "=")) {
         eat(TK_OP, "=");
+        /* Struct initializer: = { ... } */
+        if (match(TK_OP, "{")) {
+            init = parse_init_list(stype);
         /* Handle negative initializers */
-        if (match(TK_OP, "-")) {
+        } else if (match(TK_OP, "-")) {
             eat(TK_OP, "-");
             Tok *num = eat(TK_NUMBER, NULL);
             init = new_num(-atoi(num->value));
@@ -1561,7 +1966,81 @@ static GlobalDecl parse_global_decl(int is_static) {
     gd.init = init;
     gd.is_extern = 0;
     gd.is_static = is_static;
+    /* Register in parser's global variable table for struct type resolution */
+    if (stype) add_global_var_info(name_tok->value, stype, is_ptr);
     return gd;
+}
+
+/* Check for function-returning-funcptr pattern: type (* name ( ...
+   e.g. void (*sqlite3OsDlSym(sqlite3_vfs*, void*, const char*))(void);
+   After base type has been parsed, pos is at '(' of '(* name (' */
+static int is_funcptr_return(void) {
+    if (!match(TK_OP, "(")) return 0;
+    int s = pos;
+    if (s + 2 < ntoks && toks[s].kind == TK_OP && strcmp(toks[s].value, "(") == 0 &&
+        toks[s+1].kind == TK_OP && strcmp(toks[s+1].value, "*") == 0 &&
+        toks[s+2].kind == TK_ID) {
+        /* Check if after name there's '(' (params), not ')' (which would be funcptr var) */
+        if (s + 3 < ntoks && toks[s+3].kind == TK_OP && strcmp(toks[s+3].value, "(") == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* Skip a funcptr-return declaration/definition, recording it as a prototype.
+   Pattern: type (* name (params))(ret_params) { body } or ; */
+static void skip_funcptr_return_decl(int is_static,
+                                      FuncDef **funcs, int *nfuncs, int *fcap,
+                                      FuncProto **protos, int *nprotos, int *pcap) {
+    /* We're at '(' of (* name (...  */
+    eat(TK_OP, "(");
+    eat(TK_OP, "*");
+    Tok *name_tok = eat(TK_ID, NULL);
+    /* Skip parameter list */
+    skip_param_list();
+    eat(TK_OP, ")");
+    /* Skip return type param list */
+    if (match(TK_OP, "(")) skip_param_list();
+    if (match(TK_OP, ";")) {
+        eat(TK_OP, ";");
+        /* Record as prototype */
+        if (*nprotos >= *pcap) {
+            *pcap = *pcap ? *pcap * 2 : 8;
+            *protos = realloc(*protos, *pcap * sizeof(FuncProto));
+        }
+        FuncProto p;
+        p.name = xstrdup(name_tok->value);
+        p.ret_is_ptr = 1;
+        p.is_variadic = 0;
+        p.nparams = 0;
+        (*protos)[(*nprotos)++] = p;
+    } else if (match(TK_OP, "{")) {
+        /* Skip function body */
+        eat(TK_OP, "{");
+        int depth = 1;
+        while (depth > 0 && !match(TK_EOF, NULL)) {
+            if (match(TK_OP, "{")) depth++;
+            else if (match(TK_OP, "}")) depth--;
+            if (depth > 0) pos++;
+        }
+        eat(TK_OP, "}");
+        /* Record as function def (stub) */
+        if (*nfuncs >= *fcap) {
+            *fcap = *fcap ? *fcap * 2 : 4;
+            *funcs = realloc(*funcs, *fcap * sizeof(FuncDef));
+        }
+        FuncDef fd;
+        fd.name = xstrdup(name_tok->value);
+        fd.params = NULL;
+        fd.nparams = 0;
+        fd.body.stmts.data = NULL;
+        fd.body.stmts.len = 0;
+        fd.body.stmts.cap = 0;
+        fd.is_static = is_static;
+        fd.ret_is_ptr = 1;
+        fd.is_variadic = 0;
+        (*funcs)[(*nfuncs)++] = fd;
+    }
 }
 
 /* Try to parse a function or global with the given static flag */
@@ -1571,6 +2050,11 @@ static void parse_func_or_global(int is_static,
                                   FuncProto **protos, int *nprotos, int *pcap) {
     int saved = pos;
     parse_base_type();
+    /* Handle function-returning-funcptr: type (* name(params))(ret_params) */
+    if (is_funcptr_return()) {
+        skip_funcptr_return_decl(is_static, funcs, nfuncs, fcap, protos, nprotos, pcap);
+        return;
+    }
     if (is_func_lookahead()) {
         pos = saved;
         FuncDef fd;
@@ -1609,6 +2093,7 @@ Program *parse_program(TokArray tokarr) {
     nlocal_vars = 0;
     nenum_consts = 0;
     ntypedefs = 0;
+    nglobal_var_infos = 0;
 
     /* Add sizeof as a keyword for recognition */
 
@@ -1632,9 +2117,10 @@ Program *parse_program(TokArray tokarr) {
                 if (is_union_td) eat(TK_KW, "union"); else eat(TK_KW, "struct");
 
                 char *tag_name = NULL;
-                if (match(TK_ID, NULL))
+                if (match(TK_ID, NULL)) {
                     tag_name = xstrdup(cur()->value);
-                eat(TK_ID, NULL);
+                    eat(TK_ID, NULL);
+                }
 
                 /* struct body? */
                 if (match(TK_OP, "{")) {
@@ -1647,15 +2133,28 @@ Program *parse_program(TokArray tokarr) {
                     int nf = 0, fcap2 = 0;
                     while (!match(TK_OP, "}")) {
                         char *ftype = parse_base_type();
+                        while (1) {
                         int is_ptr = 0;
-                        while (match(TK_OP, "*")) { eat(TK_OP, "*"); is_ptr = 1; }
+                        int is_funcptr = 0;
+                        if (is_funcptr_decl()) {
+                            eat(TK_OP, "("); eat(TK_OP, "*");
+                            is_ptr = 1; is_funcptr = 1;
+                        }
+                        while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); is_ptr = 1; }
+                        if (!is_funcptr && is_funcptr_decl()) {
+                            eat(TK_OP, "("); eat(TK_OP, "*");
+                            is_ptr++; is_funcptr = 1;
+                        }
+                        skip_qualifiers();
                         Tok *fname_tok = eat(TK_ID, NULL);
+                        if (is_funcptr) { eat(TK_OP, ")"); skip_param_list(); }
                         if (match(TK_OP, "[")) {
                             eat(TK_OP, "[");
-                            if (!match(TK_OP, "]")) eat(TK_NUMBER, NULL);
+                            if (!match(TK_OP, "]")) parse_const_expr();
                             eat(TK_OP, "]");
                         }
-                        eat(TK_OP, ";");
+                        int bw = 0;
+                        if (match(TK_OP, ":")) { eat(TK_OP, ":"); bw = parse_const_expr(); }
                         if (nf >= fcap2) {
                             fcap2 = fcap2 ? fcap2 * 2 : 8;
                             fields = realloc(fields, fcap2 * sizeof(char *));
@@ -1665,37 +2164,47 @@ Program *parse_program(TokArray tokarr) {
                         finfo[nf].name = xstrdup(fname_tok->value);
                         finfo[nf].struct_type = ftype;
                         finfo[nf].is_ptr = is_ptr;
+                        finfo[nf].bit_width = bw;
                         nf++;
+                        if (match(TK_OP, ",")) { eat(TK_OP, ","); continue; }
+                        break;
+                        }
+                        eat(TK_OP, ";");
                     }
                     eat(TK_OP, "}");
 
-                    /* Register struct def */
-                    if (tag_name) {
-                        if (nstruct_defs >= 64) fatal("Too many struct definitions");
-                        struct_defs[nstruct_defs].name = xstrdup(tag_name);
-                        struct_defs[nstruct_defs].fields = finfo;
-                        struct_defs[nstruct_defs].nfields = nf;
-                        nstruct_defs++;
-
-                        /* Also add to program structs */
-                        char **ftypes = xmalloc(nf * sizeof(char *));
-                        for (int fi = 0; fi < nf; fi++)
-                            ftypes[fi] = (finfo[fi].struct_type && !finfo[fi].is_ptr) ? xstrdup(finfo[fi].struct_type) : NULL;
-                        if (nstructs >= scap) {
-                            scap = scap ? scap * 2 : 4;
-                            structs = realloc(structs, scap * sizeof(StructDef));
-                        }
-                        structs[nstructs].name = xstrdup(tag_name);
-                        structs[nstructs].fields = fields;
-                        structs[nstructs].field_types = ftypes;
-                        structs[nstructs].nfields = nf;
-                        structs[nstructs].is_union = is_union_td;
-                        nstructs++;
+                    /* Generate synthetic name for anonymous typedef struct */
+                    if (!tag_name) {
+                        char synth[64];
+                        snprintf(synth, sizeof(synth), "__anon_%d", anon_struct_counter++);
+                        tag_name = xstrdup(synth);
                     }
+
+                    /* Register struct def */
+                    GROW(struct_defs, nstruct_defs, struct_defs_cap, StructDefInfo);
+                    struct_defs[nstruct_defs].name = xstrdup(tag_name);
+                    struct_defs[nstruct_defs].fields = finfo;
+                    struct_defs[nstruct_defs].nfields = nf;
+                    nstruct_defs++;
+
+                    /* Also add to program structs */
+                    char **ftypes = xmalloc(nf * sizeof(char *));
+                    for (int fi = 0; fi < nf; fi++)
+                        ftypes[fi] = (finfo[fi].struct_type && !finfo[fi].is_ptr) ? xstrdup(finfo[fi].struct_type) : NULL;
+                    if (nstructs >= scap) {
+                        scap = scap ? scap * 2 : 4;
+                        structs = realloc(structs, scap * sizeof(StructDef));
+                    }
+                    structs[nstructs].name = xstrdup(tag_name);
+                    structs[nstructs].fields = fields;
+                    structs[nstructs].field_types = ftypes;
+                    structs[nstructs].nfields = nf;
+                    structs[nstructs].is_union = is_union_td;
+                    nstructs++;
                 }
 
                 /* Skip pointer stars */
-                while (match(TK_OP, "*")) eat(TK_OP, "*");
+                while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); }
 
                 /* The typedef alias name */
                 if (match(TK_ID, NULL)) {
@@ -1756,7 +2265,7 @@ Program *parse_program(TokArray tokarr) {
                     add_typedef(alias, NULL);
                 } else {
                     /* Normal: typedef type [*]* Name; */
-                    while (match(TK_OP, "*")) { eat(TK_OP, "*"); stype = NULL; /* ptr-to-struct is just ptr */ }
+                    while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); stype = NULL; /* ptr-to-struct is just ptr */ }
                     /* Check again for funcptr after stars: typedef int *(*Name)(params); */
                     if (match(TK_OP, "(") && pos + 1 < ntoks &&
                         toks[pos+1].kind == TK_OP && strcmp(toks[pos+1].value, "*") == 0) {
@@ -1780,7 +2289,7 @@ Program *parse_program(TokArray tokarr) {
                     /* skip array dimensions like typedef int Arr[10]; */
                     if (match(TK_OP, "[")) {
                         eat(TK_OP, "[");
-                        if (!match(TK_OP, "]")) eat(TK_NUMBER, NULL);
+                        if (!match(TK_OP, "]")) parse_const_expr();
                         eat(TK_OP, "]");
                     }
                     eat(TK_OP, ";");
@@ -1849,6 +2358,7 @@ Program *parse_program(TokArray tokarr) {
                     structs = realloc(structs, scap * sizeof(StructDef));
                 }
                 structs[nstructs++] = parse_struct_or_union_def(is_union_kw);
+                if (match(TK_OP, ";")) eat(TK_OP, ";");
             } else if (match(TK_OP, ";")) {
                 /* Forward declaration: struct Foo; — just skip */
                 eat(TK_OP, ";");

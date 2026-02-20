@@ -73,6 +73,15 @@ char *xstrdup(const char *s) {
     return p;
 }
 
+void *xrealloc(void *ptr, size_t size) {
+    void *p = realloc(ptr, size);
+    if (!p) {
+        fprintf(stderr, "out of memory\n");
+        abort();
+    }
+    return p;
+}
+
 void fatal(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);

@@ -18,8 +18,9 @@ typedef struct {
     char *label;
 } StrPoolEntry;
 
-static StrPoolEntry str_pool[512];
+static StrPoolEntry *str_pool;
 static int nstr_pool;
+static int str_pool_cap;
 
 /* Loop/switch stack (break target) */
 typedef struct {
@@ -43,8 +44,9 @@ typedef struct {
     int nwords;          /* 0 = use nfields, >0 = packed word count */
 } CgStructDef;
 
-static CgStructDef cg_structs[64];
+static CgStructDef *cg_structs;
 static int ncg_structs;
+static int cg_structs_cap;
 
 /* Global variables */
 typedef struct {
@@ -53,12 +55,14 @@ typedef struct {
     int is_structvar;
 } GlobalVarEntry;
 
-static GlobalVarEntry global_vars[1024];
+static GlobalVarEntry *global_vars;
 static int nglobal_vars;
+static int global_vars_cap;
 
 /* Functions that return pointers (skip sxtw after call) */
-static char *ptr_ret_funcs[256];
+static char **ptr_ret_funcs;
 static int nptr_ret_funcs;
+static int ptr_ret_funcs_cap;
 
 static int func_returns_ptr(const char *name) {
     for (int i = 0; i < nptr_ret_funcs; i++)
@@ -67,12 +71,14 @@ static int func_returns_ptr(const char *name) {
 }
 
 /* All known function names (for function pointer support) */
-static char *known_func_names[512];
+static char **known_func_names;
 static int nknown_func_names;
+static int known_func_names_cap;
 
-static char *variadic_funcs[256];
-static int variadic_nparams[256];
+static char **variadic_funcs;
+static int *variadic_nparams;
 static int nvariadic_funcs;
+static int variadic_funcs_cap;
 
 static int is_known_func(const char *name) {
     for (int i = 0; i < nknown_func_names; i++)
@@ -89,8 +95,9 @@ typedef struct {
     int has_init;
 } StaticLocalEntry;
 
-static StaticLocalEntry static_locals[256];
+static StaticLocalEntry *static_locals;
 static int nstatic_locals;
+static int static_locals_cap;
 
 static int is_static_local(const char *name) {
     /* Match by name within current function only (use label which includes func name) */
@@ -297,7 +304,7 @@ static char *intern_string(const char *decoded) {
     for (int i = 0; i < nstr_pool; i++)
         if (strcmp(str_pool[i].decoded, decoded) == 0)
             return str_pool[i].label;
-    if (nstr_pool >= 512) fatal("Too many string literals");
+    GROW(str_pool, nstr_pool, str_pool_cap, StrPoolEntry);
     char tmp[32];
     snprintf(tmp, sizeof(tmp), "l_.str_%d", nstr_pool + 1);
     str_pool[nstr_pool].decoded = xstrdup(decoded);
@@ -468,7 +475,7 @@ static void walk_stmts_for_layout(StmtArray *stmts, FuncLayout *layout, int *off
                     continue; /* already laid out (e.g. redecl in nested scope) */
                 if (e->is_static) {
                     /* Static local: emit in .data section, not on stack */
-                    if (nstatic_locals >= 256) fatal("Too many static locals");
+                    GROW(static_locals, nstatic_locals, static_locals_cap, StaticLocalEntry);
                     char label[128];
                     snprintf(label, sizeof(label), "_sl_%s.%s", cur_func_name, e->name);
                     static_locals[nstatic_locals].name = xstrdup(e->name);
@@ -1844,26 +1851,34 @@ char *codegen_generate(Program *prog) {
 
     /* Register function prototypes that return pointers */
     for (int i = 0; i < prog->nprotos; i++) {
-        if (prog->protos[i].ret_is_ptr && nptr_ret_funcs < 256)
+        if (prog->protos[i].ret_is_ptr) {
+            GROW(ptr_ret_funcs, nptr_ret_funcs, ptr_ret_funcs_cap, char *);
             ptr_ret_funcs[nptr_ret_funcs++] = prog->protos[i].name;
+        }
     }
     /* Also check function definitions */
     for (int i = 0; i < prog->nfuncs; i++) {
-        if (prog->funcs[i].ret_is_ptr && nptr_ret_funcs < 256)
+        if (prog->funcs[i].ret_is_ptr) {
+            GROW(ptr_ret_funcs, nptr_ret_funcs, ptr_ret_funcs_cap, char *);
             ptr_ret_funcs[nptr_ret_funcs++] = prog->funcs[i].name;
+        }
     }
 
     /* Register variadic functions */
     nvariadic_funcs = 0;
     for (int i = 0; i < prog->nprotos; i++) {
-        if (prog->protos[i].is_variadic && nvariadic_funcs < 256) {
+        if (prog->protos[i].is_variadic) {
+            GROW(variadic_funcs, nvariadic_funcs, variadic_funcs_cap, char *);
+            variadic_nparams = xrealloc(variadic_nparams, sizeof(int) * variadic_funcs_cap);
             variadic_funcs[nvariadic_funcs] = prog->protos[i].name;
             variadic_nparams[nvariadic_funcs] = prog->protos[i].nparams;
             nvariadic_funcs++;
         }
     }
     for (int i = 0; i < prog->nfuncs; i++) {
-        if (prog->funcs[i].is_variadic && nvariadic_funcs < 256) {
+        if (prog->funcs[i].is_variadic) {
+            GROW(variadic_funcs, nvariadic_funcs, variadic_funcs_cap, char *);
+            variadic_nparams = xrealloc(variadic_nparams, sizeof(int) * variadic_funcs_cap);
             variadic_funcs[nvariadic_funcs] = prog->funcs[i].name;
             variadic_nparams[nvariadic_funcs] = prog->funcs[i].nparams;
             nvariadic_funcs++;
@@ -1873,17 +1888,17 @@ char *codegen_generate(Program *prog) {
     /* Register all known function names (for function pointer support) */
     nknown_func_names = 0;
     for (int i = 0; i < prog->nprotos; i++) {
-        if (nknown_func_names < 512)
-            known_func_names[nknown_func_names++] = prog->protos[i].name;
+        GROW(known_func_names, nknown_func_names, known_func_names_cap, char *);
+        known_func_names[nknown_func_names++] = prog->protos[i].name;
     }
     for (int i = 0; i < prog->nfuncs; i++) {
-        if (nknown_func_names < 512)
-            known_func_names[nknown_func_names++] = prog->funcs[i].name;
+        GROW(known_func_names, nknown_func_names, known_func_names_cap, char *);
+        known_func_names[nknown_func_names++] = prog->funcs[i].name;
     }
 
     /* Register struct/union definitions */
     for (int i = 0; i < prog->nstructs; i++) {
-        if (ncg_structs >= 64) fatal("Too many structs");
+        GROW(cg_structs, ncg_structs, cg_structs_cap, CgStructDef);
         cg_structs[ncg_structs].name = prog->structs[i].name;
         cg_structs[ncg_structs].fields = prog->structs[i].fields;
         cg_structs[ncg_structs].field_types = prog->structs[i].field_types;
@@ -1899,7 +1914,7 @@ char *codegen_generate(Program *prog) {
     /* Register global variables */
     for (int i = 0; i < prog->nglobals; i++) {
         GlobalDecl *gd = &prog->globals[i];
-        if (nglobal_vars >= 1024) fatal("Too many global variables");
+        GROW(global_vars, nglobal_vars, global_vars_cap, GlobalVarEntry);
         global_vars[nglobal_vars].name = gd->name;
         global_vars[nglobal_vars].is_array = (gd->array_size >= 0);
         global_vars[nglobal_vars].is_structvar = (gd->struct_type != NULL && !gd->is_ptr && gd->array_size < 0);

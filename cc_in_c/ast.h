@@ -1,6 +1,60 @@
 #ifndef AST_H
 #define AST_H
 
+/* ---- Type system ---- */
+
+typedef enum {
+    TY_VOID,
+    TY_CHAR,
+    TY_SHORT,
+    TY_INT,
+    TY_LONG,
+    TY_LLONG,
+    TY_FLOAT,
+    TY_DOUBLE,
+    TY_PTR,
+    TY_ARRAY,
+    TY_STRUCT,
+    TY_UNION,
+    TY_ENUM,
+    TY_FUNC,
+} TypeKind;
+
+typedef struct Type Type;
+struct Type {
+    TypeKind kind;
+    Type *base;         /* pointed-to type (PTR/ARRAY) or return type (FUNC) */
+    char *struct_name;  /* for STRUCT/UNION: tag name */
+    int array_len;      /* for ARRAY: element count (-1 if unspecified) */
+    int is_unsigned;    /* for integer types */
+    int size;           /* cached size in bytes (0 = not yet computed) */
+    int align;          /* cached alignment (0 = not yet computed) */
+};
+
+/* Singleton types */
+Type *ty_void(void);
+Type *ty_char(void);
+Type *ty_short(void);
+Type *ty_int(void);
+Type *ty_long(void);
+Type *ty_llong(void);
+Type *ty_float(void);
+Type *ty_double(void);
+
+/* Constructors */
+Type *ty_ptr(Type *base);
+Type *ty_array(Type *base, int len);
+Type *ty_struct(const char *name);
+Type *ty_union(const char *name);
+Type *ty_enum(void);
+Type *ty_unsigned(Type *base);
+
+/* Queries */
+int type_size(Type *ty);
+int type_align(Type *ty);
+int type_is_integer(Type *ty);
+int type_is_ptr_like(Type *ty);
+
 /* ---- Expression nodes ---- */
 
 typedef enum {

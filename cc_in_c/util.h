@@ -24,4 +24,14 @@ char *xstrdup(const char *s);
 /* Fatal error */
 void fatal(const char *fmt, ...);
 
+/* Dynamic array growth: ensures arr has room for one more element */
+#define GROW(arr, count, cap, type) do { \
+    if ((count) >= (cap)) { \
+        (cap) = (cap) ? (cap) * 2 : 16; \
+        (arr) = xrealloc((arr), sizeof(type) * (cap)); \
+    } \
+} while (0)
+
+void *xrealloc(void *ptr, size_t size);
+
 #endif
