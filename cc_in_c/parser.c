@@ -306,6 +306,10 @@ static char *parse_base_type(void) {
             isd->field_types = xmalloc(nfields * sizeof(char *));
             isd->nfields = nfields;
             isd->is_union = is_union;
+            isd->bit_widths = NULL;
+            isd->bit_offsets = NULL;
+            isd->word_indices = NULL;
+            isd->nwords = 0;
             for (int k = 0; k < nfields; k++) {
                 isd->fields[k] = xstrdup(finfo[k].name);
                 isd->field_types[k] = finfo[k].struct_type ? xstrdup(finfo[k].struct_type) : NULL;
@@ -369,6 +373,10 @@ static char *parse_base_type(void) {
             isd2->field_types = xmalloc(nf2 * sizeof(char *));
             isd2->nfields = nf2;
             isd2->is_union = is_union;
+            isd2->bit_widths = NULL;
+            isd2->bit_offsets = NULL;
+            isd2->word_indices = NULL;
+            isd2->nwords = 0;
             for (int k = 0; k < nf2; k++) {
                 isd2->fields[k] = xstrdup(finfo2[k].name);
                 isd2->field_types[k] = finfo2[k].struct_type ? xstrdup(finfo2[k].struct_type) : NULL;
@@ -1548,9 +1556,10 @@ static Stmt *parse_stmt(void) {
         int saved_switch_depth = in_switch_depth;
         in_switch_depth = 1;
 
-        /* Skip any statements before the first case (e.g., variable declarations) */
+        /* Collect any statements before the first case (e.g., variable declarations) */
+        StmtArray pre_stmts = {NULL, 0, 0};
         while (!match(TK_KW, "case") && !match(TK_KW, "default") && !match(TK_OP, "}")) {
-            parse_stmt();
+            stmtarray_push(&pre_stmts, parse_stmt());
         }
 
         while (in_switch_depth > 0) {
@@ -1586,6 +1595,12 @@ static Stmt *parse_stmt(void) {
             cases[ncases].stmts.data = NULL;
             cases[ncases].stmts.len = 0;
             cases[ncases].stmts.cap = 0;
+
+            /* Prepend pre-case declarations to first case */
+            if (ncases == 0 && pre_stmts.len > 0) {
+                for (int pi = 0; pi < pre_stmts.len; pi++)
+                    stmtarray_push(&cases[ncases].stmts, pre_stmts.data[pi]);
+            }
 
             /* Parse statements until next case/default or switch end */
             while (!match(TK_KW, "case") && !match(TK_KW, "default") && !match(TK_OP, "}")) {
@@ -2200,6 +2215,10 @@ Program *parse_program(TokArray tokarr) {
                     structs[nstructs].field_types = ftypes;
                     structs[nstructs].nfields = nf;
                     structs[nstructs].is_union = is_union_td;
+                    structs[nstructs].bit_widths = NULL;
+                    structs[nstructs].bit_offsets = NULL;
+                    structs[nstructs].word_indices = NULL;
+                    structs[nstructs].nwords = 0;
                     nstructs++;
                 }
 
