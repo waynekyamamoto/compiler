@@ -94,6 +94,8 @@ typedef struct {
     char *label;
     int init_val;
     int has_init;
+    Expr *init_expr;   /* full init list for complex static locals */
+    int nfields;       /* number of struct fields (for struct statics) */
 } StaticLocalEntry;
 
 static StaticLocalEntry *static_locals;
@@ -508,9 +510,16 @@ static void walk_stmts_for_layout(StmtArray *stmts, FuncLayout *layout, int *off
                     static_locals[nstatic_locals].label = xstrdup(label);
                     static_locals[nstatic_locals].has_init = 0;
                     static_locals[nstatic_locals].init_val = 0;
+                    static_locals[nstatic_locals].init_expr = NULL;
+                    static_locals[nstatic_locals].nfields = 0;
                     if (e->init && e->init->kind == ND_NUM) {
                         static_locals[nstatic_locals].has_init = 1;
                         static_locals[nstatic_locals].init_val = e->init->u.num;
+                    } else if (e->init && e->init->kind == ND_INITLIST) {
+                        static_locals[nstatic_locals].has_init = 1;
+                        static_locals[nstatic_locals].init_expr = e->init;
+                        if (e->struct_type)
+                            static_locals[nstatic_locals].nfields = cg_struct_nfields(e->struct_type);
                     }
                     nstatic_locals++;
                     /* Use offset -1 as sentinel for static local */
@@ -1048,6 +1057,15 @@ static void gen_value(Expr *e, FuncLayout *layout) {
         char *name = e->u.call.name;
         int nargs = e->u.call.args.len;
         Expr **args = e->u.call.args.data;
+
+        if (strcmp(name, "__builtin_va_start") == 0) {
+            /* va_start: set *arg = x29 + 16 (first variadic arg location) */
+            if (nargs != 1) fatal("__builtin_va_start takes 1 arg");
+            gen_value(args[0], layout);  /* address of va_list variable */
+            emit("\tadd\tx1, x29, #16");
+            emit("\tstr\tx1, [x0]");
+            return;
+        }
 
         if (strcmp(name, "__read_byte") == 0) {
             if (nargs != 2) fatal("__read_byte takes 2 args");
@@ -1957,16 +1975,6 @@ char *codegen_generate(Program *prog) {
     for (int i = 0; i < prog->nfuncs; i++)
         gen_func(&prog->funcs[i]);
 
-    if (nstr_pool > 0) {
-        emit("");
-        emit("\t.section\t__TEXT,__cstring,cstring_literals");
-        for (int i = 0; i < nstr_pool; i++) {
-            char *esc = asm_escape_string(str_pool[i].decoded);
-            emit("%s:", str_pool[i].label);
-            emit("\t.asciz\t\"%s\"", esc);
-        }
-    }
-
     /* Emit global variables (skip extern declarations) */
     if (prog->nglobals > 0) {
         int has_data = 0;
@@ -1987,6 +1995,15 @@ char *codegen_generate(Program *prog) {
                     } else if (elem->kind == ND_UNARY && elem->u.unary.op == '-' &&
                                elem->u.unary.rhs->kind == ND_NUM) {
                         emit("\t.quad\t%d", -elem->u.unary.rhs->u.num);
+                    } else if (elem->kind == ND_VAR) {
+                        emit("\t.quad\t_%s", elem->u.var_name);
+                    } else if (elem->kind == ND_STRLIT) {
+                        char *decoded = decode_c_string(elem->u.str_val);
+                        char *lab = intern_string(decoded);
+                        emit("\t.quad\t%s", lab);
+                    } else if (elem->kind == ND_UNARY && elem->u.unary.op == '&' &&
+                               elem->u.unary.rhs->kind == ND_VAR) {
+                        emit("\t.quad\t_%s", elem->u.unary.rhs->u.var_name);
                     } else {
                         emit("\t.quad\t0"); /* fallback for non-constant */
                     }
@@ -2043,10 +2060,51 @@ char *codegen_generate(Program *prog) {
         for (int i = 0; i < nstatic_locals; i++) {
             emit("\t.p2align\t3");
             emit("%s:", static_locals[i].label);
-            if (static_locals[i].has_init)
+            if (static_locals[i].init_expr && static_locals[i].init_expr->kind == ND_INITLIST) {
+                /* Complex init list (struct with function pointers, etc.) */
+                Expr *il = static_locals[i].init_expr;
+                int n = il->u.initlist.elems.len;
+                int nf = static_locals[i].nfields > n ? static_locals[i].nfields : n;
+                for (int k = 0; k < nf; k++) {
+                    if (k < n) {
+                        Expr *elem = il->u.initlist.elems.data[k];
+                        if (elem->kind == ND_NUM) {
+                            emit("\t.quad\t%d", elem->u.num);
+                        } else if (elem->kind == ND_VAR) {
+                            emit("\t.quad\t_%s", elem->u.var_name);
+                        } else if (elem->kind == ND_STRLIT) {
+                            char *decoded = decode_c_string(elem->u.str_val);
+                            char *lab = intern_string(decoded);
+                            emit("\t.quad\t%s", lab);
+                        } else if (elem->kind == ND_UNARY && elem->u.unary.op == '&' &&
+                                   elem->u.unary.rhs->kind == ND_VAR) {
+                            emit("\t.quad\t_%s", elem->u.unary.rhs->u.var_name);
+                        } else if (elem->kind == ND_UNARY && elem->u.unary.op == '-' &&
+                                   elem->u.unary.rhs->kind == ND_NUM) {
+                            emit("\t.quad\t%d", -elem->u.unary.rhs->u.num);
+                        } else {
+                            emit("\t.quad\t0");
+                        }
+                    } else {
+                        emit("\t.quad\t0");
+                    }
+                }
+            } else if (static_locals[i].has_init) {
                 emit("\t.quad\t%d", static_locals[i].init_val);
-            else
+            } else {
                 emit("\t.quad\t0");
+            }
+        }
+    }
+
+    /* Emit string pool (after globals so global inits can intern strings) */
+    if (nstr_pool > 0) {
+        emit("");
+        emit("\t.section\t__TEXT,__cstring,cstring_literals");
+        for (int i = 0; i < nstr_pool; i++) {
+            char *esc = asm_escape_string(str_pool[i].decoded);
+            emit("%s:", str_pool[i].label);
+            emit("\t.asciz\t\"%s\"", esc);
         }
     }
 

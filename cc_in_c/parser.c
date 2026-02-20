@@ -1763,7 +1763,12 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
                 if (is_funcptr && match(TK_OP, ")")) {
                     eat(TK_OP, ")");
                     skip_param_list();
-                    /* unnamed — skip to next param */
+                    /* unnamed — count for variadic nparams */
+                    if (nparams >= pcap) {
+                        pcap = pcap ? pcap * 2 : 8;
+                        params = realloc(params, pcap * sizeof(char *));
+                    }
+                    params[nparams++] = xstrdup("__unnamed");
                     if (match(TK_OP, ",")) { eat(TK_OP, ","); continue; }
                     break;
                 }
@@ -1788,6 +1793,13 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
                     params[nparams++] = xstrdup(pname->value);
                     if (stype)
                         add_local(pname->value, stype, is_ptr);
+                } else {
+                    /* Unnamed param (prototype): count for variadic nparams */
+                    if (nparams >= pcap) {
+                        pcap = pcap ? pcap * 2 : 8;
+                        params = realloc(params, pcap * sizeof(char *));
+                    }
+                    params[nparams++] = xstrdup("__unnamed");
                 }
                 if (match(TK_OP, ",")) {
                     eat(TK_OP, ",");
