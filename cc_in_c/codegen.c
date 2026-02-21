@@ -2367,6 +2367,35 @@ char *codegen_generate(Program *prog) {
         }
     }
 
+    /* Register well-known variadic functions if not already declared */
+    {
+        static const char *builtin_variadics[] = {
+            "printf", "fprintf", "sprintf", "snprintf",
+            "scanf", "fscanf", "sscanf",
+        };
+        static const int builtin_nparams[] = {
+            1, 2, 2, 3,
+            1, 2, 2,
+        };
+        int n = sizeof(builtin_variadics) / sizeof(builtin_variadics[0]);
+        for (int i = 0; i < n; i++) {
+            int found = 0;
+            for (int vi = 0; vi < nvariadic_funcs; vi++) {
+                if (strcmp(variadic_funcs[vi], builtin_variadics[i]) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                GROW(variadic_funcs, nvariadic_funcs, variadic_funcs_cap, char *);
+                variadic_nparams = xrealloc(variadic_nparams, sizeof(int) * variadic_funcs_cap);
+                variadic_funcs[nvariadic_funcs] = (char *)builtin_variadics[i];
+                variadic_nparams[nvariadic_funcs] = builtin_nparams[i];
+                nvariadic_funcs++;
+            }
+        }
+    }
+
     /* Register all known function names (for function pointer support) */
     nknown_func_names = 0;
     for (int i = 0; i < prog->nprotos; i++) {
