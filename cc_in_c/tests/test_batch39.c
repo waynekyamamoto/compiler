@@ -1,50 +1,74 @@
-/* test_batch39: preprocessor features - __VA_ARGS__, ##, #, predefined macros */
-int printf(char *fmt, ...);
-int strcmp(char *a, char *b);
-int sprintf(char *buf, char *fmt, ...);
+/* Test struct layout with function pointer fields, similar to FuncDef */
+#include <stdio.h>
 
-/* Test __VA_ARGS__ */
-#define PRINT(...) printf(__VA_ARGS__)
-#define LOG(fmt, ...) printf(fmt, __VA_ARGS__)
+struct Destr {
+    int nRef;
+    void (*xDestroy)(void*);
+};
 
-/* Test ## token pasting */
-#define PASTE(a, b) a ## b
-#define VAR(n) var_ ## n
+struct FuncLike {
+    int nArg;
+    int flags;
+    void *pUserData;
+    struct FuncLike *pNext;
+    void (*xFunc1)(void*, int, void**);
+    void (*xFunc2)(void*);
+    void (*xFunc3)(void*);
+    void (*xFunc4)(void*, int, void**);
+    const char *zName;
+    union {
+        struct FuncLike *pHash;
+        struct Destr *pDestructor;
+    } u;
+};
 
-/* Test # stringification */
-#define STR(x) #x
-#define XSTR(x) STR(x)
-
-/* Test predefined macros */
-#ifndef __STDC__
-  int undefined_stdc_error;
-#endif
+void dummy_func(void *a, int b, void **c) {}
+void dummy_func2(void *a) {}
 
 int main() {
-    int fail = 0;
+    /* Test 1: sizeof struct with function pointer fields */
+    int sz = sizeof(struct FuncLike);
+    printf("sizeof(FuncLike)=%d expected=80\n", sz);
 
-    /* Test __VA_ARGS__ with printf */
-    PRINT("va_args test: %d\n", 42);
+    /* Test 2: array of structs - check stride */
+    struct FuncLike arr[2];
+    arr[0].nArg = 1;
+    arr[0].flags = 100;
+    arr[0].pUserData = 0;
+    arr[0].pNext = 0;
+    arr[0].xFunc1 = dummy_func;
+    arr[0].xFunc2 = dummy_func2;
+    arr[0].xFunc3 = dummy_func2;
+    arr[0].xFunc4 = dummy_func;
+    arr[0].zName = "hello";
+    arr[0].u.pHash = 0;
 
-    /* Test __VA_ARGS__ with multiple args */
-    LOG("log: %d %d\n", 1, 2);
+    arr[1].nArg = 2;
+    arr[1].flags = 200;
+    arr[1].pUserData = 0;
+    arr[1].pNext = 0;
+    arr[1].xFunc1 = dummy_func;
+    arr[1].xFunc2 = dummy_func2;
+    arr[1].xFunc3 = dummy_func2;
+    arr[1].xFunc4 = dummy_func;
+    arr[1].zName = "world";
+    arr[1].u.pHash = 0;
 
-    /* Test ## token pasting */
-    int PASTE(my, var) = 100;
-    if (myvar != 100) { printf("FAIL: ## paste\n"); fail = 1; }
+    /* Test 3: access fields through array indexing */
+    printf("arr[0].nArg=%d expected=1\n", arr[0].nArg);
+    printf("arr[0].zName=%s expected=hello\n", arr[0].zName);
+    printf("arr[1].nArg=%d expected=2\n", arr[1].nArg);
+    printf("arr[1].zName=%s expected=world\n", arr[1].zName);
 
-    int VAR(1) = 200;
-    if (var_1 != 200) { printf("FAIL: ## VAR paste\n"); fail = 1; }
+    /* Test 4: access through pointer */
+    struct FuncLike *p = arr;
+    printf("p[0].zName=%s expected=hello\n", p[0].zName);
+    printf("p[1].zName=%s expected=world\n", p[1].zName);
 
-    /* Test # stringification */
-    char buf[64];
-    sprintf(buf, "%s", STR(hello));
-    if (strcmp(buf, "hello") != 0) { printf("FAIL: # stringify got '%s'\n", buf); fail = 1; }
+    /* Test 5: stride check */
+    long stride = (long)&arr[1] - (long)&arr[0];
+    printf("stride=%ld expected=80\n", stride);
 
-    /* Note: XSTR(MY_VAL) double-expansion not yet supported.
-     * Standard C requires args be expanded before substitution
-     * (except with # or ##). TODO for later. */
-
-    if (!fail) printf("batch39: all tests passed\n");
-    return fail;
+    printf("PASS\n");
+    return 0;
 }

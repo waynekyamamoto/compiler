@@ -140,6 +140,7 @@ typedef struct {
     Expr *init;         /* NULL if no initializer */
     int is_static;      /* 1 if static local */
     int is_unsigned;    /* 1 if unsigned type */
+    int is_char;        /* 1 if char type (for byte-sized access) */
     int array_size2;    /* -1 if not 2D, >=0 for inner dimension */
 } VarDeclEntry;
 
@@ -175,23 +176,29 @@ struct Stmt {
 typedef struct {
     char *name;
     char **fields;
-    char **field_types;  /* NULL entry = int, non-NULL = struct type name */
+    char **field_types;     /* NULL = int, non-NULL = embedded struct type name */
+    char **field_ptr_types; /* NULL = not ptr-to-struct, non-NULL = pointed-to struct type */
     int nfields;
     int is_union;
     int *bit_widths;     /* 0 = regular field, >0 = bitfield width (per-field) */
     int *bit_offsets;    /* bit offset within containing word (per-field) */
     int *word_indices;   /* which 8-byte word this field maps to (per-field) */
     int nwords;          /* 0 = nfields, >0 = packed word count */
+    int *field_array_sizes; /* -1 = not array, >=0 = array count (per-field) */
 } StructDef;
 
 typedef struct {
     char *name;
     char **params;
+    char **param_struct_types; /* struct type per param, NULL if not struct */
+    int *param_is_ptr;         /* 1 if param is pointer, per param */
+    int *param_is_char;        /* 1 if param is char type, per param */
     int nparams;
     Block body;
     int is_static;
     int ret_is_ptr;
     int is_variadic;
+    char *ret_struct_type; /* struct type returned (NULL if not struct ptr) */
 } FuncDef;
 
 typedef struct {
@@ -202,6 +209,8 @@ typedef struct {
     Expr *init;         /* NULL if no initializer */
     int is_extern;      /* 1 if extern declaration */
     int is_static;      /* 1 if static declaration */
+    int is_func_decl;   /* 1 if this is actually a function declaration */
+    int is_char;        /* 1 if base type is char/unsigned char */
 } GlobalDecl;
 
 typedef struct {
@@ -209,6 +218,7 @@ typedef struct {
     int ret_is_ptr;
     int is_variadic;
     int nparams;
+    char *ret_struct_type; /* struct type returned (NULL if not struct ptr) */
 } FuncProto;
 
 typedef struct {

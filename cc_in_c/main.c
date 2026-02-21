@@ -1046,7 +1046,7 @@ static int cmdline_defs_cap;
 static char *strip_preprocessor(const char *src, const char *filepath) {
     nmacros = 0;
     /* Predefined macros */
-    add_macro("__STDC__", "1");
+    /* Don't define __STDC__ — selfhost.c uses #ifndef __STDC__ for fallback declarations */
     add_macro("__STDC_VERSION__", "201112L");
     {
         /* __FILE__ = "filepath" */

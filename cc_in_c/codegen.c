@@ -35,13 +35,15 @@ static int nloop_stack;
 typedef struct {
     char *name;
     char **fields;
-    char **field_types;  /* NULL = int, non-NULL = struct type name */
+    char **field_types;     /* NULL = int, non-NULL = embedded struct type name */
+    char **field_ptr_types; /* NULL = not ptr-to-struct, non-NULL = pointed-to struct */
     int nfields;
     int is_union;
     int *bit_widths;     /* NULL if no bitfields */
     int *bit_offsets;
     int *word_indices;
     int nwords;          /* 0 = use nfields, >0 = packed word count */
+    int *field_array_sizes; /* NULL if no array fields; -1 = not array, >=0 = count */
 } CgStructDef;
 
 static CgStructDef *cg_structs;
@@ -53,6 +55,8 @@ typedef struct {
     char *name;
     int is_array;
     int is_structvar;
+    int is_func_decl;
+    int is_char_array; /* 1 if string-initialized char array */
 } GlobalVarEntry;
 
 static GlobalVarEntry *global_vars;
@@ -146,6 +150,14 @@ typedef struct {
 } UnsignedSlotEntry;
 
 typedef struct {
+    char *name;
+} CharPtrEntry;
+
+typedef struct {
+    char *name;
+} PtrVarEntry;
+
+typedef struct {
     SlotEntry slots[256];
     int nslots;
     ArrayEntry arrays[64];
@@ -156,6 +168,10 @@ typedef struct {
     int nptr_structvars;
     UnsignedSlotEntry unsigned_slots[256];
     int nunsigned_slots;
+    CharPtrEntry char_ptrs[256];
+    int nchar_ptrs;
+    PtrVarEntry ptr_vars[256];
+    int nptr_vars;
     int stack_size;
 } FuncLayout;
 
@@ -272,29 +288,82 @@ static int field_index(const char *struct_name, const char *field_name) {
     for (int i = 0; i < sd->nfields; i++) {
         if (strcmp(sd->fields[i], field_name) == 0)
             return slot;
+        int field_slots;
         if (sd->field_types[i])
-            slot += cg_struct_nfields(sd->field_types[i]);
+            field_slots = cg_struct_nfields(sd->field_types[i]);
         else
-            slot += 1;
+            field_slots = 1;
+        if (sd->field_array_sizes && sd->field_array_sizes[i] > 0) {
+            if (sd->field_types[i])
+                field_slots *= sd->field_array_sizes[i];
+            else
+                field_slots = (sd->field_array_sizes[i] + 7) / 8;
+        }
+        slot += field_slots;
     }
     return 0; /* field not found — use offset 0 */
+}
+
+static int is_array_field(const char *struct_name, const char *field_name) {
+    CgStructDef *sd = find_cg_struct(struct_name);
+    if (!sd || !sd->field_array_sizes) return 0;
+    for (int i = 0; i < sd->nfields; i++) {
+        if (strcmp(sd->fields[i], field_name) == 0)
+            return sd->field_array_sizes[i] >= 0;
+    }
+    return 0;
 }
 
 static int cg_struct_nfields(const char *name) {
     CgStructDef *sd = find_cg_struct(name);
     if (!sd) return 1; /* unknown struct — treat as 1 word */
-    /* Unions: all fields overlap, allocate 1 slot */
-    if (sd->is_union) return 1;
     /* Bitfield-packed struct: use nwords */
-    if (sd->nwords > 0) return sd->nwords;
+    if (!sd->is_union && sd->nwords > 0) return sd->nwords;
     int total = 0;
+    int max_field = 0;
     for (int i = 0; i < sd->nfields; i++) {
+        int field_slots;
         if (sd->field_types[i])
-            total += cg_struct_nfields(sd->field_types[i]);
+            field_slots = cg_struct_nfields(sd->field_types[i]);
         else
-            total += 1;
+            field_slots = 1;
+        /* Multiply by array size if this field is an array */
+        if (sd->field_array_sizes && sd->field_array_sizes[i] > 0) {
+            if (sd->field_types[i])
+                field_slots *= sd->field_array_sizes[i];
+            else
+                field_slots = (sd->field_array_sizes[i] + 7) / 8;
+        }
+        if (sd->is_union) {
+            if (field_slots > max_field) max_field = field_slots;
+        } else {
+            total += field_slots;
+        }
     }
+    if (sd->is_union) return max_field > 0 ? max_field : 1;
     return total;
+}
+
+/* Returns the struct type of a field within a struct (NULL if not a struct field) */
+static const char *find_field_struct_type(const char *struct_name, const char *field_name) {
+    CgStructDef *sd = find_cg_struct(struct_name);
+    if (!sd) return NULL;
+    for (int i = 0; i < sd->nfields; i++) {
+        if (strcmp(sd->fields[i], field_name) == 0)
+            return sd->field_types[i];
+    }
+    return NULL;
+}
+
+/* Returns the pointed-to struct type of a pointer field (NULL if not ptr-to-struct) */
+static const char *find_field_ptr_struct_type(const char *struct_name, const char *field_name) {
+    CgStructDef *sd = find_cg_struct(struct_name);
+    if (!sd || !sd->field_ptr_types) return NULL;
+    for (int i = 0; i < sd->nfields; i++) {
+        if (strcmp(sd->fields[i], field_name) == 0)
+            return sd->field_ptr_types[i];
+    }
+    return NULL;
 }
 
 /* Returns bitfield info: bit_width (0 if not bitfield), bit_offset */
@@ -315,6 +384,24 @@ static int get_bitfield_info(const char *struct_name, const char *field_name, in
 static int is_unsigned_var(FuncLayout *layout, const char *name) {
     for (int i = 0; i < layout->nunsigned_slots; i++)
         if (strcmp(layout->unsigned_slots[i].name, name) == 0)
+            return 1;
+    return 0;
+}
+
+static int is_char_ptr_var(FuncLayout *layout, const char *name) {
+    for (int i = 0; i < layout->nchar_ptrs; i++)
+        if (strcmp(layout->char_ptrs[i].name, name) == 0)
+            return 1;
+    return 0;
+}
+
+static int is_ptr_var(FuncLayout *layout, const char *name) {
+    for (int i = 0; i < layout->nptr_vars; i++)
+        if (strcmp(layout->ptr_vars[i].name, name) == 0)
+            return 1;
+    /* Also check ptr_structvars */
+    for (int i = 0; i < layout->nptr_structvars; i++)
+        if (strcmp(layout->ptr_structvars[i].name, name) == 0)
             return 1;
     return 0;
 }
@@ -524,6 +611,39 @@ static void walk_stmts_for_layout(StmtArray *stmts, FuncLayout *layout, int *off
                     nstatic_locals++;
                     /* Use offset -1 as sentinel for static local */
                     layout_add_slot(layout, e->name, -1);
+                    /* Register struct/array info so gen_value skips ldr and gen_addr uses correct stride */
+                    if (e->struct_type && e->array_size >= 0) {
+                        if (layout->nstructvars < 64) {
+                            layout->structvars[layout->nstructvars].name = xstrdup(e->name);
+                            layout->structvars[layout->nstructvars].struct_type = xstrdup(e->struct_type);
+                            layout->nstructvars++;
+                        }
+                        if (layout->narrays < 64) {
+                            layout->arrays[layout->narrays].name = xstrdup(e->name);
+                            layout->arrays[layout->narrays].count = e->array_size;
+                            layout->arrays[layout->narrays].inner_dim = -1;
+                            layout->narrays++;
+                        }
+                    } else if (e->struct_type && !e->is_ptr) {
+                        if (layout->nstructvars < 64) {
+                            layout->structvars[layout->nstructvars].name = xstrdup(e->name);
+                            layout->structvars[layout->nstructvars].struct_type = xstrdup(e->struct_type);
+                            layout->nstructvars++;
+                        }
+                    } else if (e->array_size >= 0) {
+                        if (layout->narrays < 64) {
+                            layout->arrays[layout->narrays].name = xstrdup(e->name);
+                            layout->arrays[layout->narrays].count = e->array_size;
+                            layout->arrays[layout->narrays].inner_dim = -1;
+                            layout->narrays++;
+                        }
+                    } else if (e->struct_type && e->is_ptr == 1) {
+                        if (layout->nptr_structvars < 64) {
+                            layout->ptr_structvars[layout->nptr_structvars].name = xstrdup(e->name);
+                            layout->ptr_structvars[layout->nptr_structvars].struct_type = xstrdup(e->struct_type);
+                            layout->nptr_structvars++;
+                        }
+                    }
                     continue;
                 }
                 if (e->struct_type && !e->is_ptr && e->array_size >= 0) {
@@ -568,6 +688,18 @@ static void walk_stmts_for_layout(StmtArray *stmts, FuncLayout *layout, int *off
                     if (layout->nunsigned_slots < 256) {
                         layout->unsigned_slots[layout->nunsigned_slots].name = xstrdup(e->name);
                         layout->nunsigned_slots++;
+                    }
+                }
+                if (e->is_char && e->is_ptr == 1) {
+                    if (layout->nchar_ptrs < 256) {
+                        layout->char_ptrs[layout->nchar_ptrs].name = xstrdup(e->name);
+                        layout->nchar_ptrs++;
+                    }
+                }
+                if (e->is_ptr && !(e->is_char && e->is_ptr == 1)) {
+                    if (layout->nptr_vars < 256) {
+                        layout->ptr_vars[layout->nptr_vars].name = xstrdup(e->name);
+                        layout->nptr_vars++;
                     }
                 }
             }
@@ -629,15 +761,60 @@ static FuncLayout layout_func(FuncDef *f) {
     memset(&layout, 0, sizeof(layout));
     int offset = 0;
 
+    int reg_idx = 0; /* which register to use for this param */
     for (int i = 0; i < f->nparams; i++) {
-        if (i < 8) {
-            offset += 8;
+        int param_nslots = 1;
+        /* Struct-by-value parameters occupy multiple slots */
+        if (f->param_struct_types && f->param_struct_types[i] &&
+            !(f->param_is_ptr && f->param_is_ptr[i])) {
+            param_nslots = cg_struct_nfields(f->param_struct_types[i]);
+            if (param_nslots < 1) param_nslots = 1;
+        }
+        if (reg_idx < 8) {
+            offset += param_nslots * 8;
             layout_add_slot(&layout, f->params[i], offset);
         } else {
-            /* Stack-passed params: at [x29+16+(i-8)*8] after prologue.
-               Use negative offset to signal "above x29". */
-            int above_off = 16 + (i - 8) * 8;
+            /* Stack-passed params: at [x29+16+(reg_idx-8)*8] after prologue. */
+            int above_off = 16 + (reg_idx - 8) * 8;
             layout_add_slot(&layout, f->params[i], -above_off);
+        }
+        reg_idx += param_nslots;
+    }
+
+    /* Register struct-typed params in structvars/ptr_structvars */
+    if (f->param_struct_types) {
+        for (int i = 0; i < f->nparams; i++) {
+            if (f->param_struct_types[i]) {
+                if (f->param_is_ptr && f->param_is_ptr[i] == 1) {
+                    layout.ptr_structvars[layout.nptr_structvars].name = xstrdup(f->params[i]);
+                    layout.ptr_structvars[layout.nptr_structvars].struct_type = xstrdup(f->param_struct_types[i]);
+                    layout.nptr_structvars++;
+                } else if (!f->param_is_ptr || !f->param_is_ptr[i]) {
+                    layout.structvars[layout.nstructvars].name = xstrdup(f->params[i]);
+                    layout.structvars[layout.nstructvars].struct_type = xstrdup(f->param_struct_types[i]);
+                    layout.nstructvars++;
+                }
+            }
+        }
+    }
+    /* Register char pointer params */
+    if (f->param_is_ptr) {
+        for (int i = 0; i < f->nparams; i++) {
+            if (f->param_is_ptr[i]) {
+                int is_char = f->param_is_char && f->param_is_char[i];
+                if (is_char) {
+                    if (layout.nchar_ptrs < 256) {
+                        layout.char_ptrs[layout.nchar_ptrs].name = xstrdup(f->params[i]);
+                        layout.nchar_ptrs++;
+                    }
+                } else if (!f->param_struct_types || !f->param_struct_types[i]) {
+                    /* Non-char, non-struct pointer param */
+                    if (layout.nptr_vars < 256) {
+                        layout.ptr_vars[layout.nptr_vars].name = xstrdup(f->params[i]);
+                        layout.nptr_vars++;
+                    }
+                }
+            }
         }
     }
 
@@ -697,14 +874,38 @@ static void gen_addr(Expr *e, FuncLayout *layout) {
         const char *idx_stype = NULL;
         int stride = 8;
         if (e->u.index.base->kind == ND_VAR) {
-            idx_stype = find_structvar_type(layout, e->u.index.base->u.var_name);
-            if (!idx_stype)
-                idx_stype = find_ptr_structvar_type(layout, e->u.index.base->u.var_name);
-            /* Check for 2D array: stride = inner_dim * 8 */
-            if (!idx_stype) {
-                int inner = get_array_inner_dim(layout, e->u.index.base->u.var_name);
-                if (inner >= 0)
-                    stride = inner * 8;
+            /* Check for char pointer or global char array: stride = 1 */
+            if (is_char_ptr_var(layout, e->u.index.base->u.var_name)) {
+                stride = 1;
+            } else {
+                GlobalVarEntry *gv = find_global(e->u.index.base->u.var_name);
+                if (gv && gv->is_char_array) stride = 1;
+            }
+            if (stride != 1) {
+                idx_stype = find_structvar_type(layout, e->u.index.base->u.var_name);
+                if (!idx_stype)
+                    idx_stype = find_ptr_structvar_type(layout, e->u.index.base->u.var_name);
+                /* Check for 2D array: stride = inner_dim * 8 */
+                if (!idx_stype) {
+                    int inner = get_array_inner_dim(layout, e->u.index.base->u.var_name);
+                    if (inner >= 0)
+                        stride = inner * 8;
+                }
+            }
+        }
+        /* Check if base is arrow/field access returning a struct pointer */
+        if (!idx_stype && (e->u.index.base->kind == ND_ARROW || e->u.index.base->kind == ND_FIELD)) {
+            if (e->u.index.base->u.field.struct_type) {
+                /* Check embedded struct type first, then pointer-to-struct type */
+                const char *field_stype = find_field_struct_type(
+                    e->u.index.base->u.field.struct_type,
+                    e->u.index.base->u.field.field);
+                if (!field_stype)
+                    field_stype = find_field_ptr_struct_type(
+                        e->u.index.base->u.field.struct_type,
+                        e->u.index.base->u.field.field);
+                if (field_stype)
+                    idx_stype = field_stype;
             }
         }
         if (idx_stype)
@@ -714,7 +915,7 @@ static void gen_addr(Expr *e, FuncLayout *layout) {
         gen_value(e->u.index.index, layout);
         if (stride == 8) {
             emit("\tlsl\tx0, x0, #3");
-        } else {
+        } else if (stride != 1) {
             emit("\tmov\tx1, #%d", stride);
             emit("\tmul\tx0, x0, x1");
         }
@@ -741,7 +942,7 @@ static void gen_addr(Expr *e, FuncLayout *layout) {
         gen_value(e, layout);
         return;
     }
-    fatal("Expression is not an lvalue");
+    fatal("Expression is not an lvalue (kind=%d, op=%c)", e->kind, e->kind == ND_UNARY ? e->u.unary.op : '?');
 }
 
 static void gen_value(Expr *e, FuncLayout *layout) {
@@ -788,6 +989,10 @@ static void gen_value(Expr *e, FuncLayout *layout) {
         int bf_bit_off;
         int bf_width = get_bitfield_info(e->u.field.struct_type, e->u.field.field, &bf_bit_off);
         gen_addr(e, layout);
+        /* Array fields decay to pointers (address), don't load */
+        if (is_array_field(e->u.field.struct_type, e->u.field.field)) {
+            return; /* address is already in x0 */
+        }
         emit("\tldr\tx0, [x0]");
         if (bf_width > 0) {
             if (bf_bit_off > 0)
@@ -812,7 +1017,21 @@ static void gen_value(Expr *e, FuncLayout *layout) {
             return;
         }
         gen_addr(e, layout);
-        emit("\tldr\tx0, [x0]");
+        /* Check if indexing a char pointer or global char array → use byte load */
+        {
+            int use_byte = 0;
+            if (e->u.index.base->kind == ND_VAR) {
+                if (is_char_ptr_var(layout, e->u.index.base->u.var_name))
+                    use_byte = 1;
+                GlobalVarEntry *gv = find_global(e->u.index.base->u.var_name);
+                if (gv && gv->is_char_array)
+                    use_byte = 1;
+            }
+            if (use_byte)
+                emit("\tldrb\tw0, [x0]");
+            else
+                emit("\tldr\tx0, [x0]");
+        }
         return;
     }
 
@@ -846,11 +1065,80 @@ static void gen_value(Expr *e, FuncLayout *layout) {
                 return;
             }
         }
+        /* Check if target is a struct variable (needs multi-word copy) */
+        {
+            const char *st_type = NULL;
+            /* Direct struct variable */
+            if (tgt->kind == ND_VAR)
+                st_type = find_structvar_type(layout, tgt->u.var_name);
+            /* Field access where the field is itself a struct */
+            if (!st_type && (tgt->kind == ND_FIELD || tgt->kind == ND_ARROW) &&
+                tgt->u.field.struct_type) {
+                st_type = find_field_struct_type(tgt->u.field.struct_type, tgt->u.field.field);
+            }
+            /* Global struct var */
+            if (!st_type && tgt->kind == ND_VAR) {
+                for (int gi = 0; gi < nglobal_vars; gi++) {
+                    if (strcmp(global_vars[gi].name, tgt->u.var_name) == 0 &&
+                        global_vars[gi].is_structvar) {
+                        st_type = global_vars[gi].name;
+                        break;
+                    }
+                }
+            }
+            if (st_type) {
+                int nf = cg_struct_nfields(st_type);
+                Expr *rhs = e->u.assign.rhs;
+                /* Only do multi-word copy if RHS looks like a struct value */
+                int rhs_is_struct = (rhs->kind == ND_VAR || rhs->kind == ND_FIELD ||
+                                     rhs->kind == ND_ARROW || rhs->kind == ND_INDEX ||
+                                     (rhs->kind == ND_UNARY && rhs->u.unary.op == '*') ||
+                                     rhs->kind == ND_CALL);
+                if (nf > 1 && rhs_is_struct) {
+                    /* Struct assignment: copy nf * 8 bytes from rhs addr to target addr */
+                    gen_addr(tgt, layout);
+                    emit("\tstr\tx0, [sp, #-16]!");  /* push dest addr */
+                    /* rhs should be a struct value; get its address */
+                    if (rhs->kind == ND_UNARY && rhs->u.unary.op == '*') {
+                        /* *ptr: address is the pointer value */
+                        gen_value(rhs->u.unary.rhs, layout);
+                    } else if (rhs->kind == ND_CALL) {
+                        /* Function call returns struct in x0 as pointer */
+                        gen_value(rhs, layout);
+                    } else {
+                        gen_addr(rhs, layout);
+                    }
+                    emit("\tldr\tx1, [sp], #16");  /* x1 = dest addr */
+                    /* x0 = src addr, x1 = dest addr */
+                    for (int fi = 0; fi < nf; fi++) {
+                        emit("\tldr\tx9, [x0, #%d]", fi * 8);
+                        emit("\tstr\tx9, [x1, #%d]", fi * 8);
+                    }
+                    return;
+                }
+            }
+        }
         gen_addr(e->u.assign.target, layout);
         emit("\tstr\tx0, [sp, #-16]!");
         gen_value(e->u.assign.rhs, layout);
         emit("\tldr\tx1, [sp], #16");
-        emit("\tstr\tx0, [x1]");
+        /* Check if assigning through a char pointer → use byte store */
+        {
+            Expr *tgt = e->u.assign.target;
+            int is_char_store = 0;
+            if (tgt->kind == ND_UNARY && tgt->u.unary.op == '*' &&
+                tgt->u.unary.rhs->kind == ND_VAR &&
+                is_char_ptr_var(layout, tgt->u.unary.rhs->u.var_name))
+                is_char_store = 1;
+            if (tgt->kind == ND_INDEX &&
+                tgt->u.index.base->kind == ND_VAR &&
+                is_char_ptr_var(layout, tgt->u.index.base->u.var_name))
+                is_char_store = 1;
+            if (is_char_store)
+                emit("\tstrb\tw0, [x1]");
+            else
+                emit("\tstr\tx0, [x1]");
+        }
         return;
     }
 
@@ -869,8 +1157,16 @@ static void gen_value(Expr *e, FuncLayout *layout) {
             return;
         }
         if (op == '*') {
+            /* Check if dereferencing a char pointer → use byte load */
+            int is_char_deref = 0;
+            if (e->u.unary.rhs->kind == ND_VAR &&
+                is_char_ptr_var(layout, e->u.unary.rhs->u.var_name))
+                is_char_deref = 1;
             gen_value(e->u.unary.rhs, layout);
-            emit("\tldr\tx0, [x0]");
+            if (is_char_deref)
+                emit("\tldrb\tw0, [x0]");
+            else
+                emit("\tldr\tx0, [x0]");
             return;
         }
         gen_value(e->u.unary.rhs, layout);
@@ -889,11 +1185,22 @@ static void gen_value(Expr *e, FuncLayout *layout) {
 
     if (e->kind == ND_POSTINC || e->kind == ND_POSTDEC) {
         Expr *operand = e->u.postinc_operand;
-        int inc = 1;
+        int inc = 1;  /* default for non-pointer or char pointer */
         if (operand->kind == ND_VAR) {
             const char *pstype = find_ptr_structvar_type(layout, operand->u.var_name);
             if (pstype)
                 inc = cg_struct_nfields(pstype) * 8;
+            else if (is_ptr_var(layout, operand->u.var_name))
+                inc = 8;  /* non-char, non-struct pointer: increment by element size (8) */
+        } else if (operand->kind == ND_ARROW || operand->kind == ND_FIELD) {
+            /* p->field++ where field is a pointer-to-struct */
+            const char *stype = operand->u.field.struct_type;
+            const char *fname = operand->u.field.field;
+            if (stype && fname) {
+                const char *fpt = find_field_ptr_struct_type(stype, fname);
+                if (fpt)
+                    inc = cg_struct_nfields(fpt) * 8;
+            }
         }
         gen_addr(operand, layout);
         emit("\tstr\tx0, [sp, #-16]!");      /* push addr */
@@ -1180,7 +1487,8 @@ static void gen_value(Expr *e, FuncLayout *layout) {
 
         /* Indirect call through function pointer variable */
         if (!is_known_func(name) &&
-            (has_slot(layout, name) || find_global(name))) {
+            (has_slot(layout, name) ||
+             (find_global(name) && !find_global(name)->is_func_decl))) {
             /* Load function pointer, push to stack */
             gen_value(new_var(name), layout);
             emit("\tstr\tx0, [sp, #-16]!");
@@ -1211,34 +1519,70 @@ static void gen_value(Expr *e, FuncLayout *layout) {
             return;
         }
 
-        /* Direct call */
+        /* Direct call — handle struct-by-value args */
+        int total_reg_slots = 0; /* total register slots needed */
         for (int i = 0; i < nargs; i++) {
-            gen_value(args[i], layout);
-            emit("\tstr\tx0, [sp, #-16]!");
+            /* Check if arg is a struct variable (by value) */
+            const char *arg_stype = NULL;
+            if (args[i]->kind == ND_VAR) {
+                arg_stype = find_structvar_type(layout, args[i]->u.var_name);
+                /* If it's an array of structs, it decays to a pointer — don't pass by value */
+                if (arg_stype && is_array(layout, args[i]->u.var_name))
+                    arg_stype = NULL;
+            }
+            if (arg_stype) {
+                /* Struct-by-value: push each field separately */
+                int nf = cg_struct_nfields(arg_stype);
+                gen_addr(args[i], layout); /* address of struct */
+                for (int f = 0; f < nf; f++) {
+                    if (f == 0) {
+                        emit("\tstr\tx0, [sp, #-16]!");  /* save base addr */
+                        emit("\tldr\tx0, [x0]");         /* load field 0 */
+                        emit("\tstr\tx0, [sp, #-16]!");  /* push field 0 */
+                    } else {
+                        emit("\tldr\tx0, [sp, #%d]", f * 16); /* reload base addr */
+                        emit("\tldr\tx0, [x0, #%d]", f * 8);  /* load field f */
+                        emit("\tstr\tx0, [sp, #-16]!");  /* push field f */
+                    }
+                }
+                /* Remove saved base addr from stack */
+                /* base addr is at sp + nf * 16 */
+                /* Move all pushed fields down by 16 to overwrite the base addr slot */
+                for (int f = nf - 1; f >= 0; f--) {
+                    emit("\tldr\tx9, [sp, #%d]", f * 16);
+                    emit("\tstr\tx9, [sp, #%d]", f * 16 + 16);
+                }
+                emit_add_imm("sp", "sp", 16); /* pop the extra slot */
+                total_reg_slots += nf;
+            } else {
+                gen_value(args[i], layout);
+                emit("\tstr\tx0, [sp, #-16]!");
+                total_reg_slots++;
+            }
         }
         {
-            int reg_nargs = nargs > 8 ? 8 : nargs;
-            int extra = nargs > 8 ? nargs - 8 : 0;
+            int reg_nargs = total_reg_slots > 8 ? 8 : total_reg_slots;
+            int extra = total_reg_slots > 8 ? total_reg_slots - 8 : 0;
             int stack_arg_space = extra > 0 ? ((extra * 8 + 15) / 16) * 16 : 0;
             if (stack_arg_space > 0)
                 emit_sub_imm("sp", "sp", stack_arg_space);
             /* Place extra args on the stack for callee */
             for (int i = 0; i < extra; i++) {
-                int src_disp = (nargs - 1 - (8 + i)) * 16 + stack_arg_space;
+                int src_disp = (total_reg_slots - 1 - (8 + i)) * 16 + stack_arg_space;
                 emit("\tldr\tx9, [sp, #%d]", src_disp);
                 emit("\tstr\tx9, [sp, #%d]", i * 8);
             }
             /* Load register args */
             for (int i = 0; i < reg_nargs; i++) {
-                int disp = (nargs - 1 - i) * 16 + stack_arg_space;
+                int disp = (total_reg_slots - 1 - i) * 16 + stack_arg_space;
                 emit("\tldr\tx%d, [sp, #%d]", i, disp);
             }
             emit("\tbl\t_%s", name);
             if (stack_arg_space > 0)
                 emit_add_imm("sp", "sp", stack_arg_space);
         }
-        if (nargs > 0)
-            emit_add_imm("sp", "sp", nargs * 16);
+        if (total_reg_slots > 0)
+            emit_add_imm("sp", "sp", total_reg_slots * 16);
         if (!func_returns_ptr(name))
             emit("\tsxtw\tx0, w0");
         return;
@@ -1868,13 +2212,26 @@ static void gen_func(FuncDef *f) {
     if (layout.stack_size)
         emit_sub_imm("sp", "sp", layout.stack_size);
 
-    for (int i = 0; i < f->nparams && i < 8; i++) {
-        int off = find_slot(&layout, f->params[i]);
-        if (off <= 255) {
-            emit("\tstr\tx%d, [x29, #-%d]", i, off);
-        } else {
-            emit_sub_imm("x9", "x29", off);
-            emit("\tstr\tx%d, [x9]", i);
+    {
+        int reg_idx = 0;
+        for (int i = 0; i < f->nparams && reg_idx < 8; i++) {
+            int param_nslots = 1;
+            if (f->param_struct_types && f->param_struct_types[i] &&
+                !(f->param_is_ptr && f->param_is_ptr[i])) {
+                param_nslots = cg_struct_nfields(f->param_struct_types[i]);
+                if (param_nslots < 1) param_nslots = 1;
+            }
+            int off = find_slot(&layout, f->params[i]);
+            for (int s = 0; s < param_nslots && reg_idx < 8; s++) {
+                int slot_off = off - (param_nslots - 1 - s) * 8;
+                if (slot_off <= 255) {
+                    emit("\tstr\tx%d, [x29, #-%d]", reg_idx, slot_off);
+                } else {
+                    emit_sub_imm("x9", "x29", slot_off);
+                    emit("\tstr\tx%d, [x9]", reg_idx);
+                }
+                reg_idx++;
+            }
         }
     }
     /* Params 8+ are already on stack at [x29+16], [x29+24], etc. */
@@ -1887,6 +2244,66 @@ static void gen_func(FuncDef *f) {
         emit_add_imm("sp", "sp", layout.stack_size);
     emit("\tldp\tx29, x30, [sp], #16");
     emit("\tret");
+}
+
+/* Evaluate a compile-time constant expression, returns success */
+static int eval_const_expr(Expr *e, long *out) {
+    if (e->kind == ND_NUM) { *out = e->u.num; return 1; }
+    if (e->kind == ND_UNARY && e->u.unary.op == '-') {
+        long v; if (eval_const_expr(e->u.unary.rhs, &v)) { *out = -v; return 1; }
+    }
+    if (e->kind == ND_UNARY && e->u.unary.op == '~') {
+        long v; if (eval_const_expr(e->u.unary.rhs, &v)) { *out = ~v; return 1; }
+    }
+    if (e->kind == ND_BINARY) {
+        long l, r;
+        if (eval_const_expr(e->u.binary.lhs, &l) && eval_const_expr(e->u.binary.rhs, &r)) {
+            if (strcmp(e->u.binary.op, "|") == 0) { *out = l | r; return 1; }
+            if (strcmp(e->u.binary.op, "&") == 0) { *out = l & r; return 1; }
+            if (strcmp(e->u.binary.op, "^") == 0) { *out = l ^ r; return 1; }
+            if (strcmp(e->u.binary.op, "+") == 0) { *out = l + r; return 1; }
+            if (strcmp(e->u.binary.op, "-") == 0) { *out = l - r; return 1; }
+            if (strcmp(e->u.binary.op, "*") == 0) { *out = l * r; return 1; }
+            if (strcmp(e->u.binary.op, "<<") == 0) { *out = l << r; return 1; }
+            if (strcmp(e->u.binary.op, ">>") == 0) { *out = l >> r; return 1; }
+        }
+    }
+    if (e->kind == ND_TERNARY) {
+        long c; if (eval_const_expr(e->u.ternary.cond, &c)) {
+            return eval_const_expr(c ? e->u.ternary.then_expr : e->u.ternary.else_expr, out);
+        }
+    }
+    return 0;
+}
+
+static void emit_static_init_elem(Expr *elem) {
+    if (elem->kind == ND_NUM) {
+        emit("\t.quad\t%d", elem->u.num);
+    } else if (elem->kind == ND_VAR) {
+        emit("\t.quad\t_%s", elem->u.var_name);
+    } else if (elem->kind == ND_STRLIT) {
+        char *decoded = decode_c_string(elem->u.str_val);
+        char *lab = intern_string(decoded);
+        emit("\t.quad\t%s", lab);
+    } else if (elem->kind == ND_UNARY && elem->u.unary.op == '&' &&
+               elem->u.unary.rhs->kind == ND_VAR) {
+        emit("\t.quad\t_%s", elem->u.unary.rhs->u.var_name);
+    } else if (elem->kind == ND_INITLIST) {
+        /* Nested init list (e.g. union initializer {0}) — emit first elem or 0 */
+        if (elem->u.initlist.elems.len > 0) {
+            emit_static_init_elem(elem->u.initlist.elems.data[0]);
+        } else {
+            emit("\t.quad\t0");
+        }
+    } else {
+        /* Try to evaluate as constant expression */
+        long val;
+        if (eval_const_expr(elem, &val)) {
+            emit("\t.quad\t%ld", val);
+        } else {
+            emit("\t.quad\t0");
+        }
+    }
 }
 
 char *codegen_generate(Program *prog) {
@@ -1913,6 +2330,21 @@ char *codegen_generate(Program *prog) {
             ptr_ret_funcs[nptr_ret_funcs++] = prog->funcs[i].name;
         }
     }
+    /* Also check extern function declarations that return pointers */
+    for (int i = 0; i < prog->nglobals; i++) {
+        if (prog->globals[i].is_func_decl && prog->globals[i].is_ptr) {
+            GROW(ptr_ret_funcs, nptr_ret_funcs, ptr_ret_funcs_cap, char *);
+            ptr_ret_funcs[nptr_ret_funcs++] = prog->globals[i].name;
+        }
+    }
+
+    /* DEBUG: dump ptr_ret_funcs */
+    fprintf(stderr, "DEBUG: nptr_ret_funcs=%d\n", nptr_ret_funcs);
+    for (int i = 0; i < nptr_ret_funcs; i++)
+        fprintf(stderr, "  ptr_ret_func[%d] = %s\n", i, ptr_ret_funcs[i]);
+    fprintf(stderr, "DEBUG: nprotos=%d\n", prog->nprotos);
+    for (int i = 0; i < prog->nprotos; i++)
+        fprintf(stderr, "  proto[%d] = %s ret_is_ptr=%d\n", i, prog->protos[i].name, prog->protos[i].ret_is_ptr);
 
     /* Register variadic functions */
     nvariadic_funcs = 0;
@@ -1945,6 +2377,13 @@ char *codegen_generate(Program *prog) {
         GROW(known_func_names, nknown_func_names, known_func_names_cap, char *);
         known_func_names[nknown_func_names++] = prog->funcs[i].name;
     }
+    /* Also register extern function declarations as known functions */
+    for (int i = 0; i < prog->nglobals; i++) {
+        if (prog->globals[i].is_func_decl) {
+            GROW(known_func_names, nknown_func_names, known_func_names_cap, char *);
+            known_func_names[nknown_func_names++] = prog->globals[i].name;
+        }
+    }
 
     /* Register struct/union definitions */
     for (int i = 0; i < prog->nstructs; i++) {
@@ -1952,12 +2391,14 @@ char *codegen_generate(Program *prog) {
         cg_structs[ncg_structs].name = prog->structs[i].name;
         cg_structs[ncg_structs].fields = prog->structs[i].fields;
         cg_structs[ncg_structs].field_types = prog->structs[i].field_types;
+        cg_structs[ncg_structs].field_ptr_types = prog->structs[i].field_ptr_types;
         cg_structs[ncg_structs].nfields = prog->structs[i].nfields;
         cg_structs[ncg_structs].is_union = prog->structs[i].is_union;
         cg_structs[ncg_structs].bit_widths = prog->structs[i].bit_widths;
         cg_structs[ncg_structs].bit_offsets = prog->structs[i].bit_offsets;
         cg_structs[ncg_structs].word_indices = prog->structs[i].word_indices;
         cg_structs[ncg_structs].nwords = prog->structs[i].nwords;
+        cg_structs[ncg_structs].field_array_sizes = prog->structs[i].field_array_sizes;
         ncg_structs++;
     }
 
@@ -1968,6 +2409,8 @@ char *codegen_generate(Program *prog) {
         global_vars[nglobal_vars].name = gd->name;
         global_vars[nglobal_vars].is_array = (gd->array_size >= 0);
         global_vars[nglobal_vars].is_structvar = (gd->struct_type != NULL && !gd->is_ptr && gd->array_size < 0);
+        global_vars[nglobal_vars].is_func_decl = gd->is_func_decl;
+        global_vars[nglobal_vars].is_char_array = (gd->array_size >= 0 && gd->is_char && !gd->is_ptr);
         nglobal_vars++;
     }
 
@@ -1982,15 +2425,26 @@ char *codegen_generate(Program *prog) {
             GlobalDecl *gd = &prog->globals[i];
             if (gd->is_extern) continue;
             if (gd->array_size >= 0 && gd->init && gd->init->kind == ND_INITLIST) {
-                /* Initialized array: emit .data with .quad per element */
+                /* Initialized array: emit .data */
                 if (!has_data) { emit(""); emit("\t.data"); has_data = 1; }
                 if (!gd->is_static)
                     emit("\t.globl\t_%s", gd->name);
-                emit("\t.p2align\t3");
+                int emit_as_bytes = (gd->is_char && !gd->is_ptr);
+                if (!emit_as_bytes)
+                    emit("\t.p2align\t3");
                 emit("_%s:", gd->name);
                 for (int k = 0; k < gd->init->u.initlist.elems.len; k++) {
                     Expr *elem = gd->init->u.initlist.elems.data[k];
-                    if (elem->kind == ND_NUM) {
+                    if (emit_as_bytes) {
+                        /* Char/byte array: emit .byte per element */
+                        int val = 0;
+                        if (elem->kind == ND_NUM)
+                            val = elem->u.num;
+                        else if (elem->kind == ND_UNARY && elem->u.unary.op == '-' &&
+                                 elem->u.unary.rhs->kind == ND_NUM)
+                            val = -elem->u.unary.rhs->u.num;
+                        emit("\t.byte\t%d", val & 0xff);
+                    } else if (elem->kind == ND_NUM) {
                         emit("\t.quad\t%d", elem->u.num);
                     } else if (elem->kind == ND_UNARY && elem->u.unary.op == '-' &&
                                elem->u.unary.rhs->kind == ND_NUM) {
@@ -2008,20 +2462,28 @@ char *codegen_generate(Program *prog) {
                         emit("\t.quad\t0"); /* fallback for non-constant */
                     }
                 }
+                /* Pad char array if array_size > init count */
+                if (emit_as_bytes && gd->array_size > gd->init->u.initlist.elems.len)
+                    emit("\t.space\t%d", gd->array_size - gd->init->u.initlist.elems.len);
             } else if (gd->array_size >= 0 && gd->init && gd->init->kind == ND_STRLIT) {
-                /* String-initialized array: emit .quad per character */
+                /* String-initialized char array: emit bytes */
                 char *decoded = decode_c_string(gd->init->u.str_val);
                 int slen = strlen(decoded) + 1;
                 if (!has_data) { emit(""); emit("\t.data"); has_data = 1; }
                 if (!gd->is_static)
                     emit("\t.globl\t_%s", gd->name);
-                emit("\t.p2align\t3");
                 emit("_%s:", gd->name);
-                for (int k = 0; k < slen && k < gd->array_size; k++)
-                    emit("\t.quad\t%d", (unsigned char)decoded[k]);
+                /* Emit the string content as bytes */
+                int emit_len = slen < gd->array_size ? slen : gd->array_size;
+                for (int k = 0; k < emit_len; k++)
+                    emit("\t.byte\t%d", (unsigned char)decoded[k]);
+                /* Pad remaining with zeros if array is larger */
+                if (gd->array_size > emit_len)
+                    emit("\t.space\t%d", gd->array_size - emit_len);
             } else if (gd->array_size >= 0) {
                 /* Uninitialized array: use .comm */
-                int size = gd->array_size * 8;
+                int elem_size = (gd->is_char && !gd->is_ptr) ? 1 : 8;
+                int size = gd->array_size * elem_size;
                 emit("\t.comm\t_%s, %d, 3", gd->name, size);
             } else if (gd->init != NULL && gd->init->kind == ND_NUM) {
                 /* Initialized scalar */
@@ -2041,6 +2503,54 @@ char *codegen_generate(Program *prog) {
                 emit("\t.p2align\t3");
                 emit("_%s:", gd->name);
                 emit("\t.quad\t%s", lab);
+            } else if (gd->struct_type != NULL && !gd->is_ptr && gd->array_size < 0 &&
+                       gd->init != NULL && gd->init->kind == ND_INITLIST) {
+                /* Initialized struct variable: emit .data with .quad per field */
+                int nf = cg_struct_nfields(gd->struct_type);
+                if (!has_data) { emit(""); emit("\t.data"); has_data = 1; }
+                if (!gd->is_static)
+                    emit("\t.globl\t_%s", gd->name);
+                emit("\t.p2align\t3");
+                emit("_%s:", gd->name);
+                int n = gd->init->u.initlist.elems.len;
+                for (int k = 0; k < nf; k++) {
+                    if (k < n) {
+                        Expr *elem = gd->init->u.initlist.elems.data[k];
+                        if (elem->kind == ND_NUM) {
+                            emit("\t.quad\t%d", elem->u.num);
+                        } else if (elem->kind == ND_UNARY && elem->u.unary.op == '-' &&
+                                   elem->u.unary.rhs->kind == ND_NUM) {
+                            emit("\t.quad\t%d", -elem->u.unary.rhs->u.num);
+                        } else if (elem->kind == ND_VAR) {
+                            emit("\t.quad\t_%s", elem->u.var_name);
+                        } else if (elem->kind == ND_STRLIT) {
+                            char *decoded = decode_c_string(elem->u.str_val);
+                            char *lab = intern_string(decoded);
+                            emit("\t.quad\t%s", lab);
+                        } else if (elem->kind == ND_UNARY && elem->u.unary.op == '&' &&
+                                   elem->u.unary.rhs->kind == ND_VAR) {
+                            emit("\t.quad\t_%s", elem->u.unary.rhs->u.var_name);
+                        } else if (elem->kind == ND_INITLIST) {
+                            /* Nested init list (e.g. sub-struct or sub-array) */
+                            int sn = elem->u.initlist.elems.len;
+                            for (int j = 0; j < sn; j++) {
+                                Expr *sub = elem->u.initlist.elems.data[j];
+                                if (sub->kind == ND_NUM)
+                                    emit("\t.quad\t%d", sub->u.num);
+                                else if (sub->kind == ND_VAR)
+                                    emit("\t.quad\t_%s", sub->u.var_name);
+                                else
+                                    emit("\t.quad\t0");
+                            }
+                            /* Pad remaining fields if sub-list is shorter */
+                            /* Skip: we don't know sub-struct field count here */
+                        } else {
+                            emit("\t.quad\t0");
+                        }
+                    } else {
+                        emit("\t.quad\t0"); /* zero-fill remaining fields */
+                    }
+                }
             } else {
                 /* Uninitialized scalar or struct */
                 if (gd->struct_type != NULL && !gd->is_ptr && gd->array_size < 0) {
@@ -2064,29 +2574,32 @@ char *codegen_generate(Program *prog) {
                 /* Complex init list (struct with function pointers, etc.) */
                 Expr *il = static_locals[i].init_expr;
                 int n = il->u.initlist.elems.len;
-                int nf = static_locals[i].nfields > n ? static_locals[i].nfields : n;
-                for (int k = 0; k < nf; k++) {
-                    if (k < n) {
-                        Expr *elem = il->u.initlist.elems.data[k];
-                        if (elem->kind == ND_NUM) {
-                            emit("\t.quad\t%d", elem->u.num);
-                        } else if (elem->kind == ND_VAR) {
-                            emit("\t.quad\t_%s", elem->u.var_name);
-                        } else if (elem->kind == ND_STRLIT) {
-                            char *decoded = decode_c_string(elem->u.str_val);
-                            char *lab = intern_string(decoded);
-                            emit("\t.quad\t%s", lab);
-                        } else if (elem->kind == ND_UNARY && elem->u.unary.op == '&' &&
-                                   elem->u.unary.rhs->kind == ND_VAR) {
-                            emit("\t.quad\t_%s", elem->u.unary.rhs->u.var_name);
-                        } else if (elem->kind == ND_UNARY && elem->u.unary.op == '-' &&
-                                   elem->u.unary.rhs->kind == ND_NUM) {
-                            emit("\t.quad\t%d", -elem->u.unary.rhs->u.num);
+                int nf = static_locals[i].nfields;
+                /* Check if elements are nested initlists (array of structs) */
+                int is_nested = (n > 0 && il->u.initlist.elems.data[0]->kind == ND_INITLIST);
+                if (is_nested && nf > 0) {
+                    /* Array of structs: emit each struct's fields */
+                    for (int arr_idx = 0; arr_idx < n; arr_idx++) {
+                        Expr *sub = il->u.initlist.elems.data[arr_idx];
+                        int sn = (sub->kind == ND_INITLIST) ? sub->u.initlist.elems.len : 0;
+                        for (int k = 0; k < nf; k++) {
+                            if (k < sn) {
+                                Expr *elem = sub->u.initlist.elems.data[k];
+                                emit_static_init_elem(elem);
+                            } else {
+                                emit("\t.quad\t0");
+                            }
+                        }
+                    }
+                } else {
+                    /* Flat init list: struct or simple array */
+                    int total = nf > n ? nf : n;
+                    for (int k = 0; k < total; k++) {
+                        if (k < n) {
+                            emit_static_init_elem(il->u.initlist.elems.data[k]);
                         } else {
                             emit("\t.quad\t0");
                         }
-                    } else {
-                        emit("\t.quad\t0");
                     }
                 }
             } else if (static_locals[i].has_init) {

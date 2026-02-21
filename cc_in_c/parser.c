@@ -11,6 +11,7 @@ typedef struct {
     char *struct_type;  /* NULL for int fields */
     int is_ptr;
     int bit_width;      /* 0 = normal field, >0 = bitfield width */
+    int array_size;     /* -1 = not array, >=0 = array element count */
 } FieldInfo;
 
 typedef struct {
@@ -24,6 +25,7 @@ typedef struct {
     char *name;
     char *struct_type;  /* NULL for int vars */
     int is_ptr;
+    int array_size;     /* -1 if not an array */
 } LocalVar;
 
 typedef struct {
@@ -47,6 +49,9 @@ static LocalVar *local_vars;
 static int nlocal_vars;
 static int local_vars_cap;
 
+/* Tracks struct type from most recent cast, for offsetof pattern: ((Type*)0)->field */
+static const char *last_cast_struct_type;
+
 static EnumConst *enum_consts;
 static int nenum_consts;
 static int enum_consts_cap;
@@ -55,6 +60,7 @@ static int enum_consts_cap;
 typedef struct {
     char *name;
     char *struct_type;  /* NULL for int/char/void/etc, struct name for struct types */
+    int is_char;        /* 1 if typedef of char/unsigned char */
 } TypedefEntry;
 
 static TypedefEntry *typedefs;
@@ -87,8 +93,41 @@ static GlobalVarInfo *find_global_var(const char *name) {
     return NULL;
 }
 
+/* Function return struct type registry */
+typedef struct {
+    char *name;
+    char *ret_struct_type; /* NULL if not returning struct ptr */
+} FuncRetInfo;
+
+static FuncRetInfo *func_ret_infos;
+static int nfunc_ret_infos;
+static int func_ret_infos_cap;
+
+static void add_func_ret_info(const char *name, const char *ret_struct_type) {
+    /* Update existing entry if present */
+    for (int i = 0; i < nfunc_ret_infos; i++) {
+        if (strcmp(func_ret_infos[i].name, name) == 0) {
+            if (ret_struct_type && !func_ret_infos[i].ret_struct_type)
+                func_ret_infos[i].ret_struct_type = xstrdup(ret_struct_type);
+            return;
+        }
+    }
+    GROW(func_ret_infos, nfunc_ret_infos, func_ret_infos_cap, FuncRetInfo);
+    func_ret_infos[nfunc_ret_infos].name = xstrdup(name);
+    func_ret_infos[nfunc_ret_infos].ret_struct_type = ret_struct_type ? xstrdup(ret_struct_type) : NULL;
+    nfunc_ret_infos++;
+}
+
+static const char *find_func_ret_struct(const char *name) {
+    for (int i = 0; i < nfunc_ret_infos; i++)
+        if (strcmp(func_ret_infos[i].name, name) == 0)
+            return func_ret_infos[i].ret_struct_type;
+    return NULL;
+}
+
 /* Flags set by parse_base_type */
 static int last_type_unsigned;
+static int last_type_is_char;
 static Type *last_type;  /* Type* built by most recent parse_base_type call */
 
 /* ---- Helpers ---- */
@@ -136,6 +175,39 @@ static StructDefInfo *find_struct_def(const char *name) {
     return NULL;
 }
 
+/* Recursively compute total 8-byte slots for a struct type */
+static int parser_struct_nslots(const char *name) {
+    StructDefInfo *sd = find_struct_def(name);
+    if (!sd) return 1;
+    if (sd->nwords > 0) return sd->nwords;
+    /* Check if this is a union by looking it up in the inline structs or program structs */
+    int is_union = 0;
+    for (int k = 0; k < ninline_structs; k++)
+        if (strcmp(inline_structs[k].name, name) == 0) { is_union = inline_structs[k].is_union; break; }
+    int total = 0;
+    int max_field = 0;
+    for (int i = 0; i < sd->nfields; i++) {
+        int field_slots;
+        if (sd->fields[i].struct_type && !sd->fields[i].is_ptr) {
+            field_slots = parser_struct_nslots(sd->fields[i].struct_type);
+            if (sd->fields[i].array_size > 0)
+                field_slots *= sd->fields[i].array_size;
+        } else {
+            if (sd->fields[i].array_size > 0)
+                field_slots = (sd->fields[i].array_size + 7) / 8;
+            else
+                field_slots = 1;
+        }
+        if (is_union) {
+            if (field_slots > max_field) max_field = field_slots;
+        } else {
+            total += field_slots;
+        }
+    }
+    if (is_union) return max_field > 0 ? max_field : 1;
+    return total > 0 ? total : 1;
+}
+
 static const char *field_struct_type(const char *struct_name, const char *field_name) {
     StructDefInfo *sd = find_struct_def(struct_name);
     if (!sd) return NULL;  /* unknown struct — return NULL for lenient handling */
@@ -147,12 +219,17 @@ static const char *field_struct_type(const char *struct_name, const char *field_
     return NULL;  /* field not found — lenient */
 }
 
-static void add_local(const char *name, const char *struct_type, int is_ptr) {
+static void add_local_arr(const char *name, const char *struct_type, int is_ptr, int array_size) {
     GROW(local_vars, nlocal_vars, local_vars_cap, LocalVar);
     local_vars[nlocal_vars].name = xstrdup(name);
     local_vars[nlocal_vars].struct_type = struct_type ? xstrdup(struct_type) : NULL;
     local_vars[nlocal_vars].is_ptr = is_ptr;
+    local_vars[nlocal_vars].array_size = array_size;
     nlocal_vars++;
+}
+
+static void add_local(const char *name, const char *struct_type, int is_ptr) {
+    add_local_arr(name, struct_type, is_ptr, -1);
 }
 
 static int find_enum_const(const char *name, int *out_val) {
@@ -172,11 +249,15 @@ static TypedefEntry *find_typedef(const char *name) {
     return NULL;
 }
 
-static void add_typedef(const char *name, const char *struct_type) {
+static void add_typedef_ex(const char *name, const char *struct_type, int is_char) {
     GROW(typedefs, ntypedefs, typedefs_cap, TypedefEntry);
     typedefs[ntypedefs].name = xstrdup(name);
     typedefs[ntypedefs].struct_type = struct_type ? xstrdup(struct_type) : NULL;
+    typedefs[ntypedefs].is_char = is_char;
     ntypedefs++;
+}
+static void add_typedef(const char *name, const char *struct_type) {
+    add_typedef_ex(name, struct_type, 0);
 }
 
 static void add_enum_const(const char *name, int value) {
@@ -262,7 +343,7 @@ static char *parse_base_type(void) {
                     eat(TK_OP, "("); eat(TK_OP, "*");
                     is_ptr = 1; is_funcptr = 1;
                 }
-                while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); is_ptr = 1; }
+                while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); is_ptr++; }
                 if (!is_funcptr && is_funcptr_decl()) {
                     eat(TK_OP, "("); eat(TK_OP, "*");
                     is_ptr++; is_funcptr = 1;
@@ -270,10 +351,22 @@ static char *parse_base_type(void) {
                 skip_qualifiers();
                 Tok *fname_tok = eat(TK_ID, NULL);
                 if (is_funcptr) { eat(TK_OP, ")"); skip_param_list(); }
+                int field_arr = -1;
                 if (match(TK_OP, "[")) {
                     eat(TK_OP, "[");
-                    if (!match(TK_OP, "]")) parse_const_expr();
-                    eat(TK_OP, "]");
+                    if (match(TK_OP, "]")) {
+                        field_arr = 0;
+                        eat(TK_OP, "]");
+                    } else {
+                        field_arr = parse_const_expr();
+                        eat(TK_OP, "]");
+                    }
+                    while (match(TK_OP, "[")) {
+                        eat(TK_OP, "[");
+                        int dim2 = parse_const_expr();
+                        eat(TK_OP, "]");
+                        if (field_arr > 0 && dim2 > 0) field_arr *= dim2;
+                    }
                 }
                 int bw = 0;
                 if (match(TK_OP, ":")) { eat(TK_OP, ":"); bw = parse_const_expr(); }
@@ -285,6 +378,7 @@ static char *parse_base_type(void) {
                 finfo[nfields].struct_type = ftype ? xstrdup(ftype) : NULL;
                 finfo[nfields].is_ptr = is_ptr;
                 finfo[nfields].bit_width = bw;
+                finfo[nfields].array_size = field_arr;
                 nfields++;
                 if (match(TK_OP, ",")) { eat(TK_OP, ","); continue; }
                 break;
@@ -310,9 +404,24 @@ static char *parse_base_type(void) {
             isd->bit_offsets = NULL;
             isd->word_indices = NULL;
             isd->nwords = 0;
+            /* Build field_array_sizes for inline struct */
+            {
+                int has_arr = 0;
+                for (int k = 0; k < nfields; k++)
+                    if (finfo[k].array_size >= 0) { has_arr = 1; break; }
+                if (has_arr) {
+                    isd->field_array_sizes = xmalloc(nfields * sizeof(int));
+                    for (int k = 0; k < nfields; k++)
+                        isd->field_array_sizes[k] = finfo[k].array_size;
+                } else {
+                    isd->field_array_sizes = NULL;
+                }
+            }
+            isd->field_ptr_types = xmalloc(nfields * sizeof(char *));
             for (int k = 0; k < nfields; k++) {
                 isd->fields[k] = xstrdup(finfo[k].name);
-                isd->field_types[k] = finfo[k].struct_type ? xstrdup(finfo[k].struct_type) : NULL;
+                isd->field_types[k] = (finfo[k].struct_type && !finfo[k].is_ptr) ? xstrdup(finfo[k].struct_type) : NULL;
+                isd->field_ptr_types[k] = (finfo[k].struct_type && finfo[k].is_ptr == 1) ? xstrdup(finfo[k].struct_type) : NULL;
             }
             last_type = is_union ? ty_union(synth_name) : ty_struct(synth_name);
             return xstrdup(synth_name);
@@ -339,10 +448,22 @@ static char *parse_base_type(void) {
                 skip_qualifiers();
                 Tok *fn2 = eat(TK_ID, NULL);
                 if (isfp2) { eat(TK_OP, ")"); skip_param_list(); }
+                int fa2 = -1;
                 if (match(TK_OP, "[")) {
                     eat(TK_OP, "[");
-                    if (!match(TK_OP, "]")) parse_const_expr();
-                    eat(TK_OP, "]");
+                    if (match(TK_OP, "]")) {
+                        fa2 = 0;
+                        eat(TK_OP, "]");
+                    } else {
+                        fa2 = parse_const_expr();
+                        eat(TK_OP, "]");
+                    }
+                    while (match(TK_OP, "[")) {
+                        eat(TK_OP, "[");
+                        int dim2 = parse_const_expr();
+                        eat(TK_OP, "]");
+                        if (fa2 > 0 && dim2 > 0) fa2 *= dim2;
+                    }
                 }
                 int bw2 = 0;
                 if (match(TK_OP, ":")) { eat(TK_OP, ":"); bw2 = parse_const_expr(); }
@@ -354,6 +475,7 @@ static char *parse_base_type(void) {
                 finfo2[nf2].struct_type = ftype2 ? xstrdup(ftype2) : NULL;
                 finfo2[nf2].is_ptr = isp2;
                 finfo2[nf2].bit_width = bw2;
+                finfo2[nf2].array_size = fa2;
                 nf2++;
                 if (match(TK_OP, ",")) { eat(TK_OP, ","); continue; }
                 break;
@@ -377,9 +499,24 @@ static char *parse_base_type(void) {
             isd2->bit_offsets = NULL;
             isd2->word_indices = NULL;
             isd2->nwords = 0;
+            /* Build field_array_sizes for named inline struct */
+            {
+                int has_arr = 0;
+                for (int k = 0; k < nf2; k++)
+                    if (finfo2[k].array_size >= 0) { has_arr = 1; break; }
+                if (has_arr) {
+                    isd2->field_array_sizes = xmalloc(nf2 * sizeof(int));
+                    for (int k = 0; k < nf2; k++)
+                        isd2->field_array_sizes[k] = finfo2[k].array_size;
+                } else {
+                    isd2->field_array_sizes = NULL;
+                }
+            }
+            isd2->field_ptr_types = xmalloc(nf2 * sizeof(char *));
             for (int k = 0; k < nf2; k++) {
                 isd2->fields[k] = xstrdup(finfo2[k].name);
-                isd2->field_types[k] = finfo2[k].struct_type ? xstrdup(finfo2[k].struct_type) : NULL;
+                isd2->field_types[k] = (finfo2[k].struct_type && !finfo2[k].is_ptr) ? xstrdup(finfo2[k].struct_type) : NULL;
+                isd2->field_ptr_types[k] = (finfo2[k].struct_type && finfo2[k].is_ptr == 1) ? xstrdup(finfo2[k].struct_type) : NULL;
             }
         }
         last_type = is_union ? ty_union(name->value) : ty_struct(name->value);
@@ -395,8 +532,9 @@ static char *parse_base_type(void) {
     /* All integer-like types: int, char, void, unsigned, signed, long, short, float, double */
     int got_type = 0;
     last_type_unsigned = 0;
+    last_type_is_char = 0;
     int has_char = 0, has_short = 0, has_long = 0, has_void = 0;
-    int has_float = 0, has_double = 0;
+    int has_float = 0, has_double = 0, has_signed = 0;
     int long_count = 0;
     while (match(TK_KW, "int") || match(TK_KW, "char") || match(TK_KW, "void") ||
            match(TK_KW, "unsigned") || match(TK_KW, "signed") ||
@@ -404,7 +542,8 @@ static char *parse_base_type(void) {
            match(TK_KW, "_Bool") || match(TK_KW, "bool") ||
            match(TK_KW, "float") || match(TK_KW, "double")) {
         if (match(TK_KW, "unsigned")) last_type_unsigned = 1;
-        else if (match(TK_KW, "char")) has_char = 1;
+        else if (match(TK_KW, "signed")) has_signed = 1;
+        else if (match(TK_KW, "char")) { has_char = 1; last_type_is_char = 1; }
         else if (match(TK_KW, "short")) has_short = 1;
         else if (match(TK_KW, "long")) { has_long = 1; long_count++; }
         else if (match(TK_KW, "void")) has_void = 1;
@@ -415,6 +554,9 @@ static char *parse_base_type(void) {
     }
     if (got_type) {
         skip_qualifiers();
+        /* signed char: treat as int-sized (not byte) to preserve sign on load */
+        if (has_char && has_signed && !last_type_unsigned)
+            last_type_is_char = 0;
         /* Build Type* based on what we saw */
         if (has_void)        last_type = ty_void();
         else if (has_float)  last_type = ty_float();
@@ -437,6 +579,7 @@ static char *parse_base_type(void) {
                 last_type = ty_struct(td->struct_type);
                 return xstrdup(td->struct_type);
             }
+            if (td->is_char) last_type_is_char = 1;
             last_type = ty_int();  /* typedef of non-struct = int-like for now */
             return NULL;
         }
@@ -486,7 +629,7 @@ static StructDef parse_struct_or_union_def(int is_union) {
         while (match(TK_OP, "*")) {
             eat(TK_OP, "*");
             skip_qualifiers();
-            is_ptr = 1;
+            is_ptr++;
         }
         /* Check again for funcptr after consuming pointer stars: type *(*name)(params) */
         if (!is_funcptr && is_funcptr_decl()) {
@@ -514,6 +657,7 @@ static StructDef parse_struct_or_union_def(int is_union) {
             finfo[nfields].struct_type = ftype;
             finfo[nfields].is_ptr = 1;
             finfo[nfields].bit_width = 0;
+            finfo[nfields].array_size = -1;
             nfields++;
             continue;
         }
@@ -531,6 +675,7 @@ static StructDef parse_struct_or_union_def(int is_union) {
             finfo[nfields].struct_type = ftype;
             finfo[nfields].is_ptr = 1;
             finfo[nfields].bit_width = 0;
+            finfo[nfields].array_size = -1;
             nfields++;
             continue;
         }
@@ -539,21 +684,31 @@ static StructDef parse_struct_or_union_def(int is_union) {
             /* Handle extra pointer stars for this declarator */
             int decl_is_ptr = is_ptr;
             if (!is_funcptr) {
-                while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); decl_is_ptr = 1; }
+                while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); decl_is_ptr++; }
             }
             Tok *fname_tok = eat(TK_ID, NULL);
             if (is_funcptr) {
                 eat(TK_OP, ")");
                 skip_param_list();
             }
-            /* skip array dimensions in struct fields (supports expressions) */
-            while (match(TK_OP, "[")) {
+            /* Parse array dimensions in struct fields */
+            int field_arr_size = -1;
+            if (match(TK_OP, "[")) {
                 eat(TK_OP, "[");
-                int depth = 1;
-                while (depth > 0) {
-                    if (match(TK_OP, "[")) { eat(TK_OP, "["); depth++; }
-                    else if (match(TK_OP, "]")) { eat(TK_OP, "]"); depth--; }
-                    else { pos++; }
+                if (match(TK_OP, "]")) {
+                    field_arr_size = 0; /* flexible array member */
+                    eat(TK_OP, "]");
+                } else {
+                    field_arr_size = parse_const_expr();
+                    eat(TK_OP, "]");
+                }
+                /* Skip additional dimensions (treat as flat) */
+                while (match(TK_OP, "[")) {
+                    eat(TK_OP, "[");
+                    int dim2 = parse_const_expr();
+                    eat(TK_OP, "]");
+                    if (field_arr_size > 0 && dim2 > 0)
+                        field_arr_size *= dim2;
                 }
             }
             /* Bitfield: field : width */
@@ -573,6 +728,7 @@ static StructDef parse_struct_or_union_def(int is_union) {
             finfo[nfields].struct_type = ftype;
             finfo[nfields].is_ptr = decl_is_ptr;
             finfo[nfields].bit_width = bit_width;
+            finfo[nfields].array_size = field_arr_size;
             nfields++;
 
             if (match(TK_OP, ",")) {
@@ -595,10 +751,15 @@ static StructDef parse_struct_or_union_def(int is_union) {
     struct_defs[nstruct_defs].nfields = nfields;
     nstruct_defs++;
 
-    /* Build field_types array for codegen */
+    /* Build field_types array for codegen
+     * field_types: non-NULL for embedded (non-pointer) struct fields
+     * field_ptr_types: non-NULL for pointer-to-struct fields */
     char **ftypes = xmalloc(nfields * sizeof(char *));
-    for (int i = 0; i < nfields; i++)
+    char **fptypes = xmalloc(nfields * sizeof(char *));
+    for (int i = 0; i < nfields; i++) {
         ftypes[i] = (finfo[i].struct_type && !finfo[i].is_ptr) ? xstrdup(finfo[i].struct_type) : NULL;
+        fptypes[i] = (finfo[i].struct_type && finfo[i].is_ptr == 1) ? xstrdup(finfo[i].struct_type) : NULL;
+    }
 
     /* Compute bitfield packing */
     int has_bitfields = 0;
@@ -609,12 +770,24 @@ static StructDef parse_struct_or_union_def(int is_union) {
     sd.name = name;
     sd.fields = fields;
     sd.field_types = ftypes;
+    sd.field_ptr_types = fptypes;
     sd.nfields = nfields;
     sd.is_union = is_union;
     sd.bit_widths = NULL;
     sd.bit_offsets = NULL;
     sd.word_indices = NULL;
     sd.nwords = 0;
+    /* Build field_array_sizes */
+    int has_array_fields = 0;
+    for (int i = 0; i < nfields; i++)
+        if (finfo[i].array_size >= 0) { has_array_fields = 1; break; }
+    if (has_array_fields) {
+        sd.field_array_sizes = xmalloc(nfields * sizeof(int));
+        for (int i = 0; i < nfields; i++)
+            sd.field_array_sizes[i] = finfo[i].array_size;
+    } else {
+        sd.field_array_sizes = NULL;
+    }
 
     if (has_bitfields) {
         sd.bit_widths = xmalloc(nfields * sizeof(int));
@@ -699,7 +872,14 @@ static int parse_const_primary(void) {
             else if (ty && (strcmp(ty, "int") == 0 || strcmp(ty, "unsigned") == 0 ||
                            strcmp(ty, "u32") == 0 || strcmp(ty, "i32") == 0 ||
                            strcmp(ty, "float") == 0)) sz = 4;
-            else sz = 8; /* long, double, pointer, struct, etc. */
+            else if (ty) {
+                /* Check if it's a struct/union type */
+                StructDefInfo *sd = find_struct_def(ty);
+                if (sd)
+                    sz = parser_struct_nslots(ty) * 8;
+                else
+                    sz = 8; /* unknown type, default to 8 */
+            } else sz = 8;
         } else {
             /* sizeof(expr) — skip the expression and assume 8 */
             int depth = 1;
@@ -904,6 +1084,7 @@ static Expr *parse_init_list(const char *struct_type_name) {
 static Stmt *parse_vardecl_stmt(int is_static) {
     char *stype = parse_base_type();
     int base_unsigned = last_type_unsigned;
+    int base_is_char = last_type_is_char;
     VarDeclEntry *entries = NULL;
     int count = 0;
     int ecap = 0;
@@ -997,11 +1178,12 @@ static Stmt *parse_vardecl_stmt(int is_static) {
         entries[count].init = init;
         entries[count].is_static = is_static;
         entries[count].is_unsigned = base_unsigned;
+        entries[count].is_char = base_is_char;
         entries[count].array_size2 = arr_size2;
         count++;
 
         if (stype)
-            add_local(name, stype, is_ptr);
+            add_local_arr(name, stype, is_ptr, arr_size);
 
         if (match(TK_OP, ",")) {
             eat(TK_OP, ",");
@@ -1162,6 +1344,9 @@ static Expr *parse_unary(void) {
                 Expr *init = parse_init_list(cast_stype);
                 return new_compound_lit(cast_stype, init);
             }
+            /* Track struct pointer casts for offsetof pattern: ((Type*)0)->field */
+            if (cast_stype)
+                last_cast_struct_type = cast_stype;
             Expr *operand = parse_unary();
             return operand; /* cast is a no-op for now */
         }
@@ -1235,16 +1420,12 @@ static Expr *parse_primary(void) {
                 } else if (is_char && !stype) {
                     sz = 1;
                 } else if (stype) {
-                    /* struct type: look up nfields */
+                    /* struct type: look up recursive size */
                     StructDefInfo *sd = find_struct_def(stype);
-                    if (sd) {
-                        if (sd->nwords > 0)
-                            sz = sd->nwords * 8;
-                        else
-                            sz = sd->nfields * 8;
-                    } else {
+                    if (sd)
+                        sz = parser_struct_nslots(stype) * 8;
+                    else
                         sz = 8;
-                    }
                 } else {
                     sz = 8; /* int, long, void, etc. */
                 }
@@ -1256,8 +1437,95 @@ static Expr *parse_primary(void) {
                     sz = arr_sz * sz;
                 }
             } else {
+                /* sizeof(expr) — try to resolve struct var for correct size */
+                /* Handle sizeof(*p) where p is a pointer to struct */
+                if (match(TK_OP, "*") && pos + 1 < ntoks &&
+                    toks[pos + 1].kind == TK_ID) {
+                    int save_pos = pos;
+                    eat(TK_OP, "*");
+                    char *vname = cur()->value;
+                    Tok *after = (pos + 1 < ntoks) ? &toks[pos + 1] : NULL;
+                    int after_is_close = after && after->kind == TK_OP && strcmp(after->value, ")") == 0;
+                    if (after_is_close) {
+                        LocalVar *lv = find_local(vname);
+                        if (lv && lv->is_ptr && lv->struct_type) {
+                            int nf = parser_struct_nslots(lv->struct_type);
+                            sz = nf * 8;
+                            eat(TK_ID, NULL);
+                            goto sizeof_done;
+                        }
+                    }
+                    /* Not a pointer-to-struct deref, backtrack */
+                    pos = save_pos;
+                }
+                if (match(TK_ID, NULL) && pos + 1 < ntoks) {
+                    char *vname = cur()->value;
+                    Tok *next = &toks[pos + 1];
+                    int next_is_close = (next->kind == TK_OP && strcmp(next->value, ")") == 0);
+                    int next_is_bracket = (next->kind == TK_OP && strcmp(next->value, "[") == 0);
+                    int next_is_arrow = (next->kind == TK_OP && strcmp(next->value, "->") == 0);
+                    int next_is_dot = (next->kind == TK_OP && strcmp(next->value, ".") == 0);
+                    if (next_is_close || next_is_bracket) {
+                        LocalVar *lv = find_local(vname);
+                        if (lv && lv->struct_type) {
+                            int nf = parser_struct_nslots(lv->struct_type);
+                            eat(TK_ID, NULL);
+                            if (next_is_bracket) {
+                                eat(TK_OP, "[");
+                                parse_expr(0);
+                                eat(TK_OP, "]");
+                                sz = nf * 8; /* single element */
+                            } else if (lv->array_size > 0) {
+                                sz = lv->array_size * nf * 8; /* whole array */
+                            } else if (!lv->is_ptr) {
+                                sz = nf * 8; /* single struct */
+                            }
+                            goto sizeof_done;
+                        }
+                        /* Non-struct local array: sizeof(arr) */
+                        if (lv && !lv->struct_type && lv->array_size > 0 && next_is_close) {
+                            eat(TK_ID, NULL);
+                            sz = lv->array_size * 8;
+                            goto sizeof_done;
+                        }
+                    }
+                    /* sizeof(var->field) or sizeof(var.field) */
+                    if (next_is_arrow || next_is_dot) {
+                        LocalVar *lv = find_local(vname);
+                        char *stype = NULL;
+                        if (lv) stype = lv->struct_type;
+                        if (stype && pos + 2 < ntoks && toks[pos + 2].kind == TK_ID) {
+                            char *fname = toks[pos + 2].value;
+                            /* Check if token after field name is ')' */
+                            if (pos + 3 < ntoks && toks[pos + 3].kind == TK_OP &&
+                                strcmp(toks[pos + 3].value, ")") == 0) {
+                                StructDefInfo *sd = find_struct_def(stype);
+                                if (sd) {
+                                    for (int fi = 0; fi < sd->nfields; fi++) {
+                                        if (strcmp(sd->fields[fi].name, fname) == 0) {
+                                            if (sd->fields[fi].array_size > 0) {
+                                                int elem_sz = 8;
+                                                if (sd->fields[fi].struct_type)
+                                                    elem_sz = parser_struct_nslots(sd->fields[fi].struct_type) * 8;
+                                                sz = sd->fields[fi].array_size * elem_sz;
+                                            } else if (sd->fields[fi].struct_type && !sd->fields[fi].is_ptr) {
+                                                sz = parser_struct_nslots(sd->fields[fi].struct_type) * 8;
+                                            } else {
+                                                sz = 8;
+                                            }
+                                            eat(TK_ID, NULL); /* var */
+                                            eat(TK_OP, NULL); /* -> or . */
+                                            eat(TK_ID, NULL); /* field */
+                                            goto sizeof_done;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 parse_expr(0);
-                sz = 8;
+            sizeof_done:;
             }
             eat(TK_OP, ")");
         } else {
@@ -1350,6 +1618,13 @@ static Expr *parse_primary(void) {
                 }
             } else if (e->kind == ND_INDEX && (e->u.index.base->kind == ND_FIELD || e->u.index.base->kind == ND_ARROW)) {
                 st = field_struct_type(e->u.index.base->u.field.struct_type, e->u.index.base->u.field.field);
+            } else if (e->kind == ND_CALL) {
+                st = find_func_ret_struct(e->u.call.name);
+            }
+            /* Use struct type from a recent cast */
+            if (!st && last_cast_struct_type) {
+                st = last_cast_struct_type;
+                last_cast_struct_type = NULL;
             }
             if (!st) st = "__unknown_struct";
             e = new_field(e, field, st);
@@ -1375,6 +1650,13 @@ static Expr *parse_primary(void) {
                 }
             } else if (e->kind == ND_INDEX && (e->u.index.base->kind == ND_FIELD || e->u.index.base->kind == ND_ARROW)) {
                 st = field_struct_type(e->u.index.base->u.field.struct_type, e->u.index.base->u.field.field);
+            } else if (e->kind == ND_CALL) {
+                st = find_func_ret_struct(e->u.call.name);
+            }
+            /* Use struct type from a recent cast, e.g. ((Parse*)0)->field */
+            if (!st && last_cast_struct_type) {
+                st = last_cast_struct_type;
+                last_cast_struct_type = NULL;
             }
             if (!st) st = "__unknown_struct";
             e = new_arrow(e, field, st);
@@ -1654,14 +1936,18 @@ static Stmt *parse_stmt(void) {
         /* Skip everything until semicolon, tracking parens for funcptr typedefs */
         int depth = 0;
         char *last_id = NULL;
+        int has_char = 0;
+        int has_ptr = 0;
         while (!(depth == 0 && match(TK_OP, ";"))) {
             if (match(TK_OP, "(")) depth++;
             else if (match(TK_OP, ")")) depth--;
+            if (cur()->kind == TK_KW && strcmp(cur()->value, "char") == 0) has_char = 1;
+            if (cur()->kind == TK_OP && strcmp(cur()->value, "*") == 0) has_ptr = 1;
             if (cur()->kind == TK_ID && depth <= 1) last_id = cur()->value;
             eat(cur()->kind, NULL);
         }
         eat(TK_OP, ";");
-        if (last_id) add_typedef(xstrdup(last_id), NULL);
+        if (last_id) add_typedef_ex(xstrdup(last_id), NULL, has_char && !has_ptr);
         return new_exprstmt(new_num(0));
     }
 
@@ -1711,13 +1997,16 @@ static Stmt *parse_stmt(void) {
    0 if it was just a prototype (semicolon after params). */
 static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
     nlocal_vars = 0;
-    parse_base_type();  /* return type */
+    char *ret_stype = parse_base_type();  /* return type */
     int ret_is_ptr = 0;
     while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); ret_is_ptr = 1; }
     Tok *name_tok = eat(TK_ID, NULL);
     eat(TK_OP, "(");
 
     char **params = NULL;
+    char **param_stypes = NULL;
+    int *param_ptrs = NULL;
+    int *param_chars = NULL;
     int nparams = 0;
     int pcap = 0;
     int is_variadic = 0;
@@ -1738,6 +2027,7 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
                     break;
                 }
                 char *stype = parse_base_type();
+                int p_is_char = last_type_is_char;
                 int is_ptr = 0;
                 int is_funcptr = 0;
                 /* Function pointer param: type (*name)(params) or type (*)(params) */
@@ -1747,11 +2037,15 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
                     is_ptr = 1;
                     is_funcptr = 1;
                 }
+                int ptr_depth = 0;
                 while (match(TK_OP, "*")) {
                     eat(TK_OP, "*");
-                    is_ptr = 1;
+                    is_ptr++;
+                    ptr_depth++;
                     skip_qualifiers();
                 }
+                /* char** or deeper: not a char pointer (deref gives pointer, not char) */
+                if (ptr_depth > 1) p_is_char = 0;
                 /* Check for funcptr after pointer stars: type *(*name)(params) */
                 if (!is_funcptr && is_funcptr_decl()) {
                     eat(TK_OP, "(");
@@ -1767,7 +2061,13 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
                     if (nparams >= pcap) {
                         pcap = pcap ? pcap * 2 : 8;
                         params = realloc(params, pcap * sizeof(char *));
+                        param_stypes = realloc(param_stypes, pcap * sizeof(char *));
+                        param_ptrs = realloc(param_ptrs, pcap * sizeof(int));
+                        param_chars = realloc(param_chars, pcap * sizeof(int));
                     }
+                    param_stypes[nparams] = stype ? xstrdup(stype) : NULL;
+                    param_ptrs[nparams] = is_ptr;
+                    param_chars[nparams] = p_is_char;
                     params[nparams++] = xstrdup("__unnamed");
                     if (match(TK_OP, ",")) { eat(TK_OP, ","); continue; }
                     break;
@@ -1789,7 +2089,13 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
                     if (nparams >= pcap) {
                         pcap = pcap ? pcap * 2 : 8;
                         params = realloc(params, pcap * sizeof(char *));
+                        param_stypes = realloc(param_stypes, pcap * sizeof(char *));
+                        param_ptrs = realloc(param_ptrs, pcap * sizeof(int));
+                        param_chars = realloc(param_chars, pcap * sizeof(int));
                     }
+                    param_stypes[nparams] = stype ? xstrdup(stype) : NULL;
+                    param_ptrs[nparams] = is_ptr;
+                    param_chars[nparams] = p_is_char;
                     params[nparams++] = xstrdup(pname->value);
                     if (stype)
                         add_local(pname->value, stype, is_ptr);
@@ -1798,7 +2104,13 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
                     if (nparams >= pcap) {
                         pcap = pcap ? pcap * 2 : 8;
                         params = realloc(params, pcap * sizeof(char *));
+                        param_stypes = realloc(param_stypes, pcap * sizeof(char *));
+                        param_ptrs = realloc(param_ptrs, pcap * sizeof(int));
+                        param_chars = realloc(param_chars, pcap * sizeof(int));
                     }
+                    param_stypes[nparams] = stype ? xstrdup(stype) : NULL;
+                    param_ptrs[nparams] = is_ptr;
+                    param_chars[nparams] = p_is_char;
                     params[nparams++] = xstrdup("__unnamed");
                 }
                 if (match(TK_OP, ",")) {
@@ -1819,19 +2131,29 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
             proto->ret_is_ptr = ret_is_ptr;
             proto->is_variadic = is_variadic;
             proto->nparams = nparams;
+            proto->ret_struct_type = (ret_stype && ret_is_ptr) ? xstrdup(ret_stype) : NULL;
         }
+        if (ret_stype && ret_is_ptr)
+            add_func_ret_info(name_tok->value, ret_stype);
         return 0;
     }
+
+    if (ret_stype && ret_is_ptr)
+        add_func_ret_info(name_tok->value, ret_stype);
 
     Block body = parse_block();
 
     fd->name = xstrdup(name_tok->value);
     fd->params = params;
+    fd->param_struct_types = param_stypes;
+    fd->param_is_ptr = param_ptrs;
+    fd->param_is_char = param_chars;
     fd->nparams = nparams;
     fd->body = body;
     fd->is_static = is_static;
     fd->ret_is_ptr = ret_is_ptr;
     fd->is_variadic = is_variadic;
+    fd->ret_struct_type = (ret_stype && ret_is_ptr) ? xstrdup(ret_stype) : NULL;
     return 1;
 }
 
@@ -1841,6 +2163,7 @@ static GlobalDecl parse_extern_decl(void) {
     /* extern might be followed by a string literal (linkage spec) - skip */
 
     char *stype = parse_base_type();
+    int base_is_char = last_type_is_char;
     int is_ptr = 0;
     int is_funcptr = 0;
     /* extern function pointer: extern type (*name)(params); */
@@ -1853,7 +2176,7 @@ static GlobalDecl parse_extern_decl(void) {
     while (match(TK_OP, "*")) {
         eat(TK_OP, "*");
         skip_qualifiers();
-        is_ptr = 1;
+        is_ptr++;
     }
     Tok *name_tok = eat(TK_ID, NULL);
     if (is_funcptr) {
@@ -1868,7 +2191,9 @@ static GlobalDecl parse_extern_decl(void) {
         eat(TK_OP, "]");
     }
     /* Skip function prototype: extern int foo(int x); */
+    int is_func = 0;
     if (match(TK_OP, "(")) {
+        is_func = 1;
         eat(TK_OP, "(");
         int depth = 1;
         while (depth > 0) {
@@ -1888,6 +2213,10 @@ static GlobalDecl parse_extern_decl(void) {
     gd.init = NULL;
     gd.is_extern = 1;
     gd.is_static = 0;
+    gd.is_func_decl = is_func;
+    gd.is_char = base_is_char;
+    if (is_func && stype && is_ptr)
+        add_func_ret_info(name_tok->value, stype);
     return gd;
 }
 
@@ -1909,6 +2238,7 @@ static int is_func_lookahead(void) {
 /* ---- Global variable declaration ---- */
 static GlobalDecl parse_global_decl(int is_static) {
     char *stype = parse_base_type();
+    int base_is_char = last_type_is_char;
     int is_ptr = 0;
     int is_funcptr = 0;
     /* Function pointer global: type (*name)(params) */
@@ -1921,7 +2251,7 @@ static GlobalDecl parse_global_decl(int is_static) {
     while (match(TK_OP, "*")) {
         eat(TK_OP, "*");
         skip_qualifiers();
-        is_ptr = 1;
+        is_ptr++;
     }
     /* funcptr after pointer stars: type *(*name)(params) */
     if (!is_funcptr && is_funcptr_decl()) {
@@ -1993,6 +2323,8 @@ static GlobalDecl parse_global_decl(int is_static) {
     gd.init = init;
     gd.is_extern = 0;
     gd.is_static = is_static;
+    gd.is_func_decl = 0;
+    gd.is_char = base_is_char;
     /* Register in parser's global variable table for struct type resolution */
     if (stype) add_global_var_info(name_tok->value, stype, is_ptr);
     return gd;
@@ -2121,6 +2453,7 @@ Program *parse_program(TokArray tokarr) {
     nenum_consts = 0;
     ntypedefs = 0;
     nglobal_var_infos = 0;
+    nfunc_ret_infos = 0;
 
     /* Add sizeof as a keyword for recognition */
 
@@ -2167,7 +2500,7 @@ Program *parse_program(TokArray tokarr) {
                             eat(TK_OP, "("); eat(TK_OP, "*");
                             is_ptr = 1; is_funcptr = 1;
                         }
-                        while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); is_ptr = 1; }
+                        while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); is_ptr++; }
                         if (!is_funcptr && is_funcptr_decl()) {
                             eat(TK_OP, "("); eat(TK_OP, "*");
                             is_ptr++; is_funcptr = 1;
@@ -2175,9 +2508,11 @@ Program *parse_program(TokArray tokarr) {
                         skip_qualifiers();
                         Tok *fname_tok = eat(TK_ID, NULL);
                         if (is_funcptr) { eat(TK_OP, ")"); skip_param_list(); }
+                        int arr_sz = -1;
                         if (match(TK_OP, "[")) {
                             eat(TK_OP, "[");
-                            if (!match(TK_OP, "]")) parse_const_expr();
+                            if (!match(TK_OP, "]")) arr_sz = parse_const_expr();
+                            else arr_sz = 0; /* flexible array */
                             eat(TK_OP, "]");
                         }
                         int bw = 0;
@@ -2192,6 +2527,7 @@ Program *parse_program(TokArray tokarr) {
                         finfo[nf].struct_type = ftype;
                         finfo[nf].is_ptr = is_ptr;
                         finfo[nf].bit_width = bw;
+                        finfo[nf].array_size = arr_sz;
                         nf++;
                         if (match(TK_OP, ",")) { eat(TK_OP, ","); continue; }
                         break;
@@ -2216,8 +2552,11 @@ Program *parse_program(TokArray tokarr) {
 
                     /* Also add to program structs */
                     char **ftypes = xmalloc(nf * sizeof(char *));
-                    for (int fi = 0; fi < nf; fi++)
+                    char **fptypes = xmalloc(nf * sizeof(char *));
+                    for (int fi = 0; fi < nf; fi++) {
                         ftypes[fi] = (finfo[fi].struct_type && !finfo[fi].is_ptr) ? xstrdup(finfo[fi].struct_type) : NULL;
+                        fptypes[fi] = (finfo[fi].struct_type && finfo[fi].is_ptr == 1) ? xstrdup(finfo[fi].struct_type) : NULL;
+                    }
                     if (nstructs >= scap) {
                         scap = scap ? scap * 2 : 4;
                         structs = realloc(structs, scap * sizeof(StructDef));
@@ -2225,12 +2564,26 @@ Program *parse_program(TokArray tokarr) {
                     structs[nstructs].name = xstrdup(tag_name);
                     structs[nstructs].fields = fields;
                     structs[nstructs].field_types = ftypes;
+                    structs[nstructs].field_ptr_types = fptypes;
                     structs[nstructs].nfields = nf;
                     structs[nstructs].is_union = is_union_td;
                     structs[nstructs].bit_widths = NULL;
                     structs[nstructs].bit_offsets = NULL;
                     structs[nstructs].word_indices = NULL;
                     structs[nstructs].nwords = 0;
+                    /* Build field_array_sizes */
+                    {
+                        int has_arr = 0;
+                        for (int k = 0; k < nf; k++)
+                            if (finfo[k].array_size >= 0) { has_arr = 1; break; }
+                        if (has_arr) {
+                            structs[nstructs].field_array_sizes = xmalloc(nf * sizeof(int));
+                            for (int k = 0; k < nf; k++)
+                                structs[nstructs].field_array_sizes[k] = finfo[k].array_size;
+                        } else {
+                            structs[nstructs].field_array_sizes = NULL;
+                        }
+                    }
                     nstructs++;
                 }
 
@@ -2275,6 +2628,7 @@ Program *parse_program(TokArray tokarr) {
                 /* typedef <base-type> [*]* Name; or typedef with function pointers */
                 /* Try to parse base type */
                 char *stype = parse_base_type();
+                int td_is_char = last_type_is_char;
                 /* Check for function pointer: (*Name)(params) */
                 if (match(TK_OP, "(") && pos + 1 < ntoks &&
                     toks[pos+1].kind == TK_OP && strcmp(toks[pos+1].value, "*") == 0) {
@@ -2296,7 +2650,7 @@ Program *parse_program(TokArray tokarr) {
                     add_typedef(alias, NULL);
                 } else {
                     /* Normal: typedef type [*]* Name; */
-                    while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); stype = NULL; /* ptr-to-struct is just ptr */ }
+                    while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); stype = NULL; td_is_char = 0; /* ptr-to-struct is just ptr */ }
                     /* Check again for funcptr after stars: typedef int *(*Name)(params); */
                     if (match(TK_OP, "(") && pos + 1 < ntoks &&
                         toks[pos+1].kind == TK_OP && strcmp(toks[pos+1].value, "*") == 0) {
@@ -2324,7 +2678,7 @@ Program *parse_program(TokArray tokarr) {
                         eat(TK_OP, "]");
                     }
                     eat(TK_OP, ";");
-                    add_typedef(alias, stype);
+                    add_typedef_ex(alias, stype, td_is_char);
                 }
             }
             continue;
