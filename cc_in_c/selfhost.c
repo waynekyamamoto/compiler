@@ -26,9 +26,9 @@ int system(int *cmd);
 enum { TK_NUM, TK_ID, TK_STR, TK_KW, TK_OP, TK_EOF };
 enum { ND_NUM, ND_VAR, ND_STRLIT, ND_CALL, ND_UNARY, ND_BINARY,
        ND_INDEX, ND_FIELD, ND_ARROW, ND_ASSIGN, ND_POSTINC, ND_POSTDEC,
-       ND_TERNARY, ND_INITLIST, ND_COMPOUND_LIT };
+       ND_TERNARY, ND_INITLIST, ND_COMPOUND_LIT, ND_CAST };
 enum { ST_RETURN, ST_IF, ST_WHILE, ST_FOR, ST_BREAK, ST_CONTINUE,
-       ST_EXPR, ST_VARDECL, ST_DOWHILE, ST_GOTO, ST_LABEL, ST_SWITCH };
+       ST_EXPR, ST_VARDECL, ST_DOWHILE, ST_GOTO, ST_LABEL, ST_SWITCH, ST_BLOCK };
 
 // ---- Structs ----
 struct Expr {
@@ -52,6 +52,7 @@ struct VarDecl {
   int is_static;
   int is_unsigned;
   int arr_size2;
+  int is_char;
 };
 
 struct Stmt {
@@ -82,6 +83,8 @@ struct FuncDef {
   int nbody;
   int ret_is_ptr;
   int is_variadic;
+  int *param_is_char;
+  int *param_is_intptr;
 };
 
 struct SDef {
@@ -118,6 +121,7 @@ struct GDecl {
   int has_init;
   int *init_str;
   struct Expr *init_list;  // ND_INITLIST node for array init (NULL if no array init)
+  int *stype;  // struct type name (or 0 for non-struct)
 };
 
 struct Program {
@@ -193,6 +197,12 @@ int *lv_stype[256];
 int lv_isptr[256];
 int nlv;
 
+// Global variable struct type table (persistent across functions)
+int *glv_name[256];
+int *glv_stype[256];
+int glv_isptr[256];
+int nglv;
+
 // Layout data
 int *lay_name[256];
 int lay_off[256];
@@ -209,6 +219,10 @@ int *lay_psv_type[64];
 int nlay_psv;
 int *lay_unsigned_name[256];
 int nlay_unsigned;
+int *lay_char_name[256];
+int nlay_char;
+int *lay_intptr_name[256];
+int nlay_intptr;
 int lay_stack_size;
 
 // Enum constant table
@@ -244,6 +258,7 @@ int *macro_values[256];
 int macro_nparams[256];  // -1 = object-like, >=0 = function-like
 int **macro_params[256]; // param name arrays for function-like
 int *macro_bodies[256];  // body text for function-like
+int macro_is_variadic[256]; // 1 if macro has ... param
 int nmacros;
 
 // Conditional compilation stack
@@ -330,6 +345,12 @@ int my_atoi(int *s) {
     i += 2;
     while (is_hex_digit(__read_byte(s, i))) {
       val = val * 16 + hex_digit_val(__read_byte(s, i));
+      i++;
+    }
+  } else if (__read_byte(s, i) == '0' && __read_byte(s, i + 1) >= '0' && __read_byte(s, i + 1) <= '7') {
+    i++;
+    while (__read_byte(s, i) >= '0' && __read_byte(s, i) <= '7') {
+      val = val * 8 + __read_byte(s, i) - '0';
       i++;
     }
   } else {
@@ -663,6 +684,7 @@ int ifex_parse_primary() {
 int ifex_parse_unary() {
   ifex_skip_ws();
   if (ifex_ch() == '!') { ifex_pos++; return ifex_parse_unary() == 0 ? 1 : 0; }
+  if (ifex_ch() == '+') { ifex_pos++; return ifex_parse_unary(); }
   if (ifex_ch() == '-') { ifex_pos++; return 0 - ifex_parse_unary(); }
   if (ifex_ch() == '~') { ifex_pos++; return ~ifex_parse_unary(); }
   return ifex_parse_primary();
@@ -847,7 +869,43 @@ int is_keyword(int *s) {
   if (my_strcmp(s, "_Bool") == 0) { return 1; }
   if (my_strcmp(s, "bool") == 0) { return 1; }
   if (my_strcmp(s, "union") == 0) { return 1; }
+  if (my_strcmp(s, "restrict") == 0) { return 1; }
+  if (my_strcmp(s, "__attribute__") == 0) { return 1; }
+  if (my_strcmp(s, "__extension__") == 0) { return 1; }
+  if (my_strcmp(s, "__inline__") == 0) { return 1; }
+  if (my_strcmp(s, "__inline") == 0) { return 1; }
+  if (my_strcmp(s, "__restrict") == 0) { return 1; }
+  if (my_strcmp(s, "__restrict__") == 0) { return 1; }
+  if (my_strcmp(s, "__volatile__") == 0) { return 1; }
+  if (my_strcmp(s, "__const__") == 0) { return 1; }
+  if (my_strcmp(s, "_Static_assert") == 0) { return 1; }
+  if (my_strcmp(s, "_Noreturn") == 0) { return 1; }
+  if (my_strcmp(s, "_Alignof") == 0) { return 1; }
   return 0;
+}
+
+void merge_string_literals() {
+  int ri = 0;
+  int wi = 0;
+  while (ri < ntokens) {
+    if (tok_kind[ri] == TK_STR && ri + 1 < ntokens && tok_kind[ri + 1] == TK_STR) {
+      int *merged = my_strdup(tok_val[ri]);
+      while (ri + 1 < ntokens && tok_kind[ri + 1] == TK_STR) {
+        ri++;
+        merged = build_str2(merged, tok_val[ri]);
+      }
+      tok_kind[wi] = TK_STR;
+      tok_val[wi] = merged;
+      tok_pos[wi] = tok_pos[ri];
+    } else if (wi != ri) {
+      tok_kind[wi] = tok_kind[ri];
+      tok_val[wi] = tok_val[ri];
+      tok_pos[wi] = tok_pos[ri];
+    }
+    wi++;
+    ri++;
+  }
+  ntokens = wi;
 }
 
 int lex(int *src, int srclen) {
@@ -1019,6 +1077,14 @@ int lex(int *src, int srclen) {
       continue;
     }
 
+    // Three-char operators
+    if (i + 2 < len) {
+      c1 = __read_byte(buf, i + 1);
+      int c2 = __read_byte(buf, i + 2);
+      if (c == '<' && c1 == '<' && c2 == '=') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup("<<="); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 3; continue; }
+      if (c == '>' && c1 == '>' && c2 == '=') { tok_kind[ntokens] = TK_OP; tok_val[ntokens] = my_strdup(">>="); tok_pos[ntokens] = i; ntokens = ntokens + 1; i = i + 3; continue; }
+    }
+
     // Two-char operators
     if (i + 1 < len) {
       c1 = __read_byte(buf, i + 1);
@@ -1065,6 +1131,10 @@ int lex(int *src, int srclen) {
   tok_val[ntokens] = my_strdup("");
   tok_pos[ntokens] = len;
   ntokens++;
+
+  // String literal concatenation: merge adjacent TK_STR tokens
+  merge_string_literals();
+
   return 0;
 }
 
@@ -1097,6 +1167,14 @@ int *find_lv_stype(int *name) {
   while (i < nlv) {
     if (my_strcmp(lv_name[i], name) == 0) {
       return lv_stype[i];
+    }
+    i++;
+  }
+  // Also check global struct variable table
+  i = 0;
+  while (i < nglv) {
+    if (my_strcmp(glv_name[i], name) == 0) {
+      return glv_stype[i];
     }
     i++;
   }
@@ -1157,28 +1235,28 @@ int *resolve_stype(struct Expr *e) {
 // ---- AST constructors ----
 
 struct Expr *new_num(int val) {
-  struct Expr *e = my_malloc(64);
+  struct Expr *e = my_malloc(56);
   e->kind = ND_NUM;
   e->ival = val;
   return e;
 }
 
 struct Expr *new_var(int *name) {
-  struct Expr *e = my_malloc(64);
+  struct Expr *e = my_malloc(56);
   e->kind = ND_VAR;
   e->sval = my_strdup(name);
   return e;
 }
 
 struct Expr *new_strlit(int *val) {
-  struct Expr *e = my_malloc(64);
+  struct Expr *e = my_malloc(56);
   e->kind = ND_STRLIT;
   e->sval = my_strdup(val);
   return e;
 }
 
 struct Expr *new_call(int *name, struct Expr **args, int nargs) {
-  struct Expr *e = my_malloc(64);
+  struct Expr *e = my_malloc(56);
   e->kind = ND_CALL;
   e->sval = my_strdup(name);
   e->args = args;
@@ -1187,7 +1265,7 @@ struct Expr *new_call(int *name, struct Expr **args, int nargs) {
 }
 
 struct Expr *new_unary(int op, struct Expr *rhs) {
-  struct Expr *e = my_malloc(64);
+  struct Expr *e = my_malloc(56);
   e->kind = ND_UNARY;
   e->ival = op;
   e->left = rhs;
@@ -1195,7 +1273,7 @@ struct Expr *new_unary(int op, struct Expr *rhs) {
 }
 
 struct Expr *new_binary(int *op, struct Expr *lhs, struct Expr *rhs) {
-  struct Expr *e = my_malloc(64);
+  struct Expr *e = my_malloc(56);
   e->kind = ND_BINARY;
   e->sval2 = my_strdup(op);
   e->left = lhs;
@@ -1204,7 +1282,7 @@ struct Expr *new_binary(int *op, struct Expr *lhs, struct Expr *rhs) {
 }
 
 struct Expr *new_index(struct Expr *base, struct Expr *idx) {
-  struct Expr *e = my_malloc(64);
+  struct Expr *e = my_malloc(56);
   e->kind = ND_INDEX;
   e->left = base;
   e->right = idx;
@@ -1212,7 +1290,7 @@ struct Expr *new_index(struct Expr *base, struct Expr *idx) {
 }
 
 struct Expr *new_field(struct Expr *obj, int *field, int *stype) {
-  struct Expr *e = my_malloc(64);
+  struct Expr *e = my_malloc(56);
   e->kind = ND_FIELD;
   e->left = obj;
   e->sval = my_strdup(field);
@@ -1221,7 +1299,7 @@ struct Expr *new_field(struct Expr *obj, int *field, int *stype) {
 }
 
 struct Expr *new_arrow(struct Expr *obj, int *field, int *stype) {
-  struct Expr *e = my_malloc(64);
+  struct Expr *e = my_malloc(56);
   e->kind = ND_ARROW;
   e->left = obj;
   e->sval = my_strdup(field);
@@ -1230,7 +1308,7 @@ struct Expr *new_arrow(struct Expr *obj, int *field, int *stype) {
 }
 
 struct Expr *new_assign(struct Expr *target, struct Expr *rhs) {
-  struct Expr *e = my_malloc(64);
+  struct Expr *e = my_malloc(56);
   e->kind = ND_ASSIGN;
   e->left = target;
   e->right = rhs;
@@ -1238,21 +1316,21 @@ struct Expr *new_assign(struct Expr *target, struct Expr *rhs) {
 }
 
 struct Expr *new_postinc(struct Expr *operand) {
-  struct Expr *e = my_malloc(64);
+  struct Expr *e = my_malloc(56);
   e->kind = ND_POSTINC;
   e->left = operand;
   return e;
 }
 
 struct Expr *new_postdec(struct Expr *operand) {
-  struct Expr *e = my_malloc(64);
+  struct Expr *e = my_malloc(56);
   e->kind = ND_POSTDEC;
   e->left = operand;
   return e;
 }
 
 struct Expr *new_ternary(struct Expr *cond, struct Expr *then_e, struct Expr *else_e) {
-  struct Expr *e = my_malloc(64);
+  struct Expr *e = my_malloc(56);
   e->kind = ND_TERNARY;
   e->left = cond;
   e->right = then_e;
@@ -1369,11 +1447,32 @@ struct Stmt *new_switch_s(struct Expr *cond, int *case_vals, struct Stmt ***case
 
 int skip_qualifiers() {
   int skipped = 0;
-  while (p_match(TK_KW, "const") || p_match(TK_KW, "volatile") || p_match(TK_KW, "register")) {
+  while (p_match(TK_KW, "const") || p_match(TK_KW, "volatile") || p_match(TK_KW, "register") || p_match(TK_KW, "restrict") ||
+         p_match(TK_KW, "__restrict") || p_match(TK_KW, "__restrict__") || p_match(TK_KW, "__volatile__") || p_match(TK_KW, "__const__")) {
     cur_pos++;
     skipped = 1;
   }
   return skipped;
+}
+
+int skip_attribute() {
+  if (p_match(TK_KW, "__attribute__")) {
+    cur_pos++;
+    if (p_match(TK_OP, "(")) {
+      int depth = 0;
+      while (cur_pos < ntokens) {
+        if (p_match(TK_OP, "(")) { depth++; cur_pos++; }
+        else if (p_match(TK_OP, ")")) { depth--; cur_pos++; if (depth == 0) break; }
+        else { cur_pos++; }
+      }
+    }
+    return 1;
+  }
+  if (p_match(TK_KW, "__extension__") || p_match(TK_KW, "__inline__") || p_match(TK_KW, "__inline") || p_match(TK_KW, "_Noreturn")) {
+    cur_pos++;
+    return 1;
+  }
+  return 0;
 }
 
 int is_funcptr_decl() {
@@ -1585,7 +1684,7 @@ struct Stmt **parse_block_or_stmt(int *out_len) {
 }
 
 struct VarDecl *make_vd(int *name, int *stype, int arr_size, int is_ptr, struct Expr *init, int is_static) {
-  struct VarDecl *vd = my_malloc(64);
+  struct VarDecl *vd = my_malloc(72);
   vd->name = name;
   vd->stype = stype;
   vd->arr_size = arr_size;
@@ -1594,6 +1693,7 @@ struct VarDecl *make_vd(int *name, int *stype, int arr_size, int is_ptr, struct 
   vd->is_static = is_static;
   vd->is_unsigned = 0;
   vd->arr_size2 = 0 - 1;
+  vd->is_char = 0;
   return vd;
 }
 
@@ -1656,6 +1756,17 @@ struct Expr *parse_init_list(int *stype_name) {
 }
 
 struct Stmt *parse_vardecl_stmt(int vd_is_static) {
+  int base_is_char = 0;
+  // Check if base type is char (before parse_base_type consumes it)
+  {
+    int sv = cur_pos;
+    skip_qualifiers();
+    if (p_match(TK_KW, "char")) { base_is_char = 1; }
+    else if (p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) {
+      if (tok_kind[cur_pos + 1] == TK_KW && my_strcmp(tok_val[cur_pos + 1], "char") == 0) { base_is_char = 1; }
+    }
+    cur_pos = sv;
+  }
   int *stype = parse_base_type();
   int base_unsigned = last_type_unsigned;
   struct VarDecl **decls = my_malloc(64 * 8);
@@ -1705,6 +1816,7 @@ struct Stmt *parse_vardecl_stmt(int vd_is_static) {
         p_eat(TK_OP, "]");
       }
     }
+    while (skip_attribute()) {}
     struct Expr *init = 0;
     int *decl_stype = 0;
     if (stype != 0) {
@@ -1724,15 +1836,20 @@ struct Stmt *parse_vardecl_stmt(int vd_is_static) {
         if (arr_size == 0) { arr_size = init->nargs; }
       }
     } else if (decl_stype != 0 && is_ptr == 0 && arr_size < 0 && p_match(TK_OP, "=")) {
-      // Struct initializer
+      // Struct initializer or struct expression assignment
       p_eat(TK_OP, "=");
-      init = parse_init_list(decl_stype);
+      if (p_match(TK_OP, "{")) {
+        init = parse_init_list(decl_stype);
+      } else {
+        init = parse_expr(0);
+      }
     } else if ((decl_stype == 0 || is_ptr != 0) && arr_size < 0 && p_match(TK_OP, "=")) {
       p_eat(TK_OP, "=");
       init = parse_expr(0);
     }
     decls[ndecls] = make_vd(my_strdup(name), decl_stype, arr_size, is_ptr, init, vd_is_static);
     decls[ndecls]->is_unsigned = base_unsigned;
+    decls[ndecls]->is_char = base_is_char;
     decls[ndecls]->arr_size2 = arr_size2;
     ndecls++;
     if (stype != 0) {
@@ -1789,6 +1906,8 @@ struct Expr *parse_expr(int min_prec) {
       else if (my_strcmp(v, "&=") == 0) { cop = "&"; }
       else if (my_strcmp(v, "|=") == 0) { cop = "|"; }
       else if (my_strcmp(v, "^=") == 0) { cop = "^"; }
+      else if (my_strcmp(v, "<<=") == 0) { cop = "<<"; }
+      else if (my_strcmp(v, ">>=") == 0) { cop = ">>"; }
       if (cop != 0) {
         p_eat(TK_OP, 0);
         rhs = parse_expr(0);
@@ -1911,13 +2030,28 @@ struct Expr *parse_unary() {
         while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); }
         sz = 8;
       } else {
+        // Check if it's a variable with a known struct type
+        if (tok_kind[cur_pos] == TK_ID) {
+          int *sz_vname = tok_val[cur_pos];
+          int *sz_vstype = find_lv_stype(sz_vname);
+          if (sz_vstype != 0) {
+            int si2 = 0;
+            while (si2 < np_sdefs) {
+              struct SDefInfo *sdi2 = p_sdefs[si2];
+              if (my_strcmp(sdi2->name, sz_vstype) == 0) {
+                if (sdi2->nwords > 0) { sz = sdi2->nwords * 8; }
+                else { sz = sdi2->nflds * 8; }
+                si2 = np_sdefs;
+              }
+              si2++;
+            }
+          }
+        }
         parse_expr(0);
-        sz = 8;
       }
       p_eat(TK_OP, ")");
     } else {
       parse_unary();
-      sz = 8;
     }
     return new_num(sz);
   }
@@ -1953,11 +2087,19 @@ struct Expr *parse_unary() {
         cl_e->left = cl_init;
         return cl_e;
       }
-      return parse_unary();
+      struct Expr *cast_inner = parse_unary();
+      struct Expr *cast_e = my_malloc(80);
+      cast_e->kind = ND_CAST;
+      cast_e->left = cast_inner;
+      return cast_e;
     }
     cur_pos = cast_saved;
   }
 
+  if (p_match(TK_OP, "+")) {
+    p_eat(TK_OP, "+");
+    return parse_unary();
+  }
   if (p_match(TK_OP, "-") || p_match(TK_OP, "!") || p_match(TK_OP, "*") || p_match(TK_OP, "&") || p_match(TK_OP, "~")) {
     int unary_op_ch = __read_byte(tok_val[cur_pos], 0);
     p_eat(TK_OP, 0);
@@ -2134,8 +2276,27 @@ struct Stmt *parse_stmt() {
   struct Stmt **sw_dstmts = 0;
   int sw_dns = 0;
 
+  // Anonymous block
+  if (p_match(TK_OP, "{")) {
+    struct Stmt *bs = my_malloc(sizeof(struct Stmt));
+    bs->kind = ST_BLOCK;
+    bs->body = parse_block(&blen);
+    bs->nbody = blen;
+    return bs;
+  }
+
+  // Empty statement
+  if (p_match(TK_OP, ";")) {
+    p_eat(TK_OP, ";");
+    return new_expr_s(new_num(0));
+  }
+
   if (p_match(TK_KW, "return")) {
     p_eat(TK_KW, "return");
+    if (p_match(TK_OP, ";")) {
+      p_eat(TK_OP, ";");
+      return new_return_s(new_num(0));
+    }
     e = parse_expr(0);
     p_eat(TK_OP, ";");
     return new_return_s(e);
@@ -2189,7 +2350,7 @@ struct Stmt *parse_stmt() {
     } else if (p_match(TK_OP, ";")) {
       p_eat(TK_OP, ";");
     } else {
-      e = parse_expr(0);
+      e = parse_expr(-1);
       p_eat(TK_OP, ";");
       init = new_expr_s(e);
     }
@@ -2365,6 +2526,12 @@ struct SDef *parse_struct_or_union_def(int is_union) {
       p_eat(TK_OP, "*");
       is_ptr = 1;
     }
+    // Check again for funcptr after consuming pointer stars: type *(*name)(params)
+    if (is_funcptr == 0 && is_funcptr_decl()) {
+      p_eat(TK_OP, "(");
+      p_eat(TK_OP, "*");
+      is_funcptr = 1;
+    }
     int *fname = my_strdup(p_eat(TK_ID, 0));
     if (is_funcptr) {
       p_eat(TK_OP, ")");
@@ -2481,6 +2648,8 @@ struct FuncDef *parse_func() {
   p_eat(TK_OP, "(");
 
   int **params = my_malloc(64 * 8);
+  int *param_is_char = my_malloc(64 * 4);
+  int *param_is_intptr = my_malloc(64 * 4);
   int np = 0;
   int is_variadic = 0;
 
@@ -2493,6 +2662,16 @@ struct FuncDef *parse_func() {
         p_eat(TK_OP, ".");
         is_variadic = 1;
         break;
+      }
+      int p_is_char = 0;
+      {
+        int sv2 = cur_pos;
+        skip_qualifiers();
+        if (p_match(TK_KW, "char")) { p_is_char = 1; }
+        else if (p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) {
+          if (tok_kind[cur_pos + 1] == TK_KW && my_strcmp(tok_val[cur_pos + 1], "char") == 0) { p_is_char = 1; }
+        }
+        cur_pos = sv2;
       }
       int *stype = parse_base_type();
       int is_ptr = 0;
@@ -2524,6 +2703,8 @@ struct FuncDef *parse_func() {
           skip_param_list();
         }
         params[np] = my_strdup(pname);
+        param_is_char[np] = (p_is_char && is_ptr > 0) ? 1 : 0;
+        param_is_intptr[np] = (is_ptr > 0 && p_is_char == 0 && stype == 0) ? 1 : 0;
         np++;
         if (stype != 0) {
           add_lv(pname, stype, is_ptr);
@@ -2538,11 +2719,14 @@ struct FuncDef *parse_func() {
   }
   p_eat(TK_OP, ")");
 
+  // Skip __attribute__ after function parameter list
+  while (skip_attribute()) {}
+
   // Prototype: semicolon after )
   if (p_match(TK_OP, ";")) {
     p_eat(TK_OP, ";");
     // Store proto info: name and ret_is_ptr
-    fd = my_malloc(56);
+    fd = my_malloc(80);
     fd->name = name;
     fd->params = 0;
     fd->nparams = np;
@@ -2550,13 +2734,15 @@ struct FuncDef *parse_func() {
     fd->nbody = 0 - 1;
     fd->ret_is_ptr = ret_is_ptr;
     fd->is_variadic = is_variadic;
+    fd->param_is_char = param_is_char;
+    fd->param_is_intptr = param_is_intptr;
     return fd;
   }
 
   int blen = 0;
   struct Stmt **body = parse_block(&blen);
 
-  fd = my_malloc(56);
+  fd = my_malloc(80);
   fd->name = name;
   fd->params = params;
   fd->nparams = np;
@@ -2564,12 +2750,14 @@ struct FuncDef *parse_func() {
   fd->nbody = blen;
   fd->ret_is_ptr = ret_is_ptr;
   fd->is_variadic = is_variadic;
+  fd->param_is_char = param_is_char;
+  fd->param_is_intptr = param_is_intptr;
   return fd;
 }
 
 // Parse global variable declaration: type [*]* name [[ N ]] [= expr] ;
 struct GDecl *parse_global_decl() {
-  parse_base_type();
+  int *stype = parse_base_type();
   int is_ptr = 0;
   int is_funcptr = 0;
   // Function pointer global: type (*name)(params)
@@ -2582,6 +2770,13 @@ struct GDecl *parse_global_decl() {
   while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); is_ptr = 1; }
   skip_qualifiers();
   int *name = my_strdup(p_eat(TK_ID, 0));
+  // Register global struct variables for resolve_stype
+  if (stype != 0) {
+    glv_name[nglv] = my_strdup(name);
+    glv_stype[nglv] = my_strdup(stype);
+    glv_isptr[nglv] = is_ptr;
+    nglv++;
+  }
   if (is_funcptr) {
     p_eat(TK_OP, ")");
     skip_param_list();
@@ -2593,7 +2788,7 @@ struct GDecl *parse_global_decl() {
     if (p_match(TK_OP, "]")) {
       array_size = 0; // infer from initializer
     } else {
-      array_size = my_atoi(p_eat(TK_NUM, 0));
+      array_size = parse_const_expr();
     }
     p_eat(TK_OP, "]");
   }
@@ -2619,13 +2814,11 @@ struct GDecl *parse_global_decl() {
     has_init = 1;
     if (p_match(TK_STR, 0)) {
       init_str = my_strdup(p_eat(TK_STR, 0));
-    } else if (p_match(TK_OP, "-")) {
-      p_eat(TK_OP, "-");
-      init_val = 0 - my_atoi(p_eat(TK_NUM, 0));
     } else {
-      init_val = my_atoi(p_eat(TK_NUM, 0));
+      init_val = parse_const_expr();
     }
   }
+  while (skip_attribute()) {}
   p_eat(TK_OP, ";");
 
   struct GDecl *gd = my_malloc(64);
@@ -2636,6 +2829,7 @@ struct GDecl *parse_global_decl() {
   gd->has_init = has_init;
   gd->init_str = init_str;
   gd->init_list = init_list;
+  gd->stype = stype;
   return gd;
 }
 
@@ -2655,6 +2849,19 @@ int is_func_lookahead() {
 int parse_const_expr();
 
 int parse_const_primary() {
+  if (p_match(TK_KW, "sizeof")) {
+    p_eat(TK_KW, "sizeof");
+    p_eat(TK_OP, "(");
+    // Skip type inside sizeof() and return 8 (all types are 8 bytes in this compiler)
+    int depth = 1;
+    while (depth > 0) {
+      if (p_match(TK_OP, "(")) { depth++; }
+      else if (p_match(TK_OP, ")")) { depth--; if (depth == 0) break; }
+      cur_pos++;
+    }
+    p_eat(TK_OP, ")");
+    return 8;
+  }
   if (p_match(TK_OP, "(")) {
     p_eat(TK_OP, "(");
     int val = parse_const_expr();
@@ -2676,7 +2883,9 @@ int parse_const_primary() {
 
 int parse_const_unary() {
   if (p_match(TK_OP, "-")) { p_eat(TK_OP, "-"); return 0 - parse_const_unary(); }
+  if (p_match(TK_OP, "+")) { p_eat(TK_OP, "+"); return parse_const_unary(); }
   if (p_match(TK_OP, "~")) { p_eat(TK_OP, "~"); return ~parse_const_unary(); }
+  if (p_match(TK_OP, "!")) { p_eat(TK_OP, "!"); return !parse_const_unary(); }
   return parse_const_primary();
 }
 
@@ -2715,9 +2924,30 @@ int parse_const_shift() {
   return val;
 }
 
-int parse_const_and() {
+int parse_const_rel() {
   int val = parse_const_shift();
-  while (p_match(TK_OP, "&")) { p_eat(TK_OP, "&"); val = val & parse_const_shift(); }
+  while (p_match(TK_OP, "<") || p_match(TK_OP, ">") || p_match(TK_OP, "<=") || p_match(TK_OP, ">=")) {
+    int *op = tok_val[cur_pos]; p_eat(TK_OP, 0); int rhs = parse_const_shift();
+    if (my_strcmp(op, "<") == 0) { val = val < rhs; }
+    else if (my_strcmp(op, ">") == 0) { val = val > rhs; }
+    else if (my_strcmp(op, "<=") == 0) { val = val <= rhs; }
+    else { val = val >= rhs; }
+  }
+  return val;
+}
+
+int parse_const_eq() {
+  int val = parse_const_rel();
+  while (p_match(TK_OP, "==") || p_match(TK_OP, "!=")) {
+    int *op = tok_val[cur_pos]; p_eat(TK_OP, 0); int rhs = parse_const_rel();
+    if (my_strcmp(op, "==") == 0) { val = val == rhs; } else { val = val != rhs; }
+  }
+  return val;
+}
+
+int parse_const_and() {
+  int val = parse_const_eq();
+  while (p_match(TK_OP, "&")) { p_eat(TK_OP, "&"); val = val & parse_const_eq(); }
   return val;
 }
 
@@ -2727,9 +2957,33 @@ int parse_const_xor() {
   return val;
 }
 
-int parse_const_expr() {
+int parse_const_or() {
   int val = parse_const_xor();
   while (p_match(TK_OP, "|")) { p_eat(TK_OP, "|"); val = val | parse_const_xor(); }
+  return val;
+}
+
+int parse_const_logand() {
+  int val = parse_const_or();
+  while (p_match(TK_OP, "&&")) { p_eat(TK_OP, "&&"); int rhs = parse_const_or(); val = val && rhs; }
+  return val;
+}
+
+int parse_const_logor() {
+  int val = parse_const_logand();
+  while (p_match(TK_OP, "||")) { p_eat(TK_OP, "||"); int rhs = parse_const_logand(); val = val || rhs; }
+  return val;
+}
+
+int parse_const_expr() {
+  int val = parse_const_logor();
+  if (p_match(TK_OP, "?")) {
+    p_eat(TK_OP, "?");
+    int then_val = parse_const_expr();
+    p_eat(TK_OP, ":");
+    int else_val = parse_const_expr();
+    return val ? then_val : else_val;
+  }
   return val;
 }
 
@@ -2984,6 +3238,9 @@ struct Program *parse_program() {
   int saved = 0;
 
   while (!p_match(TK_EOF, 0)) {
+    // Skip __extension__ at top level (may precede typedef)
+    while (p_match(TK_KW, "__extension__")) { p_eat(TK_KW, "__extension__"); }
+
     // typedef
     if (p_match(TK_KW, "typedef")) {
       p_eat(TK_KW, "typedef");
@@ -2997,13 +3254,29 @@ struct Program *parse_program() {
       continue;
     }
 
-    // static/inline — skip keyword, then parse as normal func/global
+    // _Static_assert — skip
+    if (p_match(TK_KW, "_Static_assert")) {
+      p_eat(TK_KW, "_Static_assert");
+      p_eat(TK_OP, "(");
+      int sa_depth = 1;
+      while (sa_depth > 0) {
+        if (p_match(TK_OP, "(")) { sa_depth++; }
+        else if (p_match(TK_OP, ")")) { sa_depth--; if (sa_depth == 0) break; }
+        cur_pos++;
+      }
+      p_eat(TK_OP, ")");
+      p_eat(TK_OP, ";");
+      continue;
+    }
+
+    // static/inline/__attribute__/__extension__ — skip keywords
     if (p_match(TK_KW, "static")) {
       p_eat(TK_KW, "static");
     }
     if (p_match(TK_KW, "inline")) {
       p_eat(TK_KW, "inline");
     }
+    while (skip_attribute()) {}
 
     // enum definition
     if (p_match(TK_KW, "enum")) {
@@ -3028,6 +3301,7 @@ struct Program *parse_program() {
           nprotos++;
         } else {
           funcs[nf] = fd;
+
           nf++;
         }
       } else {
@@ -3061,6 +3335,7 @@ struct Program *parse_program() {
             nprotos++;
           } else {
             funcs[nf] = fd;
+  
             nf++;
           }
         } else {
@@ -3079,6 +3354,7 @@ struct Program *parse_program() {
           nprotos++;
         } else {
           funcs[nf] = fd;
+
           nf++;
         }
       } else {
@@ -3267,6 +3543,25 @@ int cg_struct_nfields(int *sname) {
   return 0;
 }
 
+// Returns struct type of a field, or 0 if field is not a struct
+int *cg_field_struct_type(int *sname, int *fname) {
+  int i = 0;
+  while (i < ncg_s) {
+    if (my_strcmp(cg_sname[i], sname) == 0) {
+      int j = 0;
+      while (j < cg_snfields[i]) {
+        if (my_strcmp(cg_sfields[i][j], fname) == 0) {
+          return cg_sfield_types[i][j];
+        }
+        j++;
+      }
+      return 0;
+    }
+    i++;
+  }
+  return 0;
+}
+
 // Returns bit_width (0 if not a bitfield). Sets *out_bit_offset.
 int cg_get_bitfield_info(int *sname, int *fname, int *out_bit_offset) {
   int i = 0;
@@ -3430,7 +3725,7 @@ int lay_walk_expr_cl(struct Expr *e, int *offset) {
   if (e->kind == ND_BINARY) {
     lay_walk_expr_cl(e->left, offset);
     lay_walk_expr_cl(e->right, offset);
-  } else if (e->kind == ND_UNARY) {
+  } else if (e->kind == ND_UNARY || e->kind == ND_CAST) {
     lay_walk_expr_cl(e->left, offset);
   } else if (e->kind == ND_ASSIGN) {
     lay_walk_expr_cl(e->left, offset);
@@ -3465,8 +3760,8 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
       for (int j = 0; j < st->ndecls; j++) {
         struct VarDecl *vd = st->decls[j];
         if (cg_find_slot(vd->name) >= 0) {
-          printf("cc: duplicate variable '%s'\n", vd->name);
-          exit(1);
+          // Variable already exists (shadowing in inner block); reuse existing slot
+          continue;
         }
         if (vd->is_static) {
           // Static local: record in static local table, use sentinel offset -1
@@ -3519,6 +3814,14 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
           lay_unsigned_name[nlay_unsigned] = my_strdup(vd->name);
           nlay_unsigned++;
         }
+        if (vd->is_char && vd->is_ptr > 0 && vd->arr_size < 0) {
+          lay_char_name[nlay_char] = my_strdup(vd->name);
+          nlay_char++;
+        }
+        if (vd->is_ptr > 0 && vd->stype == 0 && vd->is_char == 0 && vd->arr_size < 0) {
+          lay_intptr_name[nlay_intptr] = my_strdup(vd->name);
+          nlay_intptr++;
+        }
       }
     } else if (st->kind == ST_IF) {
       lay_walk_stmts(st->body, st->nbody, offset);
@@ -3545,6 +3848,8 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
       if (st->default_body != 0) {
         lay_walk_stmts(st->default_body, st->ndefault, offset);
       }
+    } else if (st->kind == ST_BLOCK) {
+      lay_walk_stmts(st->body, st->nbody, offset);
     }
     // Scan expressions for compound literals
     if (st->kind == ST_EXPR || st->kind == ST_RETURN ||
@@ -3574,6 +3879,24 @@ int cg_is_unsigned(int *name) {
   return 0;
 }
 
+int cg_is_char(int *name) {
+  int i = 0;
+  while (i < nlay_char) {
+    if (my_strcmp(lay_char_name[i], name) == 0) { return 1; }
+    i++;
+  }
+  return 0;
+}
+
+int cg_is_intptr(int *name) {
+  int i = 0;
+  while (i < nlay_intptr) {
+    if (my_strcmp(lay_intptr_name[i], name) == 0) { return 1; }
+    i++;
+  }
+  return 0;
+}
+
 int cg_get_arr_inner(int *name) {
   int i = 0;
   while (i < nlay_arr) {
@@ -3589,6 +3912,8 @@ int layout_func(struct FuncDef *f) {
   nlay_sv = 0;
   nlay_psv = 0;
   nlay_unsigned = 0;
+  nlay_char = 0;
+  nlay_intptr = 0;
   int offset = 0;
 
   for (int i = 0; i < f->nparams; i++) {
@@ -3600,7 +3925,16 @@ int layout_func(struct FuncDef *f) {
       int above_off = 16 + (i - 8) * 8;
       lay_add_slot(f->params[i], 0 - above_off);
     }
+    if (f->param_is_char != 0 && f->param_is_char[i]) {
+      lay_char_name[nlay_char] = my_strdup(f->params[i]);
+      nlay_char++;
+    }
+    if (f->param_is_intptr != 0 && f->param_is_intptr[i]) {
+      lay_intptr_name[nlay_intptr] = my_strdup(f->params[i]);
+      nlay_intptr++;
+    }
   }
+
 
   lay_walk_stmts(f->body, f->nbody, &offset);
 
@@ -3680,16 +4014,22 @@ int gen_addr(struct Expr *e) {
   if (e->kind == ND_INDEX) {
     int *idx_stype = 0;
     int idx_stride = 8;
+    int idx_is_char = 0;
     if (e->left->kind == ND_VAR) {
-      idx_stype = cg_structvar_type(e->left->sval);
-      if (idx_stype == 0) {
-        idx_stype = cg_ptr_structvar_type(e->left->sval);
-      }
-      // Check for 2D array: stride = inner_dim * 8
-      if (idx_stype == 0) {
-        int inner = cg_get_arr_inner(e->left->sval);
-        if (inner >= 0) {
-          idx_stride = inner * 8;
+      if (cg_is_char(e->left->sval)) {
+        idx_stride = 1;
+        idx_is_char = 1;
+      } else {
+        idx_stype = cg_structvar_type(e->left->sval);
+        if (idx_stype == 0) {
+          idx_stype = cg_ptr_structvar_type(e->left->sval);
+        }
+        // Check for 2D array: stride = inner_dim * 8
+        if (idx_stype == 0) {
+          int inner = cg_get_arr_inner(e->left->sval);
+          if (inner >= 0) {
+            idx_stride = inner * 8;
+          }
         }
       }
     }
@@ -3699,7 +4039,9 @@ int gen_addr(struct Expr *e) {
     gen_value(e->left);
     emit_line("\tstr\tx0, [sp, #-16]!");
     gen_value(e->right);
-    if (idx_stride == 8) {
+    if (idx_is_char) {
+      // No scaling needed for char pointers (stride = 1)
+    } else if (idx_stride == 8) {
       emit_line("\tlsl\tx0, x0, #3");
     } else {
       emit_s("\tmov\tx1, #");
@@ -3712,6 +4054,40 @@ int gen_addr(struct Expr *e) {
     return 0;
   }
   if (e->kind == ND_FIELD) {
+    // Special case: arr[i].field — use struct type from field node for stride
+    if (e->left->kind == ND_INDEX) {
+      int *fi_stype = 0;
+      int fi_stride = 8;
+      if (e->left->left->kind == ND_VAR) {
+        fi_stype = cg_structvar_type(e->left->left->sval);
+        if (fi_stype == 0) {
+          fi_stype = cg_ptr_structvar_type(e->left->left->sval);
+        }
+      }
+      // Fallback: use the struct type from the field node
+      if (fi_stype == 0) {
+        fi_stype = e->sval2;
+      }
+      if (fi_stype != 0) {
+        fi_stride = cg_struct_nfields(fi_stype) * 8;
+      }
+      gen_value(e->left->left);
+      emit_line("\tstr\tx0, [sp, #-16]!");
+      gen_value(e->left->right);
+      if (fi_stride == 8) {
+        emit_line("\tlsl\tx0, x0, #3");
+      } else {
+        emit_s("\tmov\tx1, #"); emit_num(fi_stride); emit_ch('\n');
+        emit_line("\tmul\tx0, x0, x1");
+      }
+      emit_line("\tldr\tx1, [sp], #16");
+      emit_line("\tadd\tx0, x1, x0");
+      fi = cg_field_index(e->sval2, e->sval);
+      if (fi > 0) {
+        emit_s("\tadd\tx0, x0, #"); emit_num(fi * 8); emit_ch('\n');
+      }
+      return 0;
+    }
     gen_addr(e->left);
     fi = cg_field_index(e->sval2, e->sval);
     if (fi > 0) {
@@ -3750,6 +4126,13 @@ int gen_value(struct Expr *e) {
   int bf_width = 0;
   int bf_mask = 0;
   int bf_clear_mask = 0;
+  int *sa_type = 0;
+  int sa_nf = 0;
+  int sa_fi = 0;
+  if (e->kind == ND_CAST) {
+    gen_value(e->left);
+    return;
+  }
   if (e->kind == ND_NUM) {
     int val = e->ival;
     if (val >= -65535 && val <= 65535) {
@@ -3758,7 +4141,7 @@ int gen_value(struct Expr *e) {
       emit_ch('\n');
     } else {
       int lo = val & 65535;
-      int hi = (val / 65536) & 65535;
+      int hi = ((val - lo) / 65536) & 65535;
       emit_s("\tmovz\tx0, #");
       emit_unum(lo);
       emit_ch('\n');
@@ -3818,7 +4201,11 @@ int gen_value(struct Expr *e) {
       return 0;
     }
     gen_addr(e);
-    emit_line("\tldr\tx0, [x0]");
+    if (e->left->kind == ND_VAR && cg_is_char(e->left->sval)) {
+      emit_line("\tldrb\tw0, [x0]");
+    } else {
+      emit_line("\tldr\tx0, [x0]");
+    }
     return 0;
   }
 
@@ -3861,11 +4248,51 @@ int gen_value(struct Expr *e) {
         return 0;
       }
     }
+    // Check for multi-field struct assignment
+    sa_type = 0;
+    if (e->left->kind == ND_VAR) {
+      sa_type = cg_structvar_type(e->left->sval);
+    }
+    if (sa_type == 0 && (e->left->kind == ND_FIELD || e->left->kind == ND_ARROW)) {
+      sa_type = cg_field_struct_type(e->left->sval2, e->left->sval);
+    }
+    if (sa_type != 0) {
+      sa_nf = cg_struct_nfields(sa_type);
+      if (sa_nf > 1) {
+        gen_addr(e->left);
+        emit_line("\tstr\tx0, [sp, #-16]!");
+        // Get source address
+        if (e->right->kind == ND_UNARY && e->right->ival == '*') {
+          gen_value(e->right->left);
+        } else {
+          gen_addr(e->right);
+        }
+        emit_line("\tldr\tx1, [sp], #16");
+        // x0 = src addr, x1 = dest addr
+        sa_fi = 0;
+        while (sa_fi < sa_nf) {
+          emit_s("\tldr\tx9, [x0, #"); emit_num(sa_fi * 8); emit_line("]");
+          emit_s("\tstr\tx9, [x1, #"); emit_num(sa_fi * 8); emit_line("]");
+          sa_fi++;
+        }
+        return 0;
+      }
+    }
     gen_addr(e->left);
     emit_line("\tstr\tx0, [sp, #-16]!");
     gen_value(e->right);
     emit_line("\tldr\tx1, [sp], #16");
-    emit_line("\tstr\tx0, [x1]");
+    {
+      int assign_char = 0;
+      if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { assign_char = 1; }
+      if (e->left->kind == ND_INDEX && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { assign_char = 1; }
+      if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left->kind == ND_BINARY && e->left->left->left != 0 && e->left->left->left->kind == ND_VAR && cg_is_char(e->left->left->left->sval)) { assign_char = 1; }
+      if (assign_char) {
+        emit_line("\tstrb\tw0, [x1]");
+      } else {
+        emit_line("\tstr\tx0, [x1]");
+      }
+    }
     return 0;
   }
 
@@ -3962,8 +4389,15 @@ int gen_value(struct Expr *e) {
       return 0;
     }
     if (unary_op == '*') {
+      int deref_char = 0;
+      if (e->left->kind == ND_VAR && cg_is_char(e->left->sval)) { deref_char = 1; }
+      if (e->left->kind == ND_BINARY && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { deref_char = 1; }
       gen_value(e->left);
-      emit_line("\tldr\tx0, [x0]");
+      if (deref_char) {
+        emit_line("\tldrb\tw0, [x0]");
+      } else {
+        emit_line("\tldr\tx0, [x0]");
+      }
       return 0;
     }
     gen_value(e->left);
@@ -4036,6 +4470,16 @@ int gen_value(struct Expr *e) {
         } else {
           emit_s("\tmov\tx9, #"); emit_num(scale); emit_ch('\n');
           emit_line("\tmul\tx1, x1, x9");
+        }
+      } else {
+        // Scale by 8 for int pointer arithmetic (not char, not struct)
+        int do_intptr_scale = 0;
+        if (e->left->kind == ND_VAR && cg_is_intptr(e->left->sval)) {
+          emit_line("\tlsl\tx0, x0, #3");
+          do_intptr_scale = 1;
+        }
+        if (do_intptr_scale == 0 && e->right->kind == ND_VAR && cg_is_intptr(e->right->sval)) {
+          emit_line("\tlsl\tx1, x1, #3");
         }
       }
     }
@@ -4113,6 +4557,14 @@ int gen_value(struct Expr *e) {
       emit_line("\tldr\tx1, [sp], #16");
       emit_line("\tldr\tx2, [sp], #16");
       emit_line("\tstrb\tw0, [x2, x1]");
+      return 0;
+    }
+
+    // __builtin_va_start intrinsic
+    if (my_strcmp(name, "__builtin_va_start") == 0) {
+      gen_value(e->args[0]);
+      emit_line("\tadd\tx1, x29, #16");
+      emit_line("\tstr\tx1, [x0]");
       return 0;
     }
 
@@ -4351,6 +4803,15 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
     return 0;
   }
 
+  if (st->kind == ST_BLOCK) {
+    int i = 0;
+    while (i < st->nbody) {
+      gen_stmt(st->body[i], ret_label);
+      i++;
+    }
+    return 0;
+  }
+
   if (st->kind == ST_VARDECL) {
     int i = 0;
     int base_off = 0;
@@ -4359,6 +4820,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
     int *vd_di = 0;
     int vd_pos_idx = 0;
     int vd_target = 0;
+    int nf = 0;
     while (i < st->ndecls) {
       struct VarDecl *vd = st->decls[i];
       // Skip static locals (init handled in .data section)
@@ -4385,6 +4847,24 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
               emit_num(elem_off);
               emit_ch('\n');
               emit_line("\tstr\tx0, [x9]");
+            }
+            k++;
+          }
+        } else if (vd->init != 0) {
+          // Struct copy from expression: struct Foo x = other_struct;
+          nf = cg_struct_nfields(vd->stype);
+          base_off = cg_find_slot(vd->name);
+          gen_addr(vd->init);
+          emit_line("\tmov\tx10, x0");
+          k = 0;
+          while (k < nf) {
+            emit_s("\tldr\tx9, [x10, #"); emit_num(k * 8); emit_line("]");
+            elem_off = base_off - k * 8;
+            if (elem_off <= 255) {
+              emit_s("\tstr\tx9, [x29, #-"); emit_num(elem_off); emit_line("]");
+            } else {
+              emit_s("\tsub\tx11, x29, #"); emit_num(elem_off); emit_ch('\n');
+              emit_line("\tstr\tx9, [x11]");
             }
             k++;
           }
@@ -4664,6 +5144,7 @@ int gen_func(struct FuncDef *f) {
   cg_cl_counter = 0;
   cg_cl_gen_counter = 0;
   layout_func(f);
+
   int *ret_label = cg_new_label("ret");
 
   emit_ch('\n');
@@ -4726,6 +5207,21 @@ int gen_func(struct FuncDef *f) {
   return 0;
 }
 
+int register_builtin_variadic(int *name, int np) {
+  int vj;
+  vj = 0;
+  while (vj < nvar_funcs) {
+    if (my_strcmp(var_funcs[vj], name) == 0) {
+      return 0;
+    }
+    vj++;
+  }
+  var_funcs[nvar_funcs] = name;
+  var_nparams[nvar_funcs] = np;
+  nvar_funcs++;
+  return 0;
+}
+
 int codegen(struct Program *prog) {
   struct FuncDef *fd = 0;
   struct GDecl *gd = 0;
@@ -4779,6 +5275,15 @@ int codegen(struct Program *prog) {
     }
     pi++;
   }
+
+  // Register well-known variadic functions if not already declared
+  register_builtin_variadic("printf", 1);
+  register_builtin_variadic("fprintf", 2);
+  register_builtin_variadic("sprintf", 2);
+  register_builtin_variadic("snprintf", 3);
+  register_builtin_variadic("scanf", 1);
+  register_builtin_variadic("fscanf", 2);
+  register_builtin_variadic("sscanf", 2);
 
   // Register all known function names (for function pointer support)
   nknown_funcs = 0;
@@ -4848,20 +5353,6 @@ int codegen(struct Program *prog) {
     i++;
   }
 
-  // String pool
-  if (nsp > 0) {
-    emit_ch('\n');
-    emit_line("\t.section\t__TEXT,__cstring,cstring_literals");
-    i = 0;
-    while (i < nsp) {
-      emit_s(sp_label[i]); emit_line(":");
-      emit_s("\t.asciz\t\"");
-      cg_emit_escaped_string(sp_decoded[i]);
-      emit_line("\"");
-      i++;
-    }
-  }
-
   // Emit global variables
   if (prog->nglobals > 0) {
     int has_data = 0;
@@ -4902,7 +5393,12 @@ int codegen(struct Program *prog) {
         }
       } else if (gd->array_size >= 0) {
         // Uninitialized array: use .comm
-        int sz = gd->array_size * 8;
+        int elem_sz = 8;
+        if (gd->stype != 0 && gd->is_ptr == 0) {
+          int nf = cg_struct_nfields(gd->stype);
+          if (nf > 1) { elem_sz = nf * 8; }
+        }
+        int sz = gd->array_size * elem_sz;
         emit_s("\t.comm\t_");
         emit_s(gd->name);
         emit_s(", ");
@@ -4914,7 +5410,7 @@ int codegen(struct Program *prog) {
         emit_s("\t.globl\t_"); emit_line(gd->name);
         emit_line("\t.p2align\t3");
         emit_s("_"); emit_s(gd->name); emit_line(":");
-        int *slabel = cg_intern_string(gd->init_str);
+        int *slabel = cg_intern_string(cg_decode_string(gd->init_str));
         emit_s("\t.quad\t"); emit_line(slabel);
       } else if (gd->has_init != 0) {
         // Integer initialized
@@ -4949,6 +5445,20 @@ int codegen(struct Program *prog) {
       } else {
         emit_line("\t.quad\t0");
       }
+      i++;
+    }
+  }
+
+  // String pool (emitted last so globals/static locals can intern strings)
+  if (nsp > 0) {
+    emit_ch('\n');
+    emit_line("\t.section\t__TEXT,__cstring,cstring_literals");
+    i = 0;
+    while (i < nsp) {
+      emit_s(sp_label[i]); emit_line(":");
+      emit_s("\t.asciz\t\"");
+      cg_emit_escaped_string(sp_decoded[i]);
+      emit_line("\"");
       i++;
     }
   }
@@ -5144,8 +5654,23 @@ int pp_preprocess(int *src, int srclen, int *filepath, int *out, int co, int dep
           inc_len = 0;
           inc_src = pp_read_file(full_path, &inc_len);
           co = pp_preprocess(inc_src, inc_len, full_path, out, co, depth + 1);
+        } else if (si < srclen && __read_byte(src, si) == '<') {
+          si++;
+          pstart = si;
+          while (si < srclen && __read_byte(src, si) != '>' && __read_byte(src, si) != '\n') { si++; }
+          inc_file = make_str(src, pstart, si - pstart);
+          if (sys_include_dir != 0) {
+            full_path = pp_concat_paths(sys_include_dir, inc_file);
+            int *tryf = fopen(full_path, "r");
+            if (tryf != 0) {
+              fclose(tryf);
+              inc_len = 0;
+              inc_src = pp_read_file(full_path, &inc_len);
+              co = pp_preprocess(inc_src, inc_len, full_path, out, co, depth + 1);
+            }
+          }
         }
-        // Skip rest of line (handles both "file" and <file> includes)
+        // Skip rest of line
         while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
         if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
       }
@@ -5172,9 +5697,17 @@ int pp_preprocess(int *src, int srclen, int *filepath, int *out, int co, int dep
           si++; // skip '('
           int **fparams = my_malloc(16 * 8);
           int fnp = 0;
+          int fvar = 0; // variadic flag
           while (si < srclen && __read_byte(src, si) != ')' && __read_byte(src, si) != '\n') {
             while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) { si++; }
             if (__read_byte(src, si) == ')') { break; }
+            // Check for ...
+            if (__read_byte(src, si) == '.' && si + 2 < srclen && __read_byte(src, si + 1) == '.' && __read_byte(src, si + 2) == '.') {
+              fvar = 1;
+              si = si + 3;
+              while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) { si++; }
+              break;
+            }
             int ps = si;
             while (si < srclen && __read_byte(src, si) != ',' && __read_byte(src, si) != ')' &&
                    __read_byte(src, si) != ' ' && __read_byte(src, si) != '\t' && __read_byte(src, si) != '\n') {
@@ -5199,6 +5732,7 @@ int pp_preprocess(int *src, int srclen, int *filepath, int *out, int co, int dep
           macro_nparams[nmacros] = fnp;
           macro_params[nmacros] = fparams;
           macro_bodies[nmacros] = make_str(src, bstart, bend - bstart);
+          macro_is_variadic[nmacros] = fvar;
           nmacros++;
         } else {
           // Object-like macro
@@ -5250,6 +5784,7 @@ int pp_preprocess(int *src, int srclen, int *filepath, int *out, int co, int dep
               macro_nparams[uj] = macro_nparams[uj + 1];
               macro_params[uj] = macro_params[uj + 1];
               macro_bodies[uj] = macro_bodies[uj + 1];
+              macro_is_variadic[uj] = macro_is_variadic[uj + 1];
               uj++;
             }
             nmacros--;
@@ -5309,10 +5844,13 @@ int pp_preprocess(int *src, int srclen, int *filepath, int *out, int co, int dep
 
 int *cmdline_defs[64];
 int ncmdline_defs;
+int *sys_include_dir;
 
 int main(int argc, int *argv) {
   int *out_path = "a.out";
   int *c_path = 0;
+
+  sys_include_dir = 0;
 
   int i = 1;
   while (i < argc) {
@@ -5334,6 +5872,17 @@ int main(int argc, int *argv) {
         ncmdline_defs++;
       } else {
         my_fatal("missing arg for -D");
+      }
+    } else if (__read_byte(arg, 0) == '-' && __read_byte(arg, 1) == 'I') {
+      if (__read_byte(arg, 2) != 0) {
+        int ilen = 0;
+        while (__read_byte(arg, 2 + ilen) != 0) { ilen++; }
+        sys_include_dir = make_str(arg, 2, ilen);
+      } else if (i + 1 < argc) {
+        i++;
+        sys_include_dir = argv[i];
+      } else {
+        my_fatal("missing arg for -I");
       }
     } else if (__read_byte(arg, 0) == '-') {
       printf("Unknown option: %s\n", arg);
@@ -5414,7 +5963,6 @@ int main(int argc, int *argv) {
   if_depth = 0;
   int *cleaned = my_malloc(srclen * 4 + 1);
   int co = 0;
-  // Use pp_preprocess to handle the source
   co = pp_preprocess(srcbuf, srclen, c_path, cleaned, co, 0);
   __write_byte(cleaned, co, 0);
   if (if_depth != 0) { my_fatal("Unterminated #if/#ifdef/#ifndef"); }
@@ -5555,6 +6103,18 @@ int main(int argc, int *argv) {
                       }
                       px1++;
                     }
+                    if (pf1 == 0 && macro_is_variadic[mc] && my_strcmp(pn1, "__VA_ARGS__") == 0) {
+                      // Substitute variadic args
+                      int vai = macro_nparams[mc];
+                      while (vai < fnargs) {
+                        if (vai > macro_nparams[mc]) { __write_byte(expanded, eo, ','); eo++; __write_byte(expanded, eo, ' '); eo++; }
+                        int alen = my_strlen(fargs[vai]);
+                        int ai = 0;
+                        while (ai < alen) { __write_byte(expanded, eo, __read_byte(fargs[vai], ai)); eo++; ai++; }
+                        vai++;
+                      }
+                      pf1 = 1;
+                    }
                     if (pf1 == 0) {
                       // Copy body identifier as-is
                       int bk = ps1;
@@ -5563,6 +6123,35 @@ int main(int argc, int *argv) {
                         eo++;
                         bk++;
                       }
+                    }
+                  } else if (__read_byte(mbody, bi) == '#' && bi + 1 < mblen && __read_byte(mbody, bi + 1) == '#') {
+                    // Token pasting: remove ## and surrounding whitespace
+                    bi = bi + 2;
+                    while (eo > 0 && (__read_byte(expanded, eo - 1) == ' ' || __read_byte(expanded, eo - 1) == '\t')) { eo--; }
+                    while (bi < mblen && (__read_byte(mbody, bi) == ' ' || __read_byte(mbody, bi) == '\t')) { bi++; }
+                  } else if (__read_byte(mbody, bi) == '#' && bi + 1 < mblen && is_alpha(__read_byte(mbody, bi + 1))) {
+                    // Stringify operator
+                    bi++; // skip #
+                    int sps = bi;
+                    while (bi < mblen && is_alnum(__read_byte(mbody, bi))) { bi++; }
+                    int *spn = make_str(mbody, sps, bi - sps);
+                    int spf = 0;
+                    int spi = 0;
+                    while (spi < macro_nparams[mc]) {
+                      if (my_strcmp(macro_params[mc][spi], spn) == 0) {
+                        __write_byte(expanded, eo, '"'); eo++;
+                        int salen = my_strlen(fargs[spi]);
+                        int sai = 0;
+                        while (sai < salen) { __write_byte(expanded, eo, __read_byte(fargs[spi], sai)); eo++; sai++; }
+                        __write_byte(expanded, eo, '"'); eo++;
+                        spf = 1; spi = macro_nparams[mc];
+                      }
+                      spi++;
+                    }
+                    if (spf == 0) {
+                      __write_byte(expanded, eo, '#'); eo++;
+                      int sbk = sps;
+                      while (sbk < bi) { __write_byte(expanded, eo, __read_byte(mbody, sbk)); eo++; sbk++; }
                     }
                   } else {
                     __write_byte(expanded, eo, __read_byte(mbody, bi));
@@ -5609,7 +6198,12 @@ int main(int argc, int *argv) {
     cleaned = expanded;
     co = eo;
 
-    // Second pass for nested macro expansion
+    // Repeat expansion until no more macros are found
+    int expand_changed = 1;
+    int expand_iter = 0;
+    while (expand_changed && expand_iter < 16) {
+    expand_changed = 0;
+    expand_iter++;
     int *expanded2 = my_malloc(co * 4 + 1);
     ei = 0;
     eo = 0;
@@ -5686,21 +6280,59 @@ int main(int argc, int *argv) {
                       }
                       pi2++;
                     }
+                    if (pfound2 == 0 && macro_is_variadic[mc] && my_strcmp(pname2, "__VA_ARGS__") == 0) {
+                      int vai2 = macro_nparams[mc];
+                      while (vai2 < fnargs2) {
+                        if (vai2 > macro_nparams[mc]) { __write_byte(expanded2, eo, ','); eo++; __write_byte(expanded2, eo, ' '); eo++; }
+                        int alen2 = my_strlen(fargs2[vai2]);
+                        int ai2 = 0;
+                        while (ai2 < alen2) { __write_byte(expanded2, eo, __read_byte(fargs2[vai2], ai2)); eo++; ai2++; }
+                        vai2++;
+                      }
+                      pfound2 = 1;
+                    }
                     if (pfound2 == 0) {
                       int bk2 = pstart2;
                       while (bk2 < bi2) { __write_byte(expanded2, eo, __read_byte(mbody2, bk2)); eo++; bk2++; }
+                    }
+                  } else if (__read_byte(mbody2, bi2) == '#' && bi2 + 1 < mblen2 && __read_byte(mbody2, bi2 + 1) == '#') {
+                    bi2 = bi2 + 2;
+                    while (eo > 0 && (__read_byte(expanded2, eo - 1) == ' ' || __read_byte(expanded2, eo - 1) == '\t')) { eo--; }
+                    while (bi2 < mblen2 && (__read_byte(mbody2, bi2) == ' ' || __read_byte(mbody2, bi2) == '\t')) { bi2++; }
+                  } else if (__read_byte(mbody2, bi2) == '#' && bi2 + 1 < mblen2 && is_alpha(__read_byte(mbody2, bi2 + 1))) {
+                    bi2++;
+                    int sps2 = bi2;
+                    while (bi2 < mblen2 && is_alnum(__read_byte(mbody2, bi2))) { bi2++; }
+                    int *spn2 = make_str(mbody2, sps2, bi2 - sps2);
+                    int spf2 = 0;
+                    int spi2 = 0;
+                    while (spi2 < macro_nparams[mc]) {
+                      if (my_strcmp(macro_params[mc][spi2], spn2) == 0) {
+                        __write_byte(expanded2, eo, '"'); eo++;
+                        int salen2 = my_strlen(fargs2[spi2]);
+                        int sai2 = 0;
+                        while (sai2 < salen2) { __write_byte(expanded2, eo, __read_byte(fargs2[spi2], sai2)); eo++; sai2++; }
+                        __write_byte(expanded2, eo, '"'); eo++;
+                        spf2 = 1; spi2 = macro_nparams[mc];
+                      }
+                      spi2++;
+                    }
+                    if (spf2 == 0) {
+                      __write_byte(expanded2, eo, '#'); eo++;
+                      int sbk2 = sps2;
+                      while (sbk2 < bi2) { __write_byte(expanded2, eo, __read_byte(mbody2, sbk2)); eo++; sbk2++; }
                     }
                   } else {
                     __write_byte(expanded2, eo, __read_byte(mbody2, bi2)); eo++; bi2++;
                   }
                 }
-                ei = fj2; found = 1; mc = nmacros;
+                ei = fj2; found = 1; expand_changed = 1; mc = nmacros;
               }
             } else {
               vlen = my_strlen(macro_values[mc]);
               vi = 0;
               while (vi < vlen) { __write_byte(expanded2, eo, __read_byte(macro_values[mc], vi)); eo++; vi++; }
-              found = 1; mc = nmacros;
+              found = 1; expand_changed = 1; mc = nmacros;
             }
           }
           mc++;
@@ -5716,6 +6348,7 @@ int main(int argc, int *argv) {
     __write_byte(expanded2, eo, 0);
     cleaned = expanded2;
     co = eo;
+    } // end expand loop
   }
 
   // Lex
