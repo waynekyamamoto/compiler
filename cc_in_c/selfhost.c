@@ -1049,6 +1049,9 @@ int is_keyword(int *s) {
   if (my_strcmp(s, "__restrict__") == 0) { return 1; }
   if (my_strcmp(s, "__volatile__") == 0) { return 1; }
   if (my_strcmp(s, "__const__") == 0) { return 1; }
+  if (my_strcmp(s, "__typeof__") == 0) { return 1; }
+  if (my_strcmp(s, "typeof") == 0) { return 1; }
+  if (my_strcmp(s, "__typeof") == 0) { return 1; }
   if (my_strcmp(s, "_Static_assert") == 0) { return 1; }
   if (my_strcmp(s, "_Noreturn") == 0) { return 1; }
   if (my_strcmp(s, "_Alignof") == 0) { return 1; }
@@ -1781,6 +1784,20 @@ int *parse_base_type() {
     skip_qualifiers();
     return 0;
   }
+  if (p_match(TK_KW, "__typeof__") || p_match(TK_KW, "typeof") || p_match(TK_KW, "__typeof")) {
+    cur_pos++;
+    p_eat(TK_OP, "(");
+    // Skip the expression inside typeof, handling nested parens
+    int typeof_depth = 1;
+    while (typeof_depth > 0) {
+      if (p_match(TK_OP, "(")) { typeof_depth++; }
+      else if (p_match(TK_OP, ")")) { typeof_depth--; if (typeof_depth == 0) break; }
+      cur_pos++;
+    }
+    p_eat(TK_OP, ")");
+    skip_qualifiers();
+    return 0; // treat as int
+  }
   if (p_match(TK_KW, "struct") || p_match(TK_KW, "union")) {
     int is_union_kw = p_match(TK_KW, "union");
     if (is_union_kw) { p_eat(TK_KW, "union"); }
@@ -2296,6 +2313,9 @@ int is_type_keyword(int *s) {
   if (my_strcmp(s, "union") == 0) { return 1; }
   if (my_strcmp(s, "double") == 0) { return 1; }
   if (my_strcmp(s, "float") == 0) { return 1; }
+  if (my_strcmp(s, "__typeof__") == 0) { return 1; }
+  if (my_strcmp(s, "typeof") == 0) { return 1; }
+  if (my_strcmp(s, "__typeof") == 0) { return 1; }
   return 0;
 }
 
@@ -2910,6 +2930,7 @@ struct Stmt *parse_stmt() {
       p_match(TK_KW, "register") || p_match(TK_KW, "enum") ||
       p_match(TK_KW, "_Bool") || p_match(TK_KW, "bool") ||
       p_match(TK_KW, "double") || p_match(TK_KW, "float") ||
+      p_match(TK_KW, "__typeof__") || p_match(TK_KW, "typeof") || p_match(TK_KW, "__typeof") ||
       (tok_kind[cur_pos] == TK_ID && has_typedef(tok_val[cur_pos]))) {
     return parse_vardecl_stmt(0);
   }
@@ -5510,6 +5531,19 @@ int gen_value(struct Expr *e) {
       gen_value(e->args[0]);
       emit_line("\tadd\tx1, x29, #16");
       emit_line("\tstr\tx1, [x0]");
+      return 0;
+    }
+
+    // __builtin_expect(expr, expected) => just return expr
+    if (my_strcmp(name, "__builtin_expect") == 0) {
+      gen_value(e->args[0]);
+      return 0;
+    }
+
+    // __builtin_offsetof(type, member) => handled at parse time
+    // __builtin_types_compatible_p(type1, type2) => always return 1
+    if (my_strcmp(name, "__builtin_types_compatible_p") == 0) {
+      emit_line("\tmov\tx0, #1");
       return 0;
     }
 
