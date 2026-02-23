@@ -27,7 +27,7 @@ int system(int *cmd);
 enum { TK_NUM, TK_ID, TK_STR, TK_KW, TK_OP, TK_EOF };
 enum { ND_NUM, ND_VAR, ND_STRLIT, ND_CALL, ND_UNARY, ND_BINARY,
        ND_INDEX, ND_FIELD, ND_ARROW, ND_ASSIGN, ND_POSTINC, ND_POSTDEC,
-       ND_TERNARY, ND_INITLIST, ND_COMPOUND_LIT, ND_CAST };
+       ND_TERNARY, ND_INITLIST, ND_COMPOUND_LIT, ND_CAST, ND_STMT_EXPR };
 enum { ST_RETURN, ST_IF, ST_WHILE, ST_FOR, ST_BREAK, ST_CONTINUE,
        ST_EXPR, ST_VARDECL, ST_DOWHILE, ST_GOTO, ST_LABEL, ST_SWITCH, ST_BLOCK };
 
@@ -2344,6 +2344,19 @@ struct Expr *parse_primary() {
     } else {
       e = new_var(name);
     }
+  } else if (p_match(TK_OP, "(") && tok_kind[cur_pos + 1] == TK_OP && my_strcmp(tok_val[cur_pos + 1], "{") == 0) {
+    // Statement expression: ({ stmt; stmt; expr; })
+    p_eat(TK_OP, "(");
+    int se_blen = 0;
+    struct Stmt **se_body = parse_block(&se_blen);
+    p_eat(TK_OP, ")");
+    struct Stmt *se_blk = my_malloc(128);
+    se_blk->kind = ST_BLOCK;
+    se_blk->body = se_body;
+    se_blk->nbody = se_blen;
+    e = my_malloc(80);
+    e->kind = ND_STMT_EXPR;
+    e->left = se_blk; // abuse left as Stmt* pointer
   } else if (p_match(TK_OP, "(")) {
     // Check if this is a cast: (type)expr
     int cast_saved = cur_pos;
@@ -4341,6 +4354,12 @@ int lay_walk_expr_cl(struct Expr *e, int *offset) {
     lay_walk_expr_cl(e->args[0], offset);
   } else if (e->kind == ND_POSTINC || e->kind == ND_POSTDEC) {
     lay_walk_expr_cl(e->left, offset);
+  } else if (e->kind == ND_STMT_EXPR) {
+    // Walk the block inside the statement expression
+    struct Stmt *se_blk = e->left;
+    if (se_blk != 0 && se_blk->kind == ST_BLOCK) {
+      lay_walk_stmts(se_blk->body, se_blk->nbody, offset);
+    }
   }
   return 0;
 }
@@ -4960,6 +4979,20 @@ int gen_value(struct Expr *e) {
     emit_s("\tsub\tx0, x29, #");
     emit_num(cl_base);
     emit_ch('\n');
+    return 0;
+  }
+
+  if (e->kind == ND_STMT_EXPR) {
+    // Statement expression: ({ stmts; expr; })
+    // Generate all statements in the block; last expr-stmt leaves value in x0
+    struct Stmt *se_blk = e->left;
+    if (se_blk != 0 && se_blk->kind == ST_BLOCK) {
+      int se_i = 0;
+      while (se_i < se_blk->nbody) {
+        gen_stmt(se_blk->body[se_i], 0);
+        se_i++;
+      }
+    }
     return 0;
   }
 
@@ -6528,6 +6561,42 @@ int pp_preprocess(int *src, int srclen, int *filepath, int *out, int co, int dep
         exit(1);
       }
 
+      // Check for "warning"
+      else if (pp_is_including() && si + 7 <= srclen &&
+          __read_byte(src, si) == 'w' && __read_byte(src, si+1) == 'a' &&
+          __read_byte(src, si+2) == 'r' && __read_byte(src, si+3) == 'n' &&
+          __read_byte(src, si+4) == 'i' && __read_byte(src, si+5) == 'n' &&
+          __read_byte(src, si+6) == 'g' &&
+          (__read_byte(src, si+7) == ' ' || __read_byte(src, si+7) == '\t' || __read_byte(src, si+7) == '\n')) {
+        si += 7;
+        while (si < srclen && (__read_byte(src, si) == ' ' || __read_byte(src, si) == '\t')) { si++; }
+        int wm_start = si;
+        while (si < srclen && __read_byte(src, si) != '\n') { si++; }
+        int *wm_msg = make_str(src, wm_start, si - wm_start);
+        printf("cc: #warning: %s\n", wm_msg);
+        while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
+        if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
+      }
+
+      // Check for "line" (ignore directive, just skip)
+      else if (si + 4 <= srclen &&
+          __read_byte(src, si) == 'l' && __read_byte(src, si+1) == 'i' &&
+          __read_byte(src, si+2) == 'n' && __read_byte(src, si+3) == 'e' &&
+          (__read_byte(src, si+4) == ' ' || __read_byte(src, si+4) == '\t')) {
+        while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
+        if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
+      }
+
+      // Check for "pragma" (ignore directive, just skip)
+      else if (si + 6 <= srclen &&
+          __read_byte(src, si) == 'p' && __read_byte(src, si+1) == 'r' &&
+          __read_byte(src, si+2) == 'a' && __read_byte(src, si+3) == 'g' &&
+          __read_byte(src, si+4) == 'm' && __read_byte(src, si+5) == 'a' &&
+          (__read_byte(src, si+6) == ' ' || __read_byte(src, si+6) == '\t' || __read_byte(src, si+6) == '\n')) {
+        while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
+        if (ci < srclen) { __write_byte(out, co, '\n'); co++; ci++; }
+      }
+
       else {
         // Other preprocessor directive — skip
         while (ci < srclen && __read_byte(src, ci) != '\n') { ci++; }
@@ -6678,8 +6747,7 @@ int main(int argc, int *argv) {
     di++;
   }
   // Built-in macros
-  macro_names[nmacros] = "__LINE__"; macro_values[nmacros] = "0"; macro_nparams[nmacros] = 0 - 1; macro_params[nmacros] = 0; macro_bodies[nmacros] = 0; nmacros++;
-  macro_names[nmacros] = "__FILE__"; macro_values[nmacros] = "\"\""; macro_nparams[nmacros] = 0 - 1; macro_params[nmacros] = 0; macro_bodies[nmacros] = 0; nmacros++;
+  // __LINE__ and __FILE__ are handled as special cases in the macro expander
   if_depth = 0;
 
   int *cleaned = my_malloc(srclen * 4 + 1);
@@ -6765,7 +6833,7 @@ int main(int argc, int *argv) {
   int vlen = 0;
   int vi = 0;
   int ki = 0;
-  if (nmacros > 0) {
+  { // Always run expansion pass (for __LINE__/__FILE__ even with nmacros==0)
     expanded = my_malloc(co * 4 + 1);
     ei = 0;
     eo = 0;
@@ -6820,6 +6888,20 @@ int main(int argc, int *argv) {
         ilen = ei - istart;
         int *idstr = make_str(cleaned, istart, ilen);
         if (my_strcmp(idstr, "GLOBAL") == 0) { printf("cc: EXPAND found GLOBAL at ei=%d istart=%d co=%d\n", ei, istart, co); fflush(0); }
+        // Special built-in macros
+        if (ilen == 8 && my_strcmp(idstr, "__LINE__") == 0) {
+          int ln = 1; int li = 0; while (li < istart) { if (__read_byte(cleaned, li) == '\n') { ln++; } li++; }
+          int *lns = int_to_str(ln);
+          int lnl = my_strlen(lns); int lni = 0;
+          while (lni < lnl) { __write_byte(expanded, eo, __read_byte(lns, lni)); eo++; lni++; }
+          found = 1;
+        } else if (ilen == 8 && my_strcmp(idstr, "__FILE__") == 0) {
+          __write_byte(expanded, eo, '"'); eo++;
+          int fnl = my_strlen(c_path); int fni = 0;
+          while (fni < fnl) { __write_byte(expanded, eo, __read_byte(c_path, fni)); eo++; fni++; }
+          __write_byte(expanded, eo, '"'); eo++;
+          found = 1;
+        } else {
         found = 0;
         { int h = 0; int ci = 0; while (ci < ilen) { h = h * 31 + __read_byte(cleaned, istart + ci); ci++; } mc = macro_ht_head[h & 65535]; }
         while (mc >= 0) {
@@ -6987,6 +7069,7 @@ int main(int argc, int *argv) {
             ki++;
           }
         }
+        } // close else from __LINE__/__FILE__ check
       } else {
         __write_byte(expanded, eo, __read_byte(cleaned, ei));
         ei++;
@@ -7029,9 +7112,23 @@ int main(int argc, int *argv) {
         istart = ei;
         while (ei < co && is_alnum(__read_byte(cleaned, ei))) { ei++; }
         ilen = ei - istart;
+        int *idstr2 = make_str(cleaned, istart, ilen);
+        // Special built-in macros in second pass
+        if (ilen == 8 && my_strcmp(idstr2, "__LINE__") == 0) {
+          int ln2 = 1; int li2 = 0; while (li2 < istart) { if (__read_byte(cleaned, li2) == '\n') { ln2++; } li2++; }
+          int *lns2 = int_to_str(ln2);
+          int lnl2 = my_strlen(lns2); int lni2 = 0;
+          while (lni2 < lnl2) { __write_byte(expanded2, eo, __read_byte(lns2, lni2)); eo++; lni2++; }
+          found = 1; expand_changed = 1;
+        } else if (ilen == 8 && my_strcmp(idstr2, "__FILE__") == 0) {
+          __write_byte(expanded2, eo, '"'); eo++;
+          int fnl2 = my_strlen(c_path); int fni2 = 0;
+          while (fni2 < fnl2) { __write_byte(expanded2, eo, __read_byte(c_path, fni2)); eo++; fni2++; }
+          __write_byte(expanded2, eo, '"'); eo++;
+          found = 1; expand_changed = 1;
+        } else {
         found = 0;
         { int h = 0; int ci = 0; while (ci < ilen) { h = h * 31 + __read_byte(cleaned, istart + ci); ci++; } mc = macro_ht_head[h & 65535]; }
-        int *idstr2 = make_str(cleaned, istart, ilen);
         while (mc >= 0) {
           if (macro_nlens[mc] == ilen &&
               my_strcmp(idstr2, macro_names[mc]) == 0) {
@@ -7180,6 +7277,7 @@ int main(int argc, int *argv) {
           ki = istart;
           while (ki < ei) { __write_byte(expanded2, eo, __read_byte(cleaned, ki)); eo++; ki++; }
         }
+        } // close else from __LINE__/__FILE__ check (pass 2)
       } else {
         __write_byte(expanded2, eo, __read_byte(cleaned, ei)); ei++; eo++;
       }
