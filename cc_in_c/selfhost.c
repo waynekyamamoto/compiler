@@ -85,6 +85,8 @@ struct FuncDef {
   int is_variadic;
   int *param_is_char;
   int *param_is_intptr;
+  int *ret_stype;
+  int **param_stypes;
 };
 
 struct SDef {
@@ -133,6 +135,7 @@ struct Program {
   int *proto_ret_is_ptr;
   int *proto_is_variadic;
   int *proto_nparams;
+  int **proto_ret_stype;
   int nprotos;
   struct GDecl **globals;
   int nglobals;
@@ -147,6 +150,11 @@ int outcap;
 // Ptr-returning function names (for sxtw after bl)
 int *ptr_ret_names[256];
 int n_ptr_ret;
+
+// Struct-returning function names and their struct types
+int *struct_ret_names[256];
+int *struct_ret_stypes[256];
+int n_struct_ret;
 
 // Label counter
 int label_id;
@@ -237,6 +245,7 @@ int ntd;
 
 // Current function name for goto label mangling
 int *cg_cur_func_name;
+int *cg_cur_func_ret_stype;
 
 // Compound literal counters
 int cg_cl_counter;
@@ -2641,7 +2650,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
 struct FuncDef *parse_func() {
   nlv = 0;
   struct FuncDef *fd = 0;
-  parse_base_type();
+  int *ret_stype = parse_base_type();
   int ret_is_ptr = 0;
   while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); ret_is_ptr = 1; }
   int *name = my_strdup(p_eat(TK_ID, 0));
@@ -2650,6 +2659,7 @@ struct FuncDef *parse_func() {
   int **params = my_malloc(64 * 8);
   int *param_is_char = my_malloc(64 * 4);
   int *param_is_intptr = my_malloc(64 * 4);
+  int **param_stypes = my_malloc(64 * 8);
   int np = 0;
   int is_variadic = 0;
 
@@ -2705,6 +2715,11 @@ struct FuncDef *parse_func() {
         params[np] = my_strdup(pname);
         param_is_char[np] = (p_is_char && is_ptr > 0) ? 1 : 0;
         param_is_intptr[np] = (is_ptr > 0 && p_is_char == 0 && stype == 0) ? 1 : 0;
+        if (stype != 0 && is_ptr == 0) {
+          param_stypes[np] = my_strdup(stype);
+        } else {
+          param_stypes[np] = 0;
+        }
         np++;
         if (stype != 0) {
           add_lv(pname, stype, is_ptr);
@@ -2726,7 +2741,7 @@ struct FuncDef *parse_func() {
   if (p_match(TK_OP, ";")) {
     p_eat(TK_OP, ";");
     // Store proto info: name and ret_is_ptr
-    fd = my_malloc(80);
+    fd = my_malloc(88);
     fd->name = name;
     fd->params = 0;
     fd->nparams = np;
@@ -2736,13 +2751,15 @@ struct FuncDef *parse_func() {
     fd->is_variadic = is_variadic;
     fd->param_is_char = param_is_char;
     fd->param_is_intptr = param_is_intptr;
+    fd->ret_stype = ret_stype;
+    fd->param_stypes = param_stypes;
     return fd;
   }
 
   int blen = 0;
   struct Stmt **body = parse_block(&blen);
 
-  fd = my_malloc(80);
+  fd = my_malloc(88);
   fd->name = name;
   fd->params = params;
   fd->nparams = np;
@@ -2752,6 +2769,8 @@ struct FuncDef *parse_func() {
   fd->is_variadic = is_variadic;
   fd->param_is_char = param_is_char;
   fd->param_is_intptr = param_is_intptr;
+  fd->ret_stype = ret_stype;
+  fd->param_stypes = param_stypes;
   return fd;
 }
 
@@ -3231,6 +3250,7 @@ struct Program *parse_program() {
   int *proto_rip = my_malloc(64 * 8);
   int *proto_is_var = my_malloc(64 * 8);
   int *proto_np = my_malloc(64 * 8);
+  int **proto_rs = my_malloc(64 * 8);
   int nprotos = 0;
   struct GDecl **globals = my_malloc(1024 * 8);
   int ng = 0;
@@ -3298,6 +3318,7 @@ struct Program *parse_program() {
           proto_rip[nprotos] = fd->ret_is_ptr;
           proto_is_var[nprotos] = fd->is_variadic;
           proto_np[nprotos] = fd->nparams;
+          proto_rs[nprotos] = fd->ret_stype;
           nprotos++;
         } else {
           funcs[nf] = fd;
@@ -3332,10 +3353,11 @@ struct Program *parse_program() {
             proto_rip[nprotos] = fd->ret_is_ptr;
             proto_is_var[nprotos] = fd->is_variadic;
             proto_np[nprotos] = fd->nparams;
+            proto_rs[nprotos] = fd->ret_stype;
             nprotos++;
           } else {
             funcs[nf] = fd;
-  
+
             nf++;
           }
         } else {
@@ -3351,6 +3373,7 @@ struct Program *parse_program() {
           proto_rip[nprotos] = fd->ret_is_ptr;
           proto_is_var[nprotos] = fd->is_variadic;
           proto_np[nprotos] = fd->nparams;
+          proto_rs[nprotos] = fd->ret_stype;
           nprotos++;
         } else {
           funcs[nf] = fd;
@@ -3364,7 +3387,7 @@ struct Program *parse_program() {
     }
   }
 
-  struct Program *p = my_malloc(88);
+  struct Program *p = my_malloc(96);
   p->structs = structs;
   p->nstructs = ns;
   p->funcs = funcs;
@@ -3373,6 +3396,7 @@ struct Program *parse_program() {
   p->proto_ret_is_ptr = proto_rip;
   p->proto_is_variadic = proto_is_var;
   p->proto_nparams = proto_np;
+  p->proto_ret_stype = proto_rs;
   p->nprotos = nprotos;
   p->globals = globals;
   p->nglobals = ng;
@@ -3403,6 +3427,15 @@ int func_returns_ptr(int *name) {
   int i = 0;
   while (i < n_ptr_ret) {
     if (my_strcmp(ptr_ret_names[i], name) == 0) { return 1; }
+    i++;
+  }
+  return 0;
+}
+
+int *func_ret_stype(int *name) {
+  int i = 0;
+  while (i < n_struct_ret) {
+    if (my_strcmp(struct_ret_names[i], name) == 0) { return struct_ret_stypes[i]; }
     i++;
   }
   return 0;
@@ -3917,7 +3950,14 @@ int layout_func(struct FuncDef *f) {
   int offset = 0;
 
   for (int i = 0; i < f->nparams; i++) {
-    if (i < 8) {
+    if (f->param_stypes != 0 && f->param_stypes[i] != 0) {
+      int nf = cg_struct_nfields(f->param_stypes[i]);
+      offset += nf * 8;
+      lay_add_slot(f->params[i], offset);
+      lay_sv_name[nlay_sv] = my_strdup(f->params[i]);
+      lay_sv_type[nlay_sv] = my_strdup(f->param_stypes[i]);
+      nlay_sv++;
+    } else if (i < 8) {
       offset += 8;
       lay_add_slot(f->params[i], offset);
     } else {
@@ -4108,6 +4148,12 @@ int gen_addr(struct Expr *e) {
     return 0;
   }
   if (e->kind == ND_COMPOUND_LIT) {
+    gen_value(e);
+    return 0;
+  }
+  if (e->kind == ND_CALL) {
+    // Struct-returning function call in lvalue context
+    // Call returns pointer to struct in x0 — that IS the address
     gen_value(e);
     return 0;
   }
@@ -4760,7 +4806,7 @@ int gen_value(struct Expr *e) {
     if (nargs > 0) {
       emit_s("\tadd\tsp, sp, #"); emit_num(nargs * 16); emit_ch('\n');
     }
-    if (func_returns_ptr(name) == 0) {
+    if (func_returns_ptr(name) == 0 && func_ret_stype(name) == 0) {
       emit_line("\tsxtw\tx0, w0");
     }
     return 0;
@@ -4793,7 +4839,11 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
   int *def_label = 0;
   int ci = 0;
   if (st->kind == ST_RETURN) {
-    gen_value(st->expr);
+    if (cg_cur_func_ret_stype != 0) {
+      gen_addr(st->expr);
+    } else {
+      gen_value(st->expr);
+    }
     emit_s("\tb\t"); emit_line(ret_label);
     return 0;
   }
@@ -4847,6 +4897,25 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
               emit_num(elem_off);
               emit_ch('\n');
               emit_line("\tstr\tx0, [x9]");
+            }
+            k++;
+          }
+        } else if (vd->init != 0 && vd->init->kind == ND_CALL) {
+          // Struct init from function call: struct Foo x = make_foo();
+          nf = cg_struct_nfields(vd->stype);
+          base_off = cg_find_slot(vd->name);
+          gen_value(vd->init);
+          // x0 = pointer to returned struct
+          emit_line("\tmov\tx10, x0");
+          k = 0;
+          while (k < nf) {
+            emit_s("\tldr\tx9, [x10, #"); emit_num(k * 8); emit_line("]");
+            elem_off = base_off - k * 8;
+            if (elem_off <= 255) {
+              emit_s("\tstr\tx9, [x29, #-"); emit_num(elem_off); emit_line("]");
+            } else {
+              emit_s("\tsub\tx11, x29, #"); emit_num(elem_off); emit_ch('\n');
+              emit_line("\tstr\tx9, [x11]");
             }
             k++;
           }
@@ -5141,6 +5210,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
 
 int gen_func(struct FuncDef *f) {
   cg_cur_func_name = f->name;
+  cg_cur_func_ret_stype = f->ret_stype;
   cg_cl_counter = 0;
   cg_cl_gen_counter = 0;
   layout_func(f);
@@ -5168,7 +5238,29 @@ int gen_func(struct FuncDef *f) {
 
   for (int i = 0; i < f->nparams && i < 8; i++) {
     int off = cg_find_slot(f->params[i]);
-    if (off <= 255) {
+    if (f->param_stypes != 0 && f->param_stypes[i] != 0) {
+      int nf = cg_struct_nfields(f->param_stypes[i]);
+      for (int fi = 0; fi < nf; fi++) {
+        int src_off = fi * 8;
+        int dst_off = off - (nf - 1 - fi) * 8;
+        emit_s("\tldr\tx9, [x");
+        emit_num(i);
+        emit_s(", #");
+        emit_num(src_off);
+        emit_line("]");
+        if (dst_off <= 255) {
+          emit_s("\tstr\tx9, [x29, #-");
+          emit_num(dst_off);
+          emit_line("]");
+        } else {
+          emit_s("\tmov\tx10, #");
+          emit_num(dst_off);
+          emit_ch('\n');
+          emit_line("\tsub\tx10, x29, x10");
+          emit_line("\tstr\tx9, [x10]");
+        }
+      }
+    } else if (off <= 255) {
       emit_s("\tstr\tx");
       emit_num(i);
       emit_s(", [x29, #-");
@@ -5250,6 +5342,29 @@ int codegen(struct Program *prog) {
     if (fd->ret_is_ptr != 0) {
       ptr_ret_names[n_ptr_ret] = fd->name;
       n_ptr_ret++;
+    }
+    pi++;
+  }
+
+  // Register struct-returning functions from prototypes
+  n_struct_ret = 0;
+  pi = 0;
+  while (pi < prog->nprotos) {
+    if (prog->proto_ret_stype[pi] != 0) {
+      struct_ret_names[n_struct_ret] = prog->proto_names[pi];
+      struct_ret_stypes[n_struct_ret] = prog->proto_ret_stype[pi];
+      n_struct_ret++;
+    }
+    pi++;
+  }
+  // Register struct-returning functions from definitions
+  pi = 0;
+  while (pi < prog->nfuncs) {
+    fd = prog->funcs[pi];
+    if (fd->ret_stype != 0) {
+      struct_ret_names[n_struct_ret] = fd->name;
+      struct_ret_stypes[n_struct_ret] = fd->ret_stype;
+      n_struct_ret++;
     }
     pi++;
   }
