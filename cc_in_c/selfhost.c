@@ -54,6 +54,7 @@ struct VarDecl {
   int is_unsigned;
   int arr_size2;
   int is_char;
+  int is_float;
 };
 
 struct Stmt {
@@ -88,6 +89,8 @@ struct FuncDef {
   int *param_is_intptr;
   int *ret_stype;
   int **param_stypes;
+  int *param_is_float;
+  int ret_is_float;
 };
 
 struct SDef {
@@ -137,6 +140,7 @@ struct Program {
   int *proto_is_variadic;
   int *proto_nparams;
   int **proto_ret_stype;
+  int *proto_ret_is_float;
   int nprotos;
   struct GDecl **globals;
   int nglobals;
@@ -232,7 +236,13 @@ int *lay_char_name[512];
 int nlay_char;
 int *lay_intptr_name[512];
 int nlay_intptr;
+int *lay_float_name[512];
+int nlay_float;
 int lay_stack_size;
+
+// Float-returning function names
+int *float_ret_names[4096];
+int n_float_ret;
 
 // Enum constant table
 int *ec_name[65536];
@@ -247,6 +257,7 @@ int ntd;
 // Current function name for goto label mangling
 int *cg_cur_func_name;
 int *cg_cur_func_ret_stype;
+int cg_cur_func_ret_is_float;
 
 // Compound literal counters
 int cg_cl_counter;
@@ -851,6 +862,149 @@ int is_alnum(int c) {
   return is_alpha(c) || is_digit(c);
 }
 
+int is_float_literal(int *s) {
+  int i = 0;
+  int c = __read_byte(s, i);
+  // Hex literals are never float
+  if (c == '0' && (__read_byte(s, 1) == 'x' || __read_byte(s, 1) == 'X')) { return 0; }
+  while (c != 0) {
+    if (c == '.' || c == 'e' || c == 'E') { return 1; }
+    i++;
+    c = __read_byte(s, i);
+  }
+  // Check for 'f' or 'F' suffix at end
+  if (i > 0) {
+    int last = __read_byte(s, i - 1);
+    if (last == 'f' || last == 'F') { return 1; }
+  }
+  return 0;
+}
+
+// Convert float literal string to IEEE 754 double bit pattern using integer-only math
+int *str_to_double_bits(int *s) {
+  int sign = 0;
+  int i = 0;
+  int c = __read_byte(s, i);
+
+  // Sign
+  if (c == '-') { sign = 1; i++; c = __read_byte(s, i); }
+  else if (c == '+') { i++; c = __read_byte(s, i); }
+
+  // Parse integer part
+  int intpart = 0;
+  while (c >= '0' && c <= '9') {
+    intpart = intpart * 10 + (c - '0');
+    i++; c = __read_byte(s, i);
+  }
+
+  // Parse fractional part
+  int fracpart = 0;
+  int frac_digits = 0;
+  if (c == '.') {
+    i++; c = __read_byte(s, i);
+    while (c >= '0' && c <= '9') {
+      fracpart = fracpart * 10 + (c - '0');
+      frac_digits++;
+      i++; c = __read_byte(s, i);
+    }
+  }
+
+  // Parse exponent
+  int exp_val = 0;
+  int exp_sign = 1;
+  if (c == 'e' || c == 'E') {
+    i++; c = __read_byte(s, i);
+    if (c == '-') { exp_sign = 0 - 1; i++; c = __read_byte(s, i); }
+    else if (c == '+') { i++; c = __read_byte(s, i); }
+    while (c >= '0' && c <= '9') {
+      exp_val = exp_val * 10 + (c - '0');
+      i++; c = __read_byte(s, i);
+    }
+    exp_val = exp_val * exp_sign;
+  }
+
+  // Skip f/F/l/L suffix
+  // Now: value = (intpart + fracpart/10^frac_digits) * 10^exp_val
+  // Build mantissa: intpart * 10^frac_digits + fracpart
+  int mantissa = intpart;
+  int d = 0;
+  while (d < frac_digits) { mantissa = mantissa * 10; d++; }
+  mantissa = mantissa + fracpart;
+  int decimal_exp = exp_val - frac_digits;
+
+  if (mantissa == 0) { return 0; } // +0.0
+
+  // Precompute large constants using shifts to avoid 64-bit literal issues
+  int one_shl_52 = 1 << 52;
+  int one_shl_53 = 1 << 53;
+  int one_shl_62 = 1 << 62;
+  int overflow_limit = one_shl_62 / 5;
+  int bin_exp = 0;
+  int m = mantissa;
+
+  // Apply decimal exponent: multiply/divide by powers of 10
+  if (decimal_exp > 0) {
+    while (decimal_exp > 0) {
+      if (m > overflow_limit) { m = m / 2; bin_exp++; }
+      m = m * 10;
+      decimal_exp--;
+    }
+  } else if (decimal_exp < 0) {
+    // Shift m left to fill ~62 bits, then divide by 10^|exp|
+    while (m < one_shl_62) { m = m * 2; bin_exp--; }
+    while (decimal_exp < 0) {
+      m = m / 10;
+      decimal_exp++;
+      while (m < one_shl_62 && decimal_exp < 0) { m = m * 2; bin_exp--; }
+    }
+    while (decimal_exp > 0) {
+      if (m > overflow_limit) { m = m / 2; bin_exp++; }
+      m = m * 10;
+      decimal_exp--;
+    }
+  }
+
+  // Normalize: shift so bit 52 is the highest set bit
+  int tmp = m;
+  int nbits = 0;
+  while (tmp > 0) { tmp = tmp / 2; nbits++; }
+
+  // We want nbits == 53 (bit 52 is MSB)
+  if (nbits > 53) {
+    int shift = nbits - 53;
+    int half = 1;
+    int si = 0;
+    while (si < shift - 1) { half = half * 2; si++; }
+    int remainder = m & (half * 2 - 1);
+    m = m / (half * 2);
+    if (remainder > half) { m = m + 1; }
+    else if (remainder == half && (m & 1)) { m = m + 1; }
+    bin_exp = bin_exp + shift;
+    if (m >= one_shl_53) { m = m / 2; bin_exp++; }
+  } else if (nbits < 53) {
+    int shift = 53 - nbits;
+    int si = 0;
+    while (si < shift) { m = m * 2; si++; }
+    bin_exp = bin_exp - shift;
+  }
+
+  // Remove implicit leading 1 (bit 52)
+  int frac = m - one_shl_52;
+
+  // Biased exponent: bin_exp + 52 + 1023
+  int biased = bin_exp + 52 + 1023;
+  if (biased <= 0) { return 0; } // underflow to zero
+  if (biased >= 2047) { biased = 2047; frac = 0; } // overflow to inf
+
+  // Pack: sign(1) | exponent(11) | fraction(52)
+  int result = frac;
+  result = result + (biased << 52);
+  if (sign) {
+    result = result + (1 << 63);
+  }
+  return result;
+}
+
 int is_keyword(int *s) {
   if (my_strcmp(s, "int") == 0) { return 1; }
   if (my_strcmp(s, "return") == 0) { return 1; }
@@ -1269,9 +1423,16 @@ int *resolve_stype(struct Expr *e) {
 // ---- AST constructors ----
 
 struct Expr *new_num(int val) {
-  struct Expr *e = my_malloc(56);
+  struct Expr *e = my_malloc(72);
   e->kind = ND_NUM;
   e->ival = val;
+  e->sval = 0;
+  e->sval2 = 0;
+  e->left = 0;
+  e->right = 0;
+  e->args = 0;
+  e->nargs = 0;
+  e->desig = 0;
   return e;
 }
 
@@ -1831,7 +1992,7 @@ struct Stmt **parse_block_or_stmt(int *out_len) {
 int parse_const_expr();
 
 struct VarDecl *make_vd(int *name, int *stype, int arr_size, int is_ptr, struct Expr *init, int is_static) {
-  struct VarDecl *vd = my_malloc(72);
+  struct VarDecl *vd = my_malloc(80);
   vd->name = name;
   vd->stype = stype;
   vd->arr_size = arr_size;
@@ -1841,6 +2002,7 @@ struct VarDecl *make_vd(int *name, int *stype, int arr_size, int is_ptr, struct 
   vd->is_unsigned = 0;
   vd->arr_size2 = 0 - 1;
   vd->is_char = 0;
+  vd->is_float = 0;
   return vd;
 }
 
@@ -1908,11 +2070,13 @@ struct Expr *parse_init_list(int *stype_name) {
 
 struct Stmt *parse_vardecl_stmt(int vd_is_static) {
   int base_is_char = 0;
-  // Check if base type is char (before parse_base_type consumes it)
+  int base_is_float = 0;
+  // Check if base type is char or float/double (before parse_base_type consumes it)
   {
     int sv = cur_pos;
     skip_qualifiers();
     if (p_match(TK_KW, "char")) { base_is_char = 1; }
+    else if (p_match(TK_KW, "float") || p_match(TK_KW, "double")) { base_is_float = 1; }
     else if (p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) {
       if (tok_kind[cur_pos + 1] == TK_KW && my_strcmp(tok_val[cur_pos + 1], "char") == 0) { base_is_char = 1; }
     }
@@ -2012,6 +2176,7 @@ struct Stmt *parse_vardecl_stmt(int vd_is_static) {
     decls[ndecls] = make_vd(my_strdup(name), decl_stype, arr_size, is_ptr, init, vd_is_static);
     decls[ndecls]->is_unsigned = base_unsigned;
     decls[ndecls]->is_char = base_is_char;
+    decls[ndecls]->is_float = base_is_float;
     decls[ndecls]->arr_size2 = arr_size2;
     ndecls++;
     if (stype != 0) {
@@ -2233,12 +2398,18 @@ struct Expr *parse_unary() {
     if (tok_kind[cur_pos] == TK_KW && is_type_keyword(tok_val[cur_pos])) {
       // Check for compound literal: (struct Name){...}
       int *cl_stype = 0;
+      int cast_to_float = 0;
+      int cast_to_int = 0;
       if (p_match(TK_KW, "struct") || p_match(TK_KW, "union")) {
         cur_pos = cur_pos + 1;
         if (tok_kind[cur_pos] == TK_ID) {
           cl_stype = my_strdup(tok_val[cur_pos]);
           cur_pos = cur_pos + 1;
         }
+      } else if (p_match(TK_KW, "float") || p_match(TK_KW, "double")) {
+        cast_to_float = 1;
+      } else if (p_match(TK_KW, "int") || p_match(TK_KW, "long") || p_match(TK_KW, "short") || p_match(TK_KW, "char")) {
+        cast_to_int = 1;
       }
       // Skip the rest of the type, handling nested parens for funcptr casts
       int cast_depth = 1;
@@ -2261,6 +2432,8 @@ struct Expr *parse_unary() {
       struct Expr *cast_e = my_malloc(80);
       cast_e->kind = ND_CAST;
       cast_e->left = cast_inner;
+      if (cast_to_float) { cast_e->ival = 1; }
+      else if (cast_to_int) { cast_e->ival = 2; }
       return cast_e;
     }
     cur_pos = cast_saved;
@@ -2315,7 +2488,13 @@ struct Expr *parse_primary() {
 
   if (k == TK_NUM) {
     p_eat(TK_NUM, 0);
-    e = new_num(my_atoi(v));
+    if (is_float_literal(v)) {
+      int flt_bits = str_to_double_bits(v);
+      e = new_num(flt_bits);
+      e->nargs = 1; // mark as float literal
+    } else {
+      e = new_num(my_atoi(v));
+    }
   } else if (k == TK_STR) {
     p_eat(TK_STR, 0);
     e = new_strlit(v);
@@ -2955,6 +3134,10 @@ struct SDef *parse_struct_or_union_def(int is_union) {
 struct FuncDef *parse_func() {
   nlv = 0;
   struct FuncDef *fd = 0;
+  int ret_is_float = 0;
+  { int sv_rf = cur_pos; skip_qualifiers();
+    if (p_match(TK_KW, "float") || p_match(TK_KW, "double")) { ret_is_float = 1; }
+    cur_pos = sv_rf; }
   int *ret_stype = parse_base_type();
   int ret_is_ptr = 0;
   while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); ret_is_ptr = 1; }
@@ -2964,6 +3147,7 @@ struct FuncDef *parse_func() {
   int **params = my_malloc(64 * 8);
   int *param_is_char = my_malloc(64 * 4);
   int *param_is_intptr = my_malloc(64 * 4);
+  int *param_is_float = my_malloc(64 * 4);
   int **param_stypes = my_malloc(64 * 8);
   int np = 0;
   int is_variadic = 0;
@@ -2979,10 +3163,12 @@ struct FuncDef *parse_func() {
         break;
       }
       int p_is_char = 0;
+      int p_is_float = 0;
       {
         int sv2 = cur_pos;
         skip_qualifiers();
         if (p_match(TK_KW, "char")) { p_is_char = 1; }
+        else if (p_match(TK_KW, "float") || p_match(TK_KW, "double")) { p_is_float = 1; }
         else if (p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) {
           if (tok_kind[cur_pos + 1] == TK_KW && my_strcmp(tok_val[cur_pos + 1], "char") == 0) { p_is_char = 1; }
         }
@@ -3029,6 +3215,7 @@ struct FuncDef *parse_func() {
         params[np] = my_strdup(pname);
         param_is_char[np] = (p_is_char && is_ptr > 0) ? 1 : 0;
         param_is_intptr[np] = (is_ptr > 0 && p_is_char == 0 && stype == 0) ? 1 : 0;
+        param_is_float[np] = p_is_float;
         if (stype != 0 && is_ptr == 0) {
           param_stypes[np] = my_strdup(stype);
         } else {
@@ -3055,7 +3242,7 @@ struct FuncDef *parse_func() {
   if (p_match(TK_OP, ";")) {
     p_eat(TK_OP, ";");
     // Store proto info: name and ret_is_ptr
-    fd = my_malloc(88);
+    fd = my_malloc(112);
     fd->name = name;
     fd->params = 0;
     fd->nparams = np;
@@ -3067,13 +3254,15 @@ struct FuncDef *parse_func() {
     fd->param_is_intptr = param_is_intptr;
     if (ret_is_ptr == 0) { fd->ret_stype = ret_stype; }
     fd->param_stypes = param_stypes;
+    fd->param_is_float = param_is_float;
+    fd->ret_is_float = ret_is_float;
     return fd;
   }
 
   int blen = 0;
   struct Stmt **body = parse_block(&blen);
 
-  fd = my_malloc(88);
+  fd = my_malloc(112);
   fd->name = name;
   fd->params = params;
   fd->nparams = np;
@@ -3085,6 +3274,8 @@ struct FuncDef *parse_func() {
   fd->param_is_intptr = param_is_intptr;
   if (ret_is_ptr == 0) { fd->ret_stype = ret_stype; }
   fd->param_stypes = param_stypes;
+  fd->param_is_float = param_is_float;
+  fd->ret_is_float = ret_is_float;
   return fd;
 }
 
@@ -3720,6 +3911,7 @@ struct Program *parse_program() {
   int *proto_is_var = my_malloc(4096 * 8);
   int *proto_np = my_malloc(4096 * 8);
   int **proto_rs = my_malloc(4096 * 8);
+  int *proto_rif = my_malloc(4096 * 8);
   int nprotos = 0;
   struct GDecl **globals = my_malloc(4096 * 8);
   int ng = 0;
@@ -3789,6 +3981,7 @@ struct Program *parse_program() {
           proto_is_var[nprotos] = fd->is_variadic;
           proto_np[nprotos] = fd->nparams;
           proto_rs[nprotos] = fd->ret_stype;
+          proto_rif[nprotos] = fd->ret_is_float;
           nprotos++;
         } else {
           funcs[nf] = fd;
@@ -3870,6 +4063,7 @@ struct Program *parse_program() {
             proto_is_var[nprotos] = fd->is_variadic;
             proto_np[nprotos] = fd->nparams;
             proto_rs[nprotos] = fd->ret_stype;
+          proto_rif[nprotos] = fd->ret_is_float;
             nprotos++;
           } else {
             funcs[nf] = fd;
@@ -3948,6 +4142,7 @@ struct Program *parse_program() {
           proto_is_var[nprotos] = fd->is_variadic;
           proto_np[nprotos] = fd->nparams;
           proto_rs[nprotos] = fd->ret_stype;
+          proto_rif[nprotos] = fd->ret_is_float;
           nprotos++;
         } else {
           funcs[nf] = fd;
@@ -3961,7 +4156,7 @@ struct Program *parse_program() {
     }
   }
 
-  struct Program *p = my_malloc(96);
+  struct Program *p = my_malloc(112);
   p->structs = structs;
   p->nstructs = ns;
   p->funcs = funcs;
@@ -3971,6 +4166,7 @@ struct Program *parse_program() {
   p->proto_is_variadic = proto_is_var;
   p->proto_nparams = proto_np;
   p->proto_ret_stype = proto_rs;
+  p->proto_ret_is_float = proto_rif;
   p->nprotos = nprotos;
   p->globals = globals;
   p->nglobals = ng;
@@ -4435,6 +4631,10 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
           lay_intptr_name[nlay_intptr] = my_strdup(vd->name);
           nlay_intptr++;
         }
+        if (vd->is_float) {
+          lay_float_name[nlay_float] = my_strdup(vd->name);
+          nlay_float++;
+        }
       }
     } else if (st->kind == ST_IF) {
       lay_walk_stmts(st->body, st->nbody, offset);
@@ -4510,6 +4710,38 @@ int cg_is_intptr(int *name) {
   return 0;
 }
 
+int cg_is_float(int *name) {
+  int i = 0;
+  while (i < nlay_float) {
+    if (my_strcmp(lay_float_name[i], name) == 0) { return 1; }
+    i++;
+  }
+  return 0;
+}
+
+int func_returns_float(int *name) {
+  int i = 0;
+  while (i < n_float_ret) {
+    if (my_strcmp(float_ret_names[i], name) == 0) { return 1; }
+    i++;
+  }
+  return 0;
+}
+
+// Check if an expression evaluates to a float type
+int expr_is_float(struct Expr *e) {
+  if (e == 0) return 0;
+  if (e->kind == ND_NUM && e->nargs == 1) return 1; // float literal (nargs=1 as marker)
+  if (e->kind == ND_VAR && cg_is_float(e->sval)) return 1;
+  if (e->kind == ND_CALL && func_returns_float(e->sval)) return 1;
+  if (e->kind == ND_BINARY) return expr_is_float(e->left) || expr_is_float(e->right);
+  if (e->kind == ND_UNARY) return expr_is_float(e->left);
+  if (e->kind == ND_ASSIGN) return expr_is_float(e->left);
+  if (e->kind == ND_TERNARY) return expr_is_float(e->right) || expr_is_float(e->args[0]);
+  if (e->kind == ND_CAST) return e->ival == 1; // float cast
+  return 0;
+}
+
 int cg_get_arr_inner(int *name) {
   int i = 0;
   while (i < nlay_arr) {
@@ -4527,6 +4759,7 @@ int layout_func(struct FuncDef *f) {
   nlay_unsigned = 0;
   nlay_char = 0;
   nlay_intptr = 0;
+  nlay_float = 0;
   int offset = 0;
 
   for (int i = 0; i < f->nparams; i++) {
@@ -4552,6 +4785,10 @@ int layout_func(struct FuncDef *f) {
     if (f->param_is_intptr != 0 && f->param_is_intptr[i]) {
       lay_intptr_name[nlay_intptr] = my_strdup(f->params[i]);
       nlay_intptr++;
+    }
+    if (f->param_is_float != 0 && f->param_is_float[i]) {
+      lay_float_name[nlay_float] = my_strdup(f->params[i]);
+      nlay_float++;
     }
   }
 
@@ -4757,25 +4994,50 @@ int gen_value(struct Expr *e) {
   int sa_fi = 0;
   if (e->kind == ND_CAST) {
     gen_value(e->left);
+    if (e->ival == 1 && expr_is_float(e->left) == 0) {
+      // (float/double)int_expr: int to float
+      emit_line("\tscvtf\td0, x0");
+      emit_line("\tfmov\tx0, d0");
+    } else if (e->ival == 2 && expr_is_float(e->left)) {
+      // (int)float_expr: float to int
+      emit_line("\tfmov\td0, x0");
+      emit_line("\tfcvtzs\tx0, d0");
+    }
     return;
   }
   if (e->kind == ND_NUM) {
     int val = e->ival;
-    if (val >= -65535 && val <= 65535) {
+    // Float literals need full 64-bit load via unsigned bit extraction
+    if (e->nargs == 1) {
+      int w0 = val & 65535;
+      int v1 = val;
+      // Use logical right shift (>>>) equivalent: divide by power of 2 but handle sign
+      // Actually we can use the & operator with shifting
+      v1 = val >> 16;
+      int w1 = v1 & 65535;
+      v1 = val >> 32;
+      int w2 = v1 & 65535;
+      v1 = val >> 48;
+      int w3 = v1 & 65535;
+      emit_s("\tmovz\tx0, #"); emit_unum(w0); emit_ch('\n');
+      if (w1 != 0) { emit_s("\tmovk\tx0, #"); emit_unum(w1); emit_s(", lsl #16\n"); }
+      if (w2 != 0) { emit_s("\tmovk\tx0, #"); emit_unum(w2); emit_s(", lsl #32\n"); }
+      if (w3 != 0) { emit_s("\tmovk\tx0, #"); emit_unum(w3); emit_s(", lsl #48\n"); }
+    } else if (val >= -65535 && val <= 65535) {
       emit_s("\tmov\tx0, #");
       emit_num(val);
       emit_ch('\n');
     } else {
       int lo = val & 65535;
-      int hi = ((val - lo) / 65536) & 65535;
+      int w1 = (val >> 16) & 65535;
+      int w2 = (val >> 32) & 65535;
+      int w3 = (val >> 48) & 65535;
       emit_s("\tmovz\tx0, #");
       emit_unum(lo);
       emit_ch('\n');
-      if (hi != 0) {
-        emit_s("\tmovk\tx0, #");
-        emit_unum(hi);
-        emit_s(", lsl #16\n");
-      }
+      if (w1 != 0) { emit_s("\tmovk\tx0, #"); emit_unum(w1); emit_s(", lsl #16\n"); }
+      if (w2 != 0) { emit_s("\tmovk\tx0, #"); emit_unum(w2); emit_s(", lsl #32\n"); }
+      if (w3 != 0) { emit_s("\tmovk\tx0, #"); emit_unum(w3); emit_s(", lsl #48\n"); }
     }
     return 0;
   }
@@ -4909,6 +5171,19 @@ int gen_value(struct Expr *e) {
     gen_value(e->right);
     emit_line("\tldr\tx1, [sp], #16");
     {
+      // Float conversion: int-to-float or float-to-int
+      int target_is_float = 0;
+      int value_is_float = expr_is_float(e->right);
+      if (e->left->kind == ND_VAR && cg_is_float(e->left->sval)) { target_is_float = 1; }
+      if (target_is_float && value_is_float == 0) {
+        // int to float: convert x0 (int) to double bit pattern
+        emit_line("\tscvtf\td0, x0");
+        emit_line("\tfmov\tx0, d0");
+      } else if (target_is_float == 0 && value_is_float) {
+        // float to int: convert x0 (double bits) to int
+        emit_line("\tfmov\td0, x0");
+        emit_line("\tfcvtzs\tx0, d0");
+      }
       int assign_char = 0;
       if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { assign_char = 1; }
       if (e->left->kind == ND_INDEX && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { assign_char = 1; }
@@ -5042,7 +5317,13 @@ int gen_value(struct Expr *e) {
     }
     gen_value(e->left);
     if (unary_op == '-') {
-      emit_line("\tneg\tx0, x0");
+      if (expr_is_float(e->left)) {
+        emit_line("\tfmov\td0, x0");
+        emit_line("\tfneg\td0, d0");
+        emit_line("\tfmov\tx0, d0");
+      } else {
+        emit_line("\tneg\tx0, x0");
+      }
     } else if (unary_op == '!') {
       emit_line("\tcmp\tx0, #0");
       emit_line("\tcset\tx0, eq");
@@ -5122,6 +5403,30 @@ int gen_value(struct Expr *e) {
           emit_line("\tlsl\tx1, x1, #3");
         }
       }
+    }
+
+    // Check if either operand is float
+    int use_float = 0;
+    if (expr_is_float(e->left) || expr_is_float(e->right)) { use_float = 1; }
+    if (use_float) {
+      int left_is_float = expr_is_float(e->left);
+      int right_is_float = expr_is_float(e->right);
+      // x1 = left, x0 = right. Move to FPU registers.
+      if (left_is_float) { emit_line("\tfmov\td1, x1"); } else { emit_line("\tscvtf\td1, x1"); }
+      if (right_is_float) { emit_line("\tfmov\td0, x0"); } else { emit_line("\tscvtf\td0, x0"); }
+      if (my_strcmp(bin_op, "+") == 0) { emit_line("\tfadd\td0, d1, d0"); }
+      else if (my_strcmp(bin_op, "-") == 0) { emit_line("\tfsub\td0, d1, d0"); }
+      else if (my_strcmp(bin_op, "*") == 0) { emit_line("\tfmul\td0, d1, d0"); }
+      else if (my_strcmp(bin_op, "/") == 0) { emit_line("\tfdiv\td0, d1, d0"); }
+      else if (my_strcmp(bin_op, "==") == 0) { emit_line("\tfcmp\td1, d0"); emit_line("\tcset\tx0, eq"); return 0; }
+      else if (my_strcmp(bin_op, "!=") == 0) { emit_line("\tfcmp\td1, d0"); emit_line("\tcset\tx0, ne"); return 0; }
+      else if (my_strcmp(bin_op, "<") == 0) { emit_line("\tfcmp\td1, d0"); emit_line("\tcset\tx0, mi"); return 0; }
+      else if (my_strcmp(bin_op, "<=") == 0) { emit_line("\tfcmp\td1, d0"); emit_line("\tcset\tx0, ls"); return 0; }
+      else if (my_strcmp(bin_op, ">") == 0) { emit_line("\tfcmp\td1, d0"); emit_line("\tcset\tx0, gt"); return 0; }
+      else if (my_strcmp(bin_op, ">=") == 0) { emit_line("\tfcmp\td1, d0"); emit_line("\tcset\tx0, ge"); return 0; }
+      else { my_fatal("unsupported float binary op"); }
+      emit_line("\tfmov\tx0, d0");
+      return 0;
     }
 
     // Check if either operand is unsigned
@@ -5400,7 +5705,9 @@ int gen_value(struct Expr *e) {
     if (nargs > 0) {
       emit_s("\tadd\tsp, sp, #"); emit_num(nargs * 16); emit_ch('\n');
     }
-    if (func_returns_ptr(name) == 0 && func_ret_stype(name) == 0) {
+    if (func_returns_float(name)) {
+      emit_line("\tfmov\tx0, d0");
+    } else if (func_returns_ptr(name) == 0 && func_ret_stype(name) == 0) {
       emit_line("\tsxtw\tx0, w0");
     }
     return 0;
@@ -5591,6 +5898,11 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
       int off = cg_find_slot(vd->name);
       if (vd->init != 0) {
         gen_value(vd->init);
+        // Int-to-float conversion for float var init
+        if (vd->is_float && expr_is_float(vd->init) == 0) {
+          emit_line("\tscvtf\td0, x0");
+          emit_line("\tfmov\tx0, d0");
+        }
       } else {
         emit_line("\tmov\tx0, #0");
       }
@@ -5805,6 +6117,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
 int gen_func(struct FuncDef *f) {
   cg_cur_func_name = f->name;
   cg_cur_func_ret_stype = f->ret_stype;
+  cg_cur_func_ret_is_float = f->ret_is_float;
   cg_cl_counter = 0;
   cg_cl_gen_counter = 0;
   layout_func(f);
@@ -5888,6 +6201,9 @@ int gen_func(struct FuncDef *f) {
       emit_line("\tadd\tsp, sp, x9");
     }
   }
+  if (cg_cur_func_ret_is_float) {
+    emit_line("\tfmov\td0, x0");
+  }
   emit_line("\tldp\tx29, x30, [sp], #16");
   emit_line("\tret");
   return 0;
@@ -5959,6 +6275,26 @@ int codegen(struct Program *prog) {
       struct_ret_names[n_struct_ret] = fd->name;
       struct_ret_stypes[n_struct_ret] = fd->ret_stype;
       n_struct_ret++;
+    }
+    pi++;
+  }
+
+  // Register float-returning functions from prototypes and definitions
+  n_float_ret = 0;
+  pi = 0;
+  while (pi < prog->nprotos) {
+    if (prog->proto_ret_is_float[pi] != 0) {
+      float_ret_names[n_float_ret] = prog->proto_names[pi];
+      n_float_ret++;
+    }
+    pi++;
+  }
+  pi = 0;
+  while (pi < prog->nfuncs) {
+    fd = prog->funcs[pi];
+    if (fd->ret_is_float != 0) {
+      float_ret_names[n_float_ret] = fd->name;
+      n_float_ret++;
     }
     pi++;
   }
