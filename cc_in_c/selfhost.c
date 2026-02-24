@@ -103,6 +103,7 @@ struct SDef {
   int *bit_offsets;
   int *word_indices;
   int nwords;
+  int *field_is_array;
 };
 
 struct SFieldInfo {
@@ -110,6 +111,7 @@ struct SFieldInfo {
   int *stype;
   int is_ptr;
   int bit_width;
+  int is_array;
 };
 
 struct SDefInfo {
@@ -189,6 +191,7 @@ int *cg_s_bw[4096];     // bit_widths
 int *cg_s_bo[4096];     // bit_offsets
 int *cg_s_wi[4096];     // word_indices
 int cg_s_nw[4096];      // nwords
+int *cg_s_fa[4096];     // field_is_array flags
 int ncg_s;
 
 // Token arrays
@@ -1915,7 +1918,7 @@ int *parse_base_type() {
       p_sdefs[np_sdefs] = asdi;
       np_sdefs++;
       // Register for codegen
-      struct SDef *asd = my_malloc(72);
+      struct SDef *asd = my_malloc(80);
       asd->name = my_strdup(synth_name);
       asd->fields = afields;
       asd->field_types = afield_types;
@@ -1925,6 +1928,8 @@ int *parse_base_type() {
       asd->bit_offsets = 0;
       asd->word_indices = 0;
       asd->nwords = 0;
+      asd->field_is_array = my_malloc(anf * 8);
+      for (int afi = 0; afi < anf; afi++) { asd->field_is_array[afi] = 0; }
       inline_sdefs[ninline_sdefs] = asd;
       ninline_sdefs++;
       skip_qualifiers();
@@ -1984,7 +1989,7 @@ int *parse_base_type() {
       lsdi->nwords = 0;
       p_sdefs[np_sdefs] = lsdi;
       np_sdefs++;
-      struct SDef *lsd = my_malloc(72);
+      struct SDef *lsd = my_malloc(80);
       lsd->name = my_strdup(name);
       lsd->fields = lfields;
       lsd->field_types = lfield_types;
@@ -1994,6 +1999,8 @@ int *parse_base_type() {
       lsd->bit_offsets = 0;
       lsd->word_indices = 0;
       lsd->nwords = 0;
+      lsd->field_is_array = my_malloc(lnf * 8);
+      for (int lfi2 = 0; lfi2 < lnf; lfi2++) { lsd->field_is_array[lfi2] = 0; }
       inline_sdefs[ninline_sdefs] = lsd;
       ninline_sdefs++;
     }
@@ -3118,9 +3125,11 @@ struct SDef *parse_struct_or_union_def(int is_union) {
       p_eat(TK_OP, ")");
       skip_param_list(); // outer param list
     }
-    // skip array dimensions in struct fields
+    // parse array dimensions in struct fields
+    int f_is_arr = 0;
     while (p_match(TK_OP, "[")) {
       p_eat(TK_OP, "[");
+      f_is_arr = 1;
       while (!p_match(TK_OP, "]") && !p_match(TK_EOF, 0)) { cur_pos++; }
       p_eat(TK_OP, "]");
     }
@@ -3132,7 +3141,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     }
 
     fields[nf] = fname;
-    struct SFieldInfo *fi = my_malloc(32);
+    struct SFieldInfo *fi = my_malloc(48);
     fi->name = my_strdup(fname);
     if (ftype != 0) {
       fi->stype = my_strdup(ftype);
@@ -3141,6 +3150,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     }
     fi->is_ptr = is_ptr;
     fi->bit_width = bw;
+    fi->is_array = f_is_arr;
     finfo[nf] = fi;
     nf++;
 
@@ -3154,9 +3164,11 @@ struct SDef *parse_struct_or_union_def(int is_union) {
         extra_is_ptr = 1;
       }
       int *extra_name = my_strdup(p_eat(TK_ID, 0));
-      // skip array dimensions
+      // parse array dimensions
+      int ef_is_arr = 0;
       while (p_match(TK_OP, "[")) {
         p_eat(TK_OP, "[");
+        ef_is_arr = 1;
         while (!p_match(TK_OP, "]") && !p_match(TK_EOF, 0)) { cur_pos++; }
         p_eat(TK_OP, "]");
       }
@@ -3166,11 +3178,12 @@ struct SDef *parse_struct_or_union_def(int is_union) {
         extra_bw = my_atoi(p_eat(TK_NUM, 0));
       }
       fields[nf] = extra_name;
-      struct SFieldInfo *efi = my_malloc(32);
+      struct SFieldInfo *efi = my_malloc(48);
       efi->name = my_strdup(extra_name);
       if (ftype != 0) { efi->stype = my_strdup(ftype); } else { efi->stype = 0; }
       efi->is_ptr = extra_is_ptr;
       efi->bit_width = extra_bw;
+      efi->is_array = ef_is_arr;
       finfo[nf] = efi;
       nf++;
     }
@@ -3207,7 +3220,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     bfi++;
   }
 
-  struct SDef *sd = my_malloc(72);
+  struct SDef *sd = my_malloc(80);
   sd->name = name;
   sd->fields = fields;
   sd->field_types = ftypes;
@@ -3217,6 +3230,8 @@ struct SDef *parse_struct_or_union_def(int is_union) {
   sd->bit_offsets = 0;
   sd->word_indices = 0;
   sd->nwords = 0;
+  sd->field_is_array = my_malloc(nf * 8);
+  for (int fai = 0; fai < nf; fai++) { sd->field_is_array[fai] = finfo[fai]->is_array; }
 
   if (has_bf) {
     sd->bit_widths = my_malloc(nf * 8);
@@ -4442,6 +4457,26 @@ int cg_field_index(int *sname, int *fname) {
   return 0;
 }
 
+int cg_field_is_array(int *sname, int *fname) {
+  if (sname == 0 || fname == 0) return 0;
+  int i = 0;
+  while (i < ncg_s) {
+    if (cg_sname[i] != 0 && my_strcmp(cg_sname[i], sname) == 0) {
+      if (cg_s_fa[i] == 0) return 0;
+      int j = 0;
+      while (j < cg_snfields[i]) {
+        if (cg_sfields[i][j] != 0 && my_strcmp(cg_sfields[i][j], fname) == 0) {
+          return cg_s_fa[i][j];
+        }
+        j++;
+      }
+      return 0;
+    }
+    i++;
+  }
+  return 0;
+}
+
 int cg_struct_nfields(int *sname) {
   int i = 0;
   int j = 0;
@@ -5201,6 +5236,9 @@ int gen_value(struct Expr *e) {
     bf_bit_off = 0;
     bf_width = cg_get_bitfield_info(e->sval2, e->sval, &bf_bit_off);
     gen_addr(e);
+    if (cg_field_is_array(e->sval2, e->sval)) {
+      return 0;
+    }
     emit_line("\tldr\tx0, [x0]");
     if (bf_width > 0) {
       if (bf_bit_off > 0) {
@@ -6551,6 +6589,7 @@ int codegen(struct Program *prog) {
     cg_s_bo[ncg_s] = sd->bit_offsets;
     cg_s_wi[ncg_s] = sd->word_indices;
     cg_s_nw[ncg_s] = sd->nwords;
+    cg_s_fa[ncg_s] = sd->field_is_array;
     ncg_s++;
     i++;
   }
@@ -6567,6 +6606,7 @@ int codegen(struct Program *prog) {
     cg_s_bo[ncg_s] = sd->bit_offsets;
     cg_s_wi[ncg_s] = sd->word_indices;
     cg_s_nw[ncg_s] = sd->nwords;
+    cg_s_fa[ncg_s] = sd->field_is_array;
     ncg_s++;
     i++;
   }
