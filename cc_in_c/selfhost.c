@@ -27,9 +27,9 @@ int system(int *cmd);
 enum { TK_NUM, TK_ID, TK_STR, TK_KW, TK_OP, TK_EOF };
 enum { ND_NUM, ND_VAR, ND_STRLIT, ND_CALL, ND_UNARY, ND_BINARY,
        ND_INDEX, ND_FIELD, ND_ARROW, ND_ASSIGN, ND_POSTINC, ND_POSTDEC,
-       ND_TERNARY, ND_INITLIST, ND_COMPOUND_LIT, ND_CAST, ND_STMT_EXPR };
+       ND_TERNARY, ND_INITLIST, ND_COMPOUND_LIT, ND_CAST, ND_STMT_EXPR, ND_LABEL_ADDR };
 enum { ST_RETURN, ST_IF, ST_WHILE, ST_FOR, ST_BREAK, ST_CONTINUE,
-       ST_EXPR, ST_VARDECL, ST_DOWHILE, ST_GOTO, ST_LABEL, ST_SWITCH, ST_BLOCK };
+       ST_EXPR, ST_VARDECL, ST_DOWHILE, ST_GOTO, ST_LABEL, ST_SWITCH, ST_BLOCK, ST_COMPUTED_GOTO };
 
 // ---- Structs ----
 struct Expr {
@@ -2530,6 +2530,14 @@ struct Expr *parse_unary() {
     p_eat(TK_OP, "+");
     return parse_unary();
   }
+  // Labels-as-values: &&label
+  if (p_match(TK_OP, "&&") && tok_kind[cur_pos + 1] == TK_ID) {
+    p_eat(TK_OP, "&&");
+    struct Expr *la = my_malloc(72);
+    la->kind = ND_LABEL_ADDR;
+    la->sval = my_strdup(p_eat(TK_ID, 0));
+    return la;
+  }
   if (p_match(TK_OP, "-") || p_match(TK_OP, "!") || p_match(TK_OP, "*") || p_match(TK_OP, "&") || p_match(TK_OP, "~")) {
     int unary_op_ch = __read_byte(tok_val[cur_pos], 0);
     p_eat(TK_OP, 0);
@@ -2902,6 +2910,15 @@ struct Stmt *parse_stmt() {
   // goto
   if (p_match(TK_KW, "goto")) {
     p_eat(TK_KW, "goto");
+    if (p_match(TK_OP, "*")) {
+      // Computed goto: goto *expr;
+      p_eat(TK_OP, "*");
+      struct Stmt *cgs = my_malloc(144);
+      cgs->kind = ST_COMPUTED_GOTO;
+      cgs->expr = parse_expr(0);
+      p_eat(TK_OP, ";");
+      return cgs;
+    }
     ps_label = my_strdup(p_eat(TK_ID, 0));
     p_eat(TK_OP, ";");
     return new_goto_s(ps_label);
@@ -4615,7 +4632,7 @@ int lay_walk_expr_cl(struct Expr *e, int *offset) {
   int ci = 0;
   if (e == 0) return 0;
   if (e < 4096) { printf("cc: bad expr ptr %d in lay_walk_expr_cl in %s\n", e, cg_cur_func_name); fflush(0); return 0; }
-  if (e->kind < 0 || e->kind > 16) { printf("cc: bad expr kind %d in lay_walk_expr_cl in %s\n", e->kind, cg_cur_func_name); fflush(0); return 0; }
+  if (e->kind < 0 || e->kind > 17) { printf("cc: bad expr kind %d in lay_walk_expr_cl in %s\n", e->kind, cg_cur_func_name); fflush(0); return 0; }
   if (e->kind == ND_COMPOUND_LIT) {
     int *cl_name = build_str2("__cl_", int_to_str(cg_cl_counter));
     cg_cl_counter++;
@@ -4677,7 +4694,7 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
   while (i < nstmts) {
     struct Stmt *st = stmts[i];
     if (st == 0 || st < 4096 || st == (0 - 1)) { i++; continue; }
-    if (st->kind < 0 || st->kind > 12) { i++; continue; }
+    if (st->kind < 0 || st->kind > 13) { i++; continue; }
     if (st->kind == ST_VARDECL) {
       for (int j = 0; j < st->ndecls; j++) {
         struct VarDecl *vd = st->decls[j];
@@ -4780,7 +4797,7 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
     }
     // Scan expressions for compound literals
     if (st->kind == ST_EXPR || st->kind == ST_RETURN ||
-        st->kind == ST_IF || st->kind == ST_WHILE) {
+        st->kind == ST_IF || st->kind == ST_WHILE || st->kind == ST_COMPUTED_GOTO) {
       lay_walk_expr_cl(st->expr, offset);
     } else if (st->kind == ST_VARDECL) {
       for (int vi = 0; vi < st->ndecls; vi++) {
@@ -5103,7 +5120,7 @@ int gen_addr(struct Expr *e) {
 int gen_value(struct Expr *e) {
   if (e == 0) { printf("cc: gen_value called with NULL\n"); fflush(0); emit_line("\tmov\tx0, #0"); return 0; }
   if (e < 4096) { printf("cc: gen_value bad ptr %d in %s\n", e, cg_cur_func_name); fflush(0); emit_line("\tmov\tx0, #0"); return 0; }
-  if (e->kind < 0 || e->kind > 16) { printf("cc: gen_value bad kind %d in %s\n", e->kind, cg_cur_func_name); fflush(0); emit_line("\tmov\tx0, #0"); return 0; }
+  if (e->kind < 0 || e->kind > 17) { printf("cc: gen_value bad kind %d in %s\n", e->kind, cg_cur_func_name); fflush(0); emit_line("\tmov\tx0, #0"); return 0; }
   int unary_op = 0;
   int *bin_op = 0;
   int *end_l = 0;
@@ -5854,6 +5871,20 @@ int gen_value(struct Expr *e) {
     return 0;
   }
 
+  // Labels-as-values: &&label
+  if (e->kind == ND_LABEL_ADDR) {
+    int *la_tmp1 = build_str2("L_usr_", cg_cur_func_name);
+    int *la_tmp2 = build_str2(la_tmp1, "_");
+    int *la_lbl = build_str2(la_tmp2, e->sval);
+    emit_s("\tadrp\tx0, ");
+    emit_s(la_lbl);
+    emit_line("@PAGE");
+    emit_s("\tadd\tx0, x0, ");
+    emit_s(la_lbl);
+    emit_line("@PAGEOFF");
+    return 0;
+  }
+
   printf("cc: unsupported expression kind=%d in %s\n", e->kind, cg_cur_func_name);
   fflush(0);
   emit_line("\tmov\tx0, #0");
@@ -5863,7 +5894,7 @@ int gen_value(struct Expr *e) {
 int gen_block(struct Stmt **stmts, int nstmts, int *ret_label) {
   for (int i = 0; i < nstmts; i++) {
     if (stmts[i] == 0 || stmts[i] < 4096) continue;
-    if (stmts[i]->kind < 0 || stmts[i]->kind > 12) continue;
+    if (stmts[i]->kind < 0 || stmts[i]->kind > 13) continue;
     gen_stmt(stmts[i], ret_label);
   }
   return 0;
@@ -5871,7 +5902,7 @@ int gen_block(struct Stmt **stmts, int nstmts, int *ret_label) {
 
 int gen_stmt(struct Stmt *st, int *ret_label) {
   if (st == 0 || st < 4096) return 0;
-  if (st->kind < 0 || st->kind > 12) return 0;
+  if (st->kind < 0 || st->kind > 13) return 0;
   int *else_l = 0;
   int *end_l = 0;
   int *start_l = 0;
@@ -6250,6 +6281,13 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
 
     emit_s(end_l); emit_line(":");
     nloop--;
+    return 0;
+  }
+
+  // Computed goto: goto *expr;
+  if (st->kind == ST_COMPUTED_GOTO) {
+    gen_value(st->expr);
+    emit_line("\tbr\tx0");
     return 0;
   }
 
