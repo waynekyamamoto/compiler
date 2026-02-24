@@ -381,6 +381,12 @@ int my_atoi(int *s) {
       val = val * 16 + hex_digit_val(__read_byte(s, i));
       i++;
     }
+  } else if (__read_byte(s, i) == '0' && (__read_byte(s, i + 1) == 'b' || __read_byte(s, i + 1) == 'B')) {
+    i += 2;
+    while (__read_byte(s, i) == '0' || __read_byte(s, i) == '1') {
+      val = val * 2 + __read_byte(s, i) - '0';
+      i++;
+    }
   } else if (__read_byte(s, i) == '0' && __read_byte(s, i + 1) >= '0' && __read_byte(s, i + 1) <= '7') {
     i++;
     while (__read_byte(s, i) >= '0' && __read_byte(s, i) <= '7') {
@@ -647,6 +653,13 @@ int ifex_parse_num() {
       else if (d >= 'a' && d <= 'f') { val = val * 16 + d - 'a' + 10; }
       else if (d >= 'A' && d <= 'F') { val = val * 16 + d - 'A' + 10; }
       else { return val; }
+      ifex_pos++;
+    }
+  } else if (ifex_ch() == '0' && ifex_pos + 1 < ifex_len &&
+      (__read_byte(ifex_buf, ifex_pos + 1) == 'b' || __read_byte(ifex_buf, ifex_pos + 1) == 'B')) {
+    ifex_pos += 2;
+    while (ifex_pos < ifex_len && (ifex_ch() == '0' || ifex_ch() == '1')) {
+      val = val * 2 + ifex_ch() - '0';
       ifex_pos++;
     }
   } else {
@@ -1143,6 +1156,11 @@ int lex(int *src, int srclen) {
       if (c == '0' && i + 1 < len && (__read_byte(buf, i + 1) == 'x' || __read_byte(buf, i + 1) == 'X')) {
         i += 2;
         while (i < len && is_hex_digit(__read_byte(buf, i))) {
+          i++;
+        }
+      } else if (c == '0' && i + 1 < len && (__read_byte(buf, i + 1) == 'b' || __read_byte(buf, i + 1) == 'B')) {
+        i += 2;
+        while (i < len && (__read_byte(buf, i) == '0' || __read_byte(buf, i) == '1')) {
           i++;
         }
       } else {
@@ -6828,6 +6846,21 @@ int pp_preprocess(int *src, int srclen, int *filepath, int *out, int co, int dep
           while (si < srclen && __read_byte(src, si) != '"' && __read_byte(src, si) != '\n') { si++; }
           inc_file = make_str(src, pstart, si - pstart);
           full_path = pp_concat_paths(dir, inc_file);
+          {
+            int *tryf = fopen(full_path, "r");
+            if (tryf != 0) {
+              fclose(tryf);
+            } else {
+              // Try include dirs
+              int idi = 0;
+              while (idi < ninclude_dirs) {
+                int *tp = pp_concat_paths(include_dirs[idi], inc_file);
+                tryf = fopen(tp, "r");
+                if (tryf != 0) { fclose(tryf); full_path = tp; idi = ninclude_dirs; }
+                idi++;
+              }
+            }
+          }
           inc_len = 0;
           inc_src = pp_read_file(full_path, &inc_len);
           co = pp_preprocess(inc_src, inc_len, full_path, out, co, depth + 1);
@@ -6836,14 +6869,20 @@ int pp_preprocess(int *src, int srclen, int *filepath, int *out, int co, int dep
           pstart = si;
           while (si < srclen && __read_byte(src, si) != '>' && __read_byte(src, si) != '\n') { si++; }
           inc_file = make_str(src, pstart, si - pstart);
-          if (sys_include_dir != 0) {
-            full_path = pp_concat_paths(sys_include_dir, inc_file);
-            int *tryf = fopen(full_path, "r");
-            if (tryf != 0) {
-              fclose(tryf);
-              inc_len = 0;
-              inc_src = pp_read_file(full_path, &inc_len);
-              co = pp_preprocess(inc_src, inc_len, full_path, out, co, depth + 1);
+          {
+            int idi = 0;
+            int inc_found = 0;
+            while (idi < ninclude_dirs && inc_found == 0) {
+              full_path = pp_concat_paths(include_dirs[idi], inc_file);
+              int *tryf = fopen(full_path, "r");
+              if (tryf != 0) {
+                fclose(tryf);
+                inc_len = 0;
+                inc_src = pp_read_file(full_path, &inc_len);
+                co = pp_preprocess(inc_src, inc_len, full_path, out, co, depth + 1);
+                inc_found = 1;
+              }
+              idi++;
             }
           }
         }
@@ -7102,6 +7141,8 @@ int pp_preprocess(int *src, int srclen, int *filepath, int *out, int co, int dep
 int *cmdline_defs[256];
 int ncmdline_defs;
 int *sys_include_dir;
+int *include_dirs[64];
+int ninclude_dirs;
 
 int main(int argc, int *argv) {
   int *out_path = "a.out";
@@ -7131,16 +7172,20 @@ int main(int argc, int *argv) {
         my_fatal("missing arg for -D");
       }
     } else if (__read_byte(arg, 0) == '-' && __read_byte(arg, 1) == 'I') {
+      int *idir = 0;
       if (__read_byte(arg, 2) != 0) {
         int ilen = 0;
         while (__read_byte(arg, 2 + ilen) != 0) { ilen++; }
-        sys_include_dir = make_str(arg, 2, ilen);
+        idir = make_str(arg, 2, ilen);
       } else if (i + 1 < argc) {
         i++;
-        sys_include_dir = argv[i];
+        idir = argv[i];
       } else {
         my_fatal("missing arg for -I");
       }
+      if (sys_include_dir == 0) { sys_include_dir = idir; }
+      include_dirs[ninclude_dirs] = idir;
+      ninclude_dirs++;
     } else if (__read_byte(arg, 0) == '-') {
       printf("Unknown option: %s\n", arg);
       exit(1);
