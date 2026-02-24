@@ -2338,14 +2338,6 @@ char *codegen_generate(Program *prog) {
         }
     }
 
-    /* DEBUG: dump ptr_ret_funcs */
-    fprintf(stderr, "DEBUG: nptr_ret_funcs=%d\n", nptr_ret_funcs);
-    for (int i = 0; i < nptr_ret_funcs; i++)
-        fprintf(stderr, "  ptr_ret_func[%d] = %s\n", i, ptr_ret_funcs[i]);
-    fprintf(stderr, "DEBUG: nprotos=%d\n", prog->nprotos);
-    for (int i = 0; i < prog->nprotos; i++)
-        fprintf(stderr, "  proto[%d] = %s ret_is_ptr=%d\n", i, prog->protos[i].name, prog->protos[i].ret_is_ptr);
-
     /* Register variadic functions */
     nvariadic_funcs = 0;
     for (int i = 0; i < prog->nprotos; i++) {
