@@ -3166,8 +3166,19 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     int f_is_arr = 0;
     while (p_match(TK_OP, "[")) {
       p_eat(TK_OP, "[");
-      f_is_arr = 1;
-      while (!p_match(TK_OP, "]") && !p_match(TK_EOF, 0)) { cur_pos++; }
+      if (p_match(TK_OP, "]")) {
+        // Flexible array member: type field[]
+        f_is_arr = 1;
+      } else if (tok_kind[cur_pos] == TK_NUM) {
+        f_is_arr = my_atoi(tok_val[cur_pos]);
+        if (f_is_arr == 0) f_is_arr = 1;
+        cur_pos++;
+        // Skip remaining tokens in brackets (e.g. expressions)
+        while (!p_match(TK_OP, "]") && !p_match(TK_EOF, 0)) { cur_pos++; }
+      } else {
+        f_is_arr = 1;
+        while (!p_match(TK_OP, "]") && !p_match(TK_EOF, 0)) { cur_pos++; }
+      }
       p_eat(TK_OP, "]");
     }
     // Bitfield: field : width
@@ -3205,8 +3216,17 @@ struct SDef *parse_struct_or_union_def(int is_union) {
       int ef_is_arr = 0;
       while (p_match(TK_OP, "[")) {
         p_eat(TK_OP, "[");
-        ef_is_arr = 1;
-        while (!p_match(TK_OP, "]") && !p_match(TK_EOF, 0)) { cur_pos++; }
+        if (p_match(TK_OP, "]")) {
+          ef_is_arr = 1;
+        } else if (tok_kind[cur_pos] == TK_NUM) {
+          ef_is_arr = my_atoi(tok_val[cur_pos]);
+          if (ef_is_arr == 0) ef_is_arr = 1;
+          cur_pos++;
+          while (!p_match(TK_OP, "]") && !p_match(TK_EOF, 0)) { cur_pos++; }
+        } else {
+          ef_is_arr = 1;
+          while (!p_match(TK_OP, "]") && !p_match(TK_EOF, 0)) { cur_pos++; }
+        }
         p_eat(TK_OP, "]");
       }
       int extra_bw = 0;
@@ -4479,10 +4499,15 @@ int cg_field_index(int *sname, int *fname) {
         if (cg_sfields[i][j] != 0 && my_strcmp(cg_sfields[i][j], fname) == 0) {
           return slot;
         }
-        if (cg_sfield_types[i][j] != 0) {
-          slot += cg_struct_nfields(cg_sfield_types[i][j]);
-        } else {
-          slot++;
+        {
+          int f_sl = 1;
+          if (cg_sfield_types[i][j] != 0) {
+            f_sl = cg_struct_nfields(cg_sfield_types[i][j]);
+          }
+          if (cg_s_fa[i] != 0 && cg_s_fa[i][j] > 1) {
+            f_sl = f_sl * cg_s_fa[i][j];
+          }
+          slot += f_sl;
         }
         j++;
       }
@@ -4527,11 +4552,15 @@ int cg_struct_nfields(int *sname) {
       total = 0;
       j = 0;
       while (j < cg_snfields[i]) {
+        int f_slots = 1;
         if (cg_sfield_types[i][j] != 0) {
-          total += cg_struct_nfields(cg_sfield_types[i][j]);
-        } else {
-          total++;
+          f_slots = cg_struct_nfields(cg_sfield_types[i][j]);
         }
+        // Array fields occupy arr_size slots (or arr_size * nested_struct_size)
+        if (cg_s_fa[i] != 0 && cg_s_fa[i][j] > 1) {
+          f_slots = f_slots * cg_s_fa[i][j];
+        }
+        total += f_slots;
         j++;
       }
       return total;
