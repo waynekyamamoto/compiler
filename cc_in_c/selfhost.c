@@ -2340,6 +2340,12 @@ struct Expr *parse_expr(int min_prec) {
     // Ternary
     if (k == TK_OP && my_strcmp(v, "?") == 0 && min_prec <= 0) {
       p_eat(TK_OP, "?");
+      // GNU extension: x ?: y (Elvis operator) — use condition as true branch
+      if (p_match(TK_OP, ":")) {
+        p_eat(TK_OP, ":");
+        e = new_ternary(e, e, parse_expr(0));
+        continue;
+      }
       rhs = parse_expr(0);
       // Handle comma operator in ternary true-branch
       while (p_match(TK_OP, ",")) {
@@ -5992,6 +5998,20 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
       if (vd->stype != 0 && vd->is_ptr == 0 && vd->arr_size < 0) {
         if (vd->init != 0 && vd->init->kind == ND_INITLIST) {
           base_off = cg_find_slot(vd->name);
+          // Zero-fill struct fields before writing init elements
+          nf = cg_struct_nfields(vd->stype);
+          k = 0;
+          while (k < nf) {
+            elem_off = base_off - k * 8;
+            emit_line("\tmov\tx0, #0");
+            if (elem_off <= 255) {
+              emit_s("\tstr\tx0, [x29, #-"); emit_num(elem_off); emit_line("]");
+            } else {
+              emit_s("\tsub\tx9, x29, #"); emit_num(elem_off); emit_ch('\n');
+              emit_line("\tstr\tx0, [x9]");
+            }
+            k++;
+          }
           vd_di = vd->init->desig;
           vd_pos_idx = 0;
           k = 0;
@@ -6058,6 +6078,19 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
       if (vd->arr_size >= 0) {
         if (vd->init != 0 && vd->init->kind == ND_INITLIST) {
           base_off = cg_find_slot(vd->name);
+          // Zero-fill the entire array before writing init elements
+          k = 0;
+          while (k < vd->arr_size) {
+            elem_off = base_off - k * 8;
+            emit_line("\tmov\tx0, #0");
+            if (elem_off <= 255) {
+              emit_s("\tstr\tx0, [x29, #-"); emit_num(elem_off); emit_line("]");
+            } else {
+              emit_s("\tsub\tx9, x29, #"); emit_num(elem_off); emit_ch('\n');
+              emit_line("\tstr\tx0, [x9]");
+            }
+            k++;
+          }
           vd_di = vd->init->desig;
           vd_pos_idx = 0;
           k = 0;
