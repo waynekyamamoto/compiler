@@ -104,6 +104,7 @@ struct SDef {
   int *word_indices;
   int nwords;
   int *field_is_array;
+  int *field_is_char;
 };
 
 struct SFieldInfo {
@@ -112,6 +113,7 @@ struct SFieldInfo {
   int is_ptr;
   int bit_width;
   int is_array;
+  int is_char;
 };
 
 struct SDefInfo {
@@ -192,6 +194,7 @@ int *cg_s_bo[4096];     // bit_offsets
 int *cg_s_wi[4096];     // word_indices
 int cg_s_nw[4096];      // nwords
 int *cg_s_fa[4096];     // field_is_array flags
+int *cg_s_fc[4096];     // field_is_char flags
 int ncg_s;
 
 // Token arrays
@@ -1898,11 +1901,13 @@ int *parse_base_type() {
         while (p_match(TK_OP, "[")) { p_eat(TK_OP, "["); while (!p_match(TK_OP, "]") && !p_match(TK_EOF, 0)) { cur_pos++; } p_eat(TK_OP, "]"); }
         int abw = 0;
         if (p_match(TK_OP, ":")) { p_eat(TK_OP, ":"); abw = my_atoi(p_eat(TK_NUM, 0)); }
-        struct SFieldInfo *afi = my_malloc(32);
+        struct SFieldInfo *afi = my_malloc(48);
         afi->name = afname;
         afi->stype = aftype;
         afi->is_ptr = aptr;
         afi->bit_width = abw;
+        afi->is_array = 0;
+        afi->is_char = 0;
         aflds[anf] = afi;
         afields[anf] = afname;
         if (aftype != 0 && aptr == 0) { afield_types[anf] = aftype; } else { afield_types[anf] = 0; }
@@ -1938,7 +1943,7 @@ int *parse_base_type() {
       p_sdefs[np_sdefs] = asdi;
       np_sdefs++;
       // Register for codegen
-      struct SDef *asd = my_malloc(80);
+      struct SDef *asd = my_malloc(88);
       asd->name = my_strdup(synth_name);
       asd->fields = afields;
       asd->field_types = afield_types;
@@ -1949,7 +1954,8 @@ int *parse_base_type() {
       asd->word_indices = 0;
       asd->nwords = 0;
       asd->field_is_array = my_malloc(anf * 8);
-      for (int afi = 0; afi < anf; afi++) { asd->field_is_array[afi] = 0; }
+      asd->field_is_char = my_malloc(anf * 8);
+      for (int afi = 0; afi < anf; afi++) { asd->field_is_array[afi] = 0; asd->field_is_char[afi] = 0; }
       inline_sdefs[ninline_sdefs] = asd;
       ninline_sdefs++;
       skip_qualifiers();
@@ -1974,11 +1980,13 @@ int *parse_base_type() {
         if (lfp) { p_eat(TK_OP, ")"); skip_param_list(); }
         while (p_match(TK_OP, "[")) { p_eat(TK_OP, "["); while (!p_match(TK_OP, "]") && !p_match(TK_EOF, 0)) { cur_pos++; } p_eat(TK_OP, "]"); }
         if (p_match(TK_OP, ":")) { p_eat(TK_OP, ":"); p_eat(TK_NUM, 0); }
-        struct SFieldInfo *lfi = my_malloc(32);
+        struct SFieldInfo *lfi = my_malloc(48);
         lfi->name = lfname;
         lfi->stype = lftype;
         lfi->is_ptr = lptr;
         lfi->bit_width = 0;
+        lfi->is_array = 0;
+        lfi->is_char = 0;
         lflds[lnf] = lfi;
         lfields[lnf] = lfname;
         if (lftype != 0 && lptr == 0) { lfield_types[lnf] = lftype; } else { lfield_types[lnf] = 0; }
@@ -1989,11 +1997,13 @@ int *parse_base_type() {
           if (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); elp = 1; }
           int *eln = my_strdup(p_eat(TK_ID, 0));
           while (p_match(TK_OP, "[")) { p_eat(TK_OP, "["); while (!p_match(TK_OP, "]") && !p_match(TK_EOF, 0)) { cur_pos++; } p_eat(TK_OP, "]"); }
-          struct SFieldInfo *elfi = my_malloc(32);
+          struct SFieldInfo *elfi = my_malloc(48);
           elfi->name = eln;
           elfi->stype = lftype;
           elfi->is_ptr = elp;
           elfi->bit_width = 0;
+          elfi->is_array = 0;
+          elfi->is_char = 0;
           lflds[lnf] = elfi;
           lfields[lnf] = eln;
           if (lftype != 0 && elp == 0) { lfield_types[lnf] = lftype; } else { lfield_types[lnf] = 0; }
@@ -2009,7 +2019,7 @@ int *parse_base_type() {
       lsdi->nwords = 0;
       p_sdefs[np_sdefs] = lsdi;
       np_sdefs++;
-      struct SDef *lsd = my_malloc(80);
+      struct SDef *lsd = my_malloc(88);
       lsd->name = my_strdup(name);
       lsd->fields = lfields;
       lsd->field_types = lfield_types;
@@ -2020,7 +2030,8 @@ int *parse_base_type() {
       lsd->word_indices = 0;
       lsd->nwords = 0;
       lsd->field_is_array = my_malloc(lnf * 8);
-      for (int lfi2 = 0; lfi2 < lnf; lfi2++) { lsd->field_is_array[lfi2] = 0; }
+      lsd->field_is_char = my_malloc(lnf * 8);
+      for (int lfi2 = 0; lfi2 < lnf; lfi2++) { lsd->field_is_array[lfi2] = 0; lsd->field_is_char[lfi2] = 0; }
       inline_sdefs[ninline_sdefs] = lsd;
       ninline_sdefs++;
     }
@@ -3118,9 +3129,11 @@ struct SDef *parse_struct_or_union_def(int is_union) {
       ninline_sdefs++;
     }
     int *ftype = 0;
+    int f_is_char = 0;
     if (inline_sname != 0) {
       ftype = inline_sname;
     } else {
+      if (p_match(TK_KW, "char")) { f_is_char = 1; }
       ftype = parse_base_type();
     }
     int is_ptr = 0;
@@ -3199,6 +3212,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     fi->is_ptr = is_ptr;
     fi->bit_width = bw;
     fi->is_array = f_is_arr;
+    fi->is_char = (f_is_char && is_ptr) ? 1 : 0;
     finfo[nf] = fi;
     nf++;
 
@@ -3241,6 +3255,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
       efi->is_ptr = extra_is_ptr;
       efi->bit_width = extra_bw;
       efi->is_array = ef_is_arr;
+      efi->is_char = (f_is_char && extra_is_ptr) ? 1 : 0;
       finfo[nf] = efi;
       nf++;
     }
@@ -3277,7 +3292,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     bfi++;
   }
 
-  struct SDef *sd = my_malloc(80);
+  struct SDef *sd = my_malloc(88);
   sd->name = name;
   sd->fields = fields;
   sd->field_types = ftypes;
@@ -3288,7 +3303,8 @@ struct SDef *parse_struct_or_union_def(int is_union) {
   sd->word_indices = 0;
   sd->nwords = 0;
   sd->field_is_array = my_malloc(nf * 8);
-  for (int fai = 0; fai < nf; fai++) { sd->field_is_array[fai] = finfo[fai]->is_array; }
+  sd->field_is_char = my_malloc(nf * 8);
+  for (int fai = 0; fai < nf; fai++) { sd->field_is_array[fai] = finfo[fai]->is_array; sd->field_is_char[fai] = finfo[fai]->is_char; }
 
   if (has_bf) {
     sd->bit_widths = my_malloc(nf * 8);
@@ -4539,6 +4555,26 @@ int cg_field_is_array(int *sname, int *fname) {
   return 0;
 }
 
+int cg_field_is_char(int *sname, int *fname) {
+  if (sname == 0 || fname == 0) return 0;
+  int i = 0;
+  while (i < ncg_s) {
+    if (cg_sname[i] != 0 && my_strcmp(cg_sname[i], sname) == 0) {
+      if (cg_s_fc[i] == 0) return 0;
+      int j = 0;
+      while (j < cg_snfields[i]) {
+        if (cg_sfields[i][j] != 0 && my_strcmp(cg_sfields[i][j], fname) == 0) {
+          return cg_s_fc[i][j];
+        }
+        j++;
+      }
+      return 0;
+    }
+    i++;
+  }
+  return 0;
+}
+
 int cg_struct_nfields(int *sname) {
   int i = 0;
   int j = 0;
@@ -5123,6 +5159,13 @@ int gen_addr(struct Expr *e) {
         }
       }
     }
+    // Check if indexing a char* struct field (e.g. s->buf[i])
+    if ((e->left->kind == ND_ARROW || e->left->kind == ND_FIELD) && idx_is_char == 0) {
+      if (cg_field_is_char(e->left->sval2, e->left->sval)) {
+        idx_stride = 1;
+        idx_is_char = 1;
+      }
+    }
     if (idx_stype != 0) {
       idx_stride = cg_struct_nfields(idx_stype) * 8;
     }
@@ -5337,6 +5380,8 @@ int gen_value(struct Expr *e) {
     gen_addr(e);
     if (e->left->kind == ND_VAR && cg_is_char(e->left->sval)) {
       emit_line("\tldrb\tw0, [x0]");
+    } else if ((e->left->kind == ND_ARROW || e->left->kind == ND_FIELD) && cg_field_is_char(e->left->sval2, e->left->sval)) {
+      emit_line("\tldrb\tw0, [x0]");
     } else {
       emit_line("\tldr\tx0, [x0]");
     }
@@ -5436,6 +5481,7 @@ int gen_value(struct Expr *e) {
       int assign_char = 0;
       if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { assign_char = 1; }
       if (e->left->kind == ND_INDEX && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { assign_char = 1; }
+      if (e->left->kind == ND_INDEX && (e->left->left->kind == ND_ARROW || e->left->left->kind == ND_FIELD) && cg_field_is_char(e->left->left->sval2, e->left->left->sval)) { assign_char = 1; }
       if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left->kind == ND_BINARY && e->left->left->left != 0 && e->left->left->left->kind == ND_VAR && cg_is_char(e->left->left->left->sval)) { assign_char = 1; }
       if (assign_char) {
         emit_line("\tstrb\tw0, [x1]");
@@ -6683,6 +6729,7 @@ int codegen(struct Program *prog) {
     cg_s_wi[ncg_s] = sd->word_indices;
     cg_s_nw[ncg_s] = sd->nwords;
     cg_s_fa[ncg_s] = sd->field_is_array;
+    cg_s_fc[ncg_s] = sd->field_is_char;
     ncg_s++;
     i++;
   }
@@ -6700,6 +6747,7 @@ int codegen(struct Program *prog) {
     cg_s_wi[ncg_s] = sd->word_indices;
     cg_s_nw[ncg_s] = sd->nwords;
     cg_s_fa[ncg_s] = sd->field_is_array;
+    cg_s_fc[ncg_s] = sd->field_is_char;
     ncg_s++;
     i++;
   }
