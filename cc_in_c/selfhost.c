@@ -211,6 +211,7 @@ int np_sdefs;
 int *lv_name[512];
 int *lv_stype[512];
 int lv_isptr[512];
+int lv_arrsize[512];
 int nlv;
 
 // Global variable struct type table (persistent across functions)
@@ -1411,8 +1412,27 @@ int add_lv(int *name, int *stype, int is_ptr) {
     lv_stype[nlv] = 0;
   }
   lv_isptr[nlv] = is_ptr;
+  lv_arrsize[nlv] = 0 - 1;
   nlv++;
   return 0;
+}
+
+int set_lv_arrsize(int *name, int sz) {
+  int i = nlv - 1;
+  while (i >= 0) {
+    if (my_strcmp(lv_name[i], name) == 0) { lv_arrsize[i] = sz; return 0; }
+    i--;
+  }
+  return 0;
+}
+
+int find_lv_arrsize(int *name) {
+  int i = nlv - 1;
+  while (i >= 0) {
+    if (my_strcmp(lv_name[i], name) == 0) { return lv_arrsize[i]; }
+    i--;
+  }
+  return 0 - 1;
 }
 
 struct SDefInfo *find_sdef(int *name) {
@@ -2268,6 +2288,12 @@ struct Stmt *parse_vardecl_stmt(int vd_is_static) {
     if (stype != 0) {
       add_lv(name, stype, is_ptr);
     }
+    if (arr_size >= 0) {
+      // Track array size for sizeof(varname)
+      // Make sure the variable is in lv table first
+      if (stype == 0) { add_lv(name, 0, is_ptr); }
+      set_lv_arrsize(name, arr_size);
+    }
     if (p_match(TK_OP, ",")) {
       p_eat(TK_OP, ",");
       continue;
@@ -2460,22 +2486,27 @@ struct Expr *parse_unary() {
         while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); }
         sz = 8;
       } else {
-        // Check if it's a variable with a known struct type
+        // Check if it's a variable with a known struct type or array
         if (tok_kind[cur_pos] == TK_ID) {
           int *sz_vname = tok_val[cur_pos];
           int *sz_vstype = find_lv_stype(sz_vname);
+          int sz_elem = 8;
           if (sz_vstype != 0) {
             int si2 = 0;
             while (si2 < np_sdefs) {
               struct SDefInfo *sdi2 = p_sdefs[si2];
               if (my_strcmp(sdi2->name, sz_vstype) == 0) {
-                if (sdi2->nwords > 0) { sz = sdi2->nwords * 8; }
-                else { sz = sdi2->nflds * 8; }
+                if (sdi2->nwords > 0) { sz_elem = sdi2->nwords * 8; }
+                else { sz_elem = sdi2->nflds * 8; }
                 si2 = np_sdefs;
               }
               si2++;
             }
+            sz = sz_elem;
           }
+          // Check if variable is an array
+          int sz_arr = find_lv_arrsize(sz_vname);
+          if (sz_arr > 0) { sz = sz_arr * sz_elem; }
         }
         parse_expr(0);
       }
