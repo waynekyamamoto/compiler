@@ -5630,6 +5630,8 @@ int gen_value(struct Expr *e) {
       int *pi_pstype = cg_ptr_structvar_type(e->left->sval);
       if (pi_pstype != 0) {
         inc = cg_struct_nfields(pi_pstype) * 8;
+      } else if (cg_is_intptr(e->left->sval)) {
+        inc = 8;
       }
     }
     gen_addr(e->left);
