@@ -132,6 +132,7 @@ struct GDecl {
   int *init_str;
   struct Expr *init_list;  // ND_INITLIST node for array init (NULL if no array init)
   int *stype;  // struct type name (or 0 for non-struct)
+  int is_char;
 };
 
 struct Program {
@@ -181,6 +182,7 @@ int nloop;
 // Global variable names for codegen
 int *cg_gnames[65536];
 int cg_gis_array[65536];
+int cg_g_is_char[65536];
 int ncg_g;
 
 // Struct/union defs for codegen
@@ -3497,6 +3499,16 @@ struct FuncDef *parse_func() {
 
 // Parse global variable declaration: type [*]* name [[ N ]] [= expr] ;
 struct GDecl *parse_global_decl() {
+  int g_is_char = 0;
+  {
+    int sv = cur_pos;
+    skip_qualifiers();
+    if (p_match(TK_KW, "char")) { g_is_char = 1; }
+    else if (p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) {
+      if (tok_kind[cur_pos + 1] == TK_KW && my_strcmp(tok_val[cur_pos + 1], "char") == 0) { g_is_char = 1; }
+    }
+    cur_pos = sv;
+  }
   int *stype = parse_base_type();
   int is_ptr = 0;
   int is_funcptr = 0;
@@ -3572,7 +3584,7 @@ struct GDecl *parse_global_decl() {
   while (skip_attribute()) {}
   p_eat(TK_OP, ";");
 
-  struct GDecl *gd = my_malloc(64);
+  struct GDecl *gd = my_malloc(72);
   gd->name = name;
   gd->is_ptr = is_ptr;
   gd->array_size = array_size;
@@ -3581,6 +3593,7 @@ struct GDecl *parse_global_decl() {
   gd->init_str = init_str;
   gd->init_list = init_list;
   gd->stype = stype;
+  gd->is_char = g_is_char;
   return gd;
 }
 
@@ -4250,11 +4263,11 @@ struct Program *parse_program() {
             }
           }
           p_eat(TK_OP, ";");
-          struct GDecl *sv_gd = my_malloc(64);
+          struct GDecl *sv_gd = my_malloc(72);
           sv_gd->name = sv_name; sv_gd->is_ptr = sv_ptr; sv_gd->array_size = sv_arr;
           sv_gd->init_val = sv_init_val; sv_gd->has_init = sv_has_init;
           sv_gd->init_str = sv_init_str; sv_gd->init_list = sv_init_list;
-          sv_gd->stype = sv_stype;
+          sv_gd->stype = sv_stype; sv_gd->is_char = 0;
           globals[ng] = sv_gd; ng++;
           // Register for resolve_stype
           if (sv_stype != 0) {
@@ -4970,6 +4983,12 @@ int cg_is_char(int *name) {
   int i = 0;
   while (i < nlay_char) {
     if (my_strcmp(lay_char_name[i], name) == 0) { return 1; }
+    i++;
+  }
+  // Check global char* variables
+  i = 0;
+  while (i < ncg_g) {
+    if (cg_g_is_char[i] && my_strcmp(cg_gnames[i], name) == 0) { return 1; }
     i++;
   }
   return 0;
@@ -6717,6 +6736,7 @@ int codegen(struct Program *prog) {
     cg_gnames[ncg_g] = gd->name;
     cg_gis_array[ncg_g] = 0;
     if (gd->array_size >= 0) { cg_gis_array[ncg_g] = 1; }
+    cg_g_is_char[ncg_g] = (gd->is_char && gd->is_ptr) ? 1 : 0;
     ncg_g++;
   }
 
