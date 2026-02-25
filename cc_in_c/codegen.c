@@ -77,6 +77,18 @@ static int func_returns_ptr(const char *name) {
     return 0;
 }
 
+/* Functions that return structs by value */
+static char **struct_ret_func_names;
+static char **struct_ret_func_types;
+static int nstruct_ret_funcs;
+static int struct_ret_funcs_cap;
+
+static const char *func_ret_struct_type(const char *name) {
+    for (int i = 0; i < nstruct_ret_funcs; i++)
+        if (strcmp(struct_ret_func_names[i], name) == 0) return struct_ret_func_types[i];
+    return NULL;
+}
+
 /* All known function names (for function pointer support) */
 static char **known_func_names;
 static int nknown_func_names;
@@ -1727,16 +1739,24 @@ static void gen_value(Expr *e, FuncLayout *layout) {
         for (int i = 0; i < nargs; i++) {
             /* Check if arg is a struct variable (by value) */
             const char *arg_stype = NULL;
+            int arg_is_call_ret = 0;
             if (args[i]->kind == ND_VAR) {
                 arg_stype = find_structvar_type(layout, args[i]->u.var_name);
                 /* If it's an array of structs, it decays to a pointer — don't pass by value */
                 if (arg_stype && is_array(layout, args[i]->u.var_name))
                     arg_stype = NULL;
+            } else if (args[i]->kind == ND_CALL && args[i]->u.call.name) {
+                arg_stype = func_ret_struct_type(args[i]->u.call.name);
+                if (arg_stype) arg_is_call_ret = 1;
             }
             if (arg_stype) {
                 /* Struct-by-value: push each field separately */
                 int nf = cg_struct_nfields(arg_stype);
-                gen_addr(args[i], layout); /* address of struct */
+                if (arg_is_call_ret) {
+                    gen_value(args[i], layout); /* returns ptr to struct in x0 */
+                } else {
+                    gen_addr(args[i], layout); /* address of struct */
+                }
                 for (int f = 0; f < nf; f++) {
                     if (f == 0) {
                         emit("\tstr\tx0, [sp, #-16]!");  /* save base addr */
@@ -2452,7 +2472,7 @@ static void gen_func(FuncDef *f) {
             }
             int off = find_slot(&layout, f->params[i]);
             for (int s = 0; s < param_nslots && reg_idx < 8; s++) {
-                int slot_off = off - (param_nslots - 1 - s) * 8;
+                int slot_off = off - s * 8;
                 if (slot_off <= 255) {
                     emit("\tstr\tx%d, [x29, #-%d]", reg_idx, slot_off);
                 } else {
@@ -2544,6 +2564,7 @@ char *codegen_generate(Program *prog) {
     ncg_structs = 0;
     nglobal_vars = 0;
     nptr_ret_funcs = 0;
+    nstruct_ret_funcs = 0;
 
     /* Register function prototypes that return pointers */
     for (int i = 0; i < prog->nprotos; i++) {
@@ -2564,6 +2585,32 @@ char *codegen_generate(Program *prog) {
         if (prog->globals[i].is_func_decl && prog->globals[i].is_ptr) {
             GROW(ptr_ret_funcs, nptr_ret_funcs, ptr_ret_funcs_cap, char *);
             ptr_ret_funcs[nptr_ret_funcs++] = prog->globals[i].name;
+        }
+    }
+
+    /* Register functions that return structs by value */
+    for (int i = 0; i < prog->nprotos; i++) {
+        if (prog->protos[i].ret_struct_type && !prog->protos[i].ret_is_ptr) {
+            if (nstruct_ret_funcs >= struct_ret_funcs_cap) {
+                struct_ret_funcs_cap = struct_ret_funcs_cap ? struct_ret_funcs_cap * 2 : 16;
+                struct_ret_func_names = xrealloc(struct_ret_func_names, sizeof(char *) * struct_ret_funcs_cap);
+                struct_ret_func_types = xrealloc(struct_ret_func_types, sizeof(char *) * struct_ret_funcs_cap);
+            }
+            struct_ret_func_names[nstruct_ret_funcs] = prog->protos[i].name;
+            struct_ret_func_types[nstruct_ret_funcs] = prog->protos[i].ret_struct_type;
+            nstruct_ret_funcs++;
+        }
+    }
+    for (int i = 0; i < prog->nfuncs; i++) {
+        if (prog->funcs[i].ret_struct_type && !prog->funcs[i].ret_is_ptr) {
+            if (nstruct_ret_funcs >= struct_ret_funcs_cap) {
+                struct_ret_funcs_cap = struct_ret_funcs_cap ? struct_ret_funcs_cap * 2 : 16;
+                struct_ret_func_names = xrealloc(struct_ret_func_names, sizeof(char *) * struct_ret_funcs_cap);
+                struct_ret_func_types = xrealloc(struct_ret_func_types, sizeof(char *) * struct_ret_funcs_cap);
+            }
+            struct_ret_func_names[nstruct_ret_funcs] = prog->funcs[i].name;
+            struct_ret_func_types[nstruct_ret_funcs] = prog->funcs[i].ret_struct_type;
+            nstruct_ret_funcs++;
         }
     }
 

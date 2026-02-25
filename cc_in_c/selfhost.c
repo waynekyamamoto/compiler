@@ -6679,7 +6679,7 @@ int gen_func(struct FuncDef *f) {
       int nf = cg_struct_nfields(f->param_stypes[i]);
       for (int fi = 0; fi < nf; fi++) {
         int src_off = fi * 8;
-        int dst_off = off - (nf - 1 - fi) * 8;
+        int dst_off = off - fi * 8;
         emit_s("\tldr\tx9, [x");
         emit_num(i);
         emit_s(", #");
