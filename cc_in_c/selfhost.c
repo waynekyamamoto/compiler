@@ -4349,19 +4349,35 @@ struct Program *parse_program() {
         }
         // Function pointer variable/func returning funcptr: type (*name)(...); or type (*name(params))(params){...}
         if (p_match(TK_OP, "(") && cur_pos + 1 < ntokens && my_strcmp(tok_val[cur_pos + 1], "*") == 0) {
-          while (!p_match(TK_OP, ";") && !p_match(TK_OP, "{") && !p_match(TK_EOF, 0)) { cur_pos++; }
-          if (p_match(TK_OP, "{")) {
-            // Function returning function pointer or funcptr array with init — skip body
+          // Check if this is a function (has { body) or just a declaration (ends with ;)
+          int fp_scan = cur_pos;
+          int fp_depth2 = 0;
+          int fp_is_func = 0;
+          while (fp_scan < ntokens) {
+            if (my_strcmp(tok_val[fp_scan], "(") == 0 || my_strcmp(tok_val[fp_scan], "{") == 0) { fp_depth2++; }
+            else if (my_strcmp(tok_val[fp_scan], ")") == 0 || my_strcmp(tok_val[fp_scan], "}") == 0) { fp_depth2--; }
+            if (fp_depth2 == 0 && my_strcmp(tok_val[fp_scan], ";") == 0) { break; }
+            if (fp_depth2 == 0 && my_strcmp(tok_val[fp_scan], "{") == 0) { fp_is_func = 1; break; }
+            fp_scan++;
+          }
+          if (fp_is_func) {
+            // Function returning function pointer — skip body
+            while (!p_match(TK_OP, "{") && !p_match(TK_EOF, 0)) { cur_pos++; }
             p_eat(TK_OP, "{");
-            int fp_depth = 1;
-            while (fp_depth > 0 && !p_match(TK_EOF, 0)) {
-              if (p_match(TK_OP, "{")) { fp_depth++; }
-              else if (p_match(TK_OP, "}")) { fp_depth--; if (fp_depth == 0) break; }
+            int fp_bd = 1;
+            while (fp_bd > 0 && !p_match(TK_EOF, 0)) {
+              if (p_match(TK_OP, "{")) { fp_bd++; }
+              else if (p_match(TK_OP, "}")) { fp_bd--; if (fp_bd == 0) break; }
               cur_pos++;
             }
             p_eat(TK_OP, "}");
             if (p_match(TK_OP, ";")) { p_eat(TK_OP, ";"); }
-          } else if (p_match(TK_OP, ";")) { p_eat(TK_OP, ";"); }
+          } else {
+            // Function pointer global variable — parse it
+            cur_pos = save2;
+            globals[ng] = parse_global_decl();
+            ng++;
+          }
           continue;
         }
         cur_pos = save2;
