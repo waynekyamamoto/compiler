@@ -1672,6 +1672,15 @@ static Expr *parse_primary(void) {
                 st = field_struct_type(e->u.index.base->u.field.struct_type, e->u.index.base->u.field.field);
             } else if (e->kind == ND_CALL) {
                 st = find_func_ret_struct(e->u.call.name);
+            } else if (e->kind == ND_UNARY && e->u.unary.op == '*' &&
+                       e->u.unary.rhs->kind == ND_VAR) {
+                /* (*ptr)->field where ptr is struct** */
+                LocalVar *lv3 = find_local(e->u.unary.rhs->u.var_name);
+                if (lv3) st = lv3->struct_type;
+                if (!st) {
+                    GlobalVarInfo *gv3 = find_global_var(e->u.unary.rhs->u.var_name);
+                    if (gv3) st = gv3->struct_type;
+                }
             }
             /* Use struct type from a recent cast, e.g. ((Parse*)0)->field */
             if (!st && last_cast_struct_type) {
