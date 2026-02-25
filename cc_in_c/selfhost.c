@@ -2523,9 +2523,10 @@ struct Expr *parse_unary() {
             }
             sz = sz_elem;
           }
-          // Check if variable is an array
+          // Check if variable is an array (but not if indexed: arr[0] is element-sized)
           int sz_arr = find_lv_arrsize(sz_vname);
-          if (sz_arr > 0) { sz = sz_arr * sz_elem; }
+          int sz_is_indexed = (cur_pos + 1 < ntokens && tok_kind[cur_pos + 1] == TK_OP && my_strcmp(tok_val[cur_pos + 1], "[") == 0);
+          if (sz_arr > 0 && sz_is_indexed == 0) { sz = sz_arr * sz_elem; }
         }
         parse_expr(0);
       }
