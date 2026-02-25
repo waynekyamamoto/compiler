@@ -1310,6 +1310,11 @@ static void gen_value(Expr *e, FuncLayout *layout) {
             if (e->u.unary.rhs->kind == ND_VAR &&
                 is_char_ptr_var(layout, e->u.unary.rhs->u.var_name))
                 is_char_deref = 1;
+            /* Also check *s++ / *s-- where s is char* */
+            if ((e->u.unary.rhs->kind == ND_POSTINC || e->u.unary.rhs->kind == ND_POSTDEC) &&
+                e->u.unary.rhs->u.postinc_operand->kind == ND_VAR &&
+                is_char_ptr_var(layout, e->u.unary.rhs->u.postinc_operand->u.var_name))
+                is_char_deref = 1;
             gen_value(e->u.unary.rhs, layout);
             if (is_char_deref)
                 emit("\tldrb\tw0, [x0]");

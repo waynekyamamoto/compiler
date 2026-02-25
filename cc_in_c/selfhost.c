@@ -5737,6 +5737,8 @@ int gen_value(struct Expr *e) {
       if (e->left->kind == ND_VAR && cg_is_char(e->left->sval)) { deref_char = 1; }
       if (e->left->kind == ND_BINARY && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { deref_char = 1; }
       if (e->left->kind == ND_INDEX && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_char_arr(e->left->left->sval)) { deref_char = 1; }
+      // *s++ / *s-- where s is char*
+      if ((e->left->kind == ND_POSTINC || e->left->kind == ND_POSTDEC) && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { deref_char = 1; }
       gen_value(e->left);
       if (deref_char) {
         emit_line("\tldrb\tw0, [x0]");
