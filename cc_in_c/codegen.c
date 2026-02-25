@@ -1468,16 +1468,30 @@ static void gen_value(Expr *e, FuncLayout *layout) {
                 }
             } else {
                 /* Scale by 8 for int pointer arithmetic (not char, not struct) */
-                int left_intptr = (e->u.binary.lhs->kind == ND_VAR &&
-                    (is_ptr_var(layout, e->u.binary.lhs->u.var_name) ||
-                     (is_array(layout, e->u.binary.lhs->u.var_name) &&
-                      !is_char_local_array(layout, e->u.binary.lhs->u.var_name))) &&
-                    !is_char_ptr_var(layout, e->u.binary.lhs->u.var_name));
-                int right_intptr = (e->u.binary.rhs->kind == ND_VAR &&
-                    (is_ptr_var(layout, e->u.binary.rhs->u.var_name) ||
-                     (is_array(layout, e->u.binary.rhs->u.var_name) &&
-                      !is_char_local_array(layout, e->u.binary.rhs->u.var_name))) &&
-                    !is_char_ptr_var(layout, e->u.binary.rhs->u.var_name));
+                /* Check local ptrs, local arrays, and global arrays */
+                int left_intptr = 0, right_intptr = 0;
+                if (e->u.binary.lhs->kind == ND_VAR) {
+                    const char *ln = e->u.binary.lhs->u.var_name;
+                    if ((is_ptr_var(layout, ln) && !is_char_ptr_var(layout, ln)) ||
+                        (is_array(layout, ln) && !is_char_local_array(layout, ln))) {
+                        left_intptr = 1;
+                    } else {
+                        GlobalVarEntry *gv = find_global(ln);
+                        if (gv && gv->is_array && !gv->is_char_array && !gv->is_char_ptr_array)
+                            left_intptr = 1;
+                    }
+                }
+                if (e->u.binary.rhs->kind == ND_VAR) {
+                    const char *rn = e->u.binary.rhs->u.var_name;
+                    if ((is_ptr_var(layout, rn) && !is_char_ptr_var(layout, rn)) ||
+                        (is_array(layout, rn) && !is_char_local_array(layout, rn))) {
+                        right_intptr = 1;
+                    } else {
+                        GlobalVarEntry *gv = find_global(rn);
+                        if (gv && gv->is_array && !gv->is_char_array && !gv->is_char_ptr_array)
+                            right_intptr = 1;
+                    }
+                }
                 if (left_intptr && right_intptr && strcmp(op, "-") == 0) {
                     /* ptr - ptr: handled after sub (divide by 8) */
                 } else if (left_intptr) {

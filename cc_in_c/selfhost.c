@@ -5822,9 +5822,23 @@ int gen_value(struct Expr *e) {
         }
       } else {
         // Scale by 8 for int pointer arithmetic (not char, not struct)
-        // Also includes arrays (which act as pointers in arithmetic)
-        int left_intptr = (e->left->kind == ND_VAR && (cg_is_intptr(e->left->sval) || (cg_is_array(e->left->sval) && cg_is_char_larr(e->left->sval) == 0)));
-        int right_intptr = (e->right->kind == ND_VAR && (cg_is_intptr(e->right->sval) || (cg_is_array(e->right->sval) && cg_is_char_larr(e->right->sval) == 0)));
+        // Also includes local arrays and global arrays
+        int left_intptr = 0;
+        int right_intptr = 0;
+        if (e->left->kind == ND_VAR) {
+          if (cg_is_intptr(e->left->sval) || (cg_is_array(e->left->sval) && cg_is_char_larr(e->left->sval) == 0)) {
+            left_intptr = 1;
+          } else if (cg_global_is_array(e->left->sval) && cg_is_char_arr(e->left->sval) == 0) {
+            left_intptr = 1;
+          }
+        }
+        if (e->right->kind == ND_VAR) {
+          if (cg_is_intptr(e->right->sval) || (cg_is_array(e->right->sval) && cg_is_char_larr(e->right->sval) == 0)) {
+            right_intptr = 1;
+          } else if (cg_global_is_array(e->right->sval) && cg_is_char_arr(e->right->sval) == 0) {
+            right_intptr = 1;
+          }
+        }
         if (left_intptr && right_intptr && my_strcmp(bin_op, "-") == 0) {
           // ptr - ptr: don't scale, divide result by 8 after sub
           // handled below after sub instruction
