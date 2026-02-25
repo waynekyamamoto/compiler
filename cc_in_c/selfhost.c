@@ -7472,6 +7472,54 @@ int main(int argc, int *argv) {
     }
   }
 
+  // Strip comments from source before preprocessing (preserves newlines)
+  { int ri = 0; int wi = 0;
+    while (ri < srclen) {
+      // Skip string literals
+      if (__read_byte(srcbuf, ri) == '"') {
+        __write_byte(srcbuf, wi, __read_byte(srcbuf, ri)); ri++; wi++;
+        while (ri < srclen && __read_byte(srcbuf, ri) != '"') {
+          if (__read_byte(srcbuf, ri) == '\\' && ri + 1 < srclen) {
+            __write_byte(srcbuf, wi, __read_byte(srcbuf, ri)); ri++; wi++;
+          }
+          __write_byte(srcbuf, wi, __read_byte(srcbuf, ri)); ri++; wi++;
+        }
+        if (ri < srclen) { __write_byte(srcbuf, wi, __read_byte(srcbuf, ri)); ri++; wi++; }
+      }
+      // Skip char literals
+      else if (__read_byte(srcbuf, ri) == '\'' && ri + 1 < srclen) {
+        __write_byte(srcbuf, wi, __read_byte(srcbuf, ri)); ri++; wi++;
+        while (ri < srclen && __read_byte(srcbuf, ri) != '\'') {
+          if (__read_byte(srcbuf, ri) == '\\' && ri + 1 < srclen) {
+            __write_byte(srcbuf, wi, __read_byte(srcbuf, ri)); ri++; wi++;
+          }
+          __write_byte(srcbuf, wi, __read_byte(srcbuf, ri)); ri++; wi++;
+        }
+        if (ri < srclen) { __write_byte(srcbuf, wi, __read_byte(srcbuf, ri)); ri++; wi++; }
+      }
+      // Block comment: replace with space
+      else if (ri + 1 < srclen && __read_byte(srcbuf, ri) == '/' && __read_byte(srcbuf, ri + 1) == '*') {
+        ri = ri + 2;
+        while (ri + 1 < srclen) {
+          if (__read_byte(srcbuf, ri) == '*' && __read_byte(srcbuf, ri + 1) == '/') { ri = ri + 2; break; }
+          if (__read_byte(srcbuf, ri) == '\n') { __write_byte(srcbuf, wi, '\n'); wi++; }
+          ri++;
+        }
+        __write_byte(srcbuf, wi, ' '); wi++;
+      }
+      // Line comment: replace with nothing (keep newline)
+      else if (ri + 1 < srclen && __read_byte(srcbuf, ri) == '/' && __read_byte(srcbuf, ri + 1) == '/') {
+        ri = ri + 2;
+        while (ri < srclen && __read_byte(srcbuf, ri) != '\n') { ri++; }
+      }
+      else {
+        __write_byte(srcbuf, wi, __read_byte(srcbuf, ri)); ri++; wi++;
+      }
+    }
+    srclen = wi;
+    __write_byte(srcbuf, srclen, 0);
+  }
+
   // Strip preprocessor lines and collect #define macros
   nmacros = 0;
   // Inject -D command-line macros
