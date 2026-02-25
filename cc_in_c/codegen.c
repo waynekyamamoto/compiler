@@ -1329,7 +1329,24 @@ static void gen_value(Expr *e, FuncLayout *layout) {
             use_unsigned = 1;
 
         if (strcmp(op, "+") == 0)      emit("\tadd\tx0, x1, x0");
-        else if (strcmp(op, "-") == 0) emit("\tsub\tx0, x1, x0");
+        else if (strcmp(op, "-") == 0) {
+            emit("\tsub\tx0, x1, x0");
+            /* ptr - ptr: divide by element size to get element count */
+            if (e->u.binary.lhs->kind == ND_VAR && e->u.binary.rhs->kind == ND_VAR) {
+                int left_ptr = is_ptr_var(layout, e->u.binary.lhs->u.var_name) && !is_char_ptr_var(layout, e->u.binary.lhs->u.var_name);
+                int right_ptr = is_ptr_var(layout, e->u.binary.rhs->u.var_name) && !is_char_ptr_var(layout, e->u.binary.rhs->u.var_name);
+                if (left_ptr && right_ptr) {
+                    const char *pstype = find_ptr_structvar_type(layout, e->u.binary.lhs->u.var_name);
+                    if (pstype) {
+                        int scale = cg_struct_nfields(pstype) * 8;
+                        emit("\tmov\tx9, #%d", scale);
+                        emit("\tsdiv\tx0, x0, x9");
+                    } else {
+                        emit("\tasr\tx0, x0, #3");
+                    }
+                }
+            }
+        }
         else if (strcmp(op, "*") == 0) emit("\tmul\tx0, x1, x0");
         else if (strcmp(op, "/") == 0) {
             if (use_unsigned) emit("\tudiv\tx0, x1, x0");
@@ -1340,7 +1357,7 @@ static void gen_value(Expr *e, FuncLayout *layout) {
         else if (strcmp(op, "^") == 0) emit("\teor\tx0, x1, x0");
         else if (strcmp(op, "<<") == 0) emit("\tlsl\tx0, x1, x0");
         else if (strcmp(op, ">>") == 0) {
-            if (use_unsigned) emit("\tlsr\tx0, x1, x0");
+            if (use_unsigned) { emit("\tmov\tw1, w1"); emit("\tlsr\tx0, x1, x0"); }
             else emit("\tasr\tx0, x1, x0");
         }
         else if (strcmp(op, "%") == 0) {

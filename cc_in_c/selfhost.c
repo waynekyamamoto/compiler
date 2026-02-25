@@ -5760,12 +5760,14 @@ int gen_value(struct Expr *e) {
         }
       } else {
         // Scale by 8 for int pointer arithmetic (not char, not struct)
-        int do_intptr_scale = 0;
-        if (e->left->kind == ND_VAR && cg_is_intptr(e->left->sval)) {
+        int left_intptr = (e->left->kind == ND_VAR && cg_is_intptr(e->left->sval));
+        int right_intptr = (e->right->kind == ND_VAR && cg_is_intptr(e->right->sval));
+        if (left_intptr && right_intptr && my_strcmp(bin_op, "-") == 0) {
+          // ptr - ptr: don't scale, divide result by 8 after sub
+          // handled below after sub instruction
+        } else if (left_intptr) {
           emit_line("\tlsl\tx0, x0, #3");
-          do_intptr_scale = 1;
-        }
-        if (do_intptr_scale == 0 && e->right->kind == ND_VAR && cg_is_intptr(e->right->sval)) {
+        } else if (right_intptr) {
           emit_line("\tlsl\tx1, x1, #3");
         }
       }
@@ -5801,7 +5803,14 @@ int gen_value(struct Expr *e) {
     if (e->right->kind == ND_VAR && cg_is_unsigned(e->right->sval)) { use_unsigned = 1; }
 
     if (my_strcmp(bin_op, "+") == 0) { emit_line("\tadd\tx0, x1, x0"); }
-    else if (my_strcmp(bin_op, "-") == 0) { emit_line("\tsub\tx0, x1, x0"); }
+    else if (my_strcmp(bin_op, "-") == 0) {
+      emit_line("\tsub\tx0, x1, x0");
+      // ptr - ptr: divide by element size (8) to get element count
+      if (e->left->kind == ND_VAR && cg_is_intptr(e->left->sval) &&
+          e->right->kind == ND_VAR && cg_is_intptr(e->right->sval)) {
+        emit_line("\tasr\tx0, x0, #3");
+      }
+    }
     else if (my_strcmp(bin_op, "*") == 0) { emit_line("\tmul\tx0, x1, x0"); }
     else if (my_strcmp(bin_op, "/") == 0) {
       if (use_unsigned) { emit_line("\tudiv\tx0, x1, x0"); }
@@ -5812,7 +5821,7 @@ int gen_value(struct Expr *e) {
     else if (my_strcmp(bin_op, "^") == 0) { emit_line("\teor\tx0, x1, x0"); }
     else if (my_strcmp(bin_op, "<<") == 0) { emit_line("\tlsl\tx0, x1, x0"); }
     else if (my_strcmp(bin_op, ">>") == 0) {
-      if (use_unsigned) { emit_line("\tlsr\tx0, x1, x0"); }
+      if (use_unsigned) { emit_line("\tmov\tw1, w1"); emit_line("\tlsr\tx0, x1, x0"); }
       else { emit_line("\tasr\tx0, x1, x0"); }
     }
     else if (my_strcmp(bin_op, "%") == 0) {
