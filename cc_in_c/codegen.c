@@ -172,6 +172,8 @@ typedef struct {
     int nchar_ptrs;
     CharPtrEntry char_ptr_arrays[256]; /* char *arr[N] — double-index yields byte */
     int nchar_ptr_arrays;
+    CharPtrEntry char_local_arrays[256]; /* char arr[N] — byte-level access */
+    int nchar_local_arrays;
     PtrVarEntry ptr_vars[256];
     int nptr_vars;
     int stack_size;
@@ -400,6 +402,13 @@ static int is_char_ptr_var(FuncLayout *layout, const char *name) {
 static int is_char_ptr_array_var(FuncLayout *layout, const char *name) {
     for (int i = 0; i < layout->nchar_ptr_arrays; i++)
         if (strcmp(layout->char_ptr_arrays[i].name, name) == 0)
+            return 1;
+    return 0;
+}
+
+static int is_char_local_array(FuncLayout *layout, const char *name) {
+    for (int i = 0; i < layout->nchar_local_arrays; i++)
+        if (strcmp(layout->char_local_arrays[i].name, name) == 0)
             return 1;
     return 0;
 }
@@ -674,6 +683,19 @@ static void walk_stmts_for_layout(StmtArray *stmts, FuncLayout *layout, int *off
                     layout->structvars[layout->nstructvars].name = xstrdup(e->name);
                     layout->structvars[layout->nstructvars].struct_type = xstrdup(e->struct_type);
                     layout->nstructvars++;
+                } else if (e->array_size >= 0 && e->is_char && !e->is_ptr) {
+                    /* char local array: allocate bytes (rounded up to 8) */
+                    int bytes = ((e->array_size + 7) / 8) * 8;
+                    *offset += bytes;
+                    if (layout->narrays >= 64) fatal("Too many arrays");
+                    layout->arrays[layout->narrays].name = xstrdup(e->name);
+                    layout->arrays[layout->narrays].count = e->array_size;
+                    layout->arrays[layout->narrays].inner_dim = -1;
+                    layout->narrays++;
+                    if (layout->nchar_local_arrays < 256) {
+                        layout->char_local_arrays[layout->nchar_local_arrays].name = xstrdup(e->name);
+                        layout->nchar_local_arrays++;
+                    }
                 } else if (e->array_size >= 0) {
                     int total = e->array_size;
                     if (e->array_size2 >= 0) total = e->array_size * e->array_size2;
@@ -889,8 +911,9 @@ static void gen_addr(Expr *e, FuncLayout *layout) {
         const char *idx_stype = NULL;
         int stride = 8;
         if (e->u.index.base->kind == ND_VAR) {
-            /* Check for char pointer or global char array: stride = 1 */
-            if (is_char_ptr_var(layout, e->u.index.base->u.var_name)) {
+            /* Check for char pointer, global char array, or char local array: stride = 1 */
+            if (is_char_ptr_var(layout, e->u.index.base->u.var_name) ||
+                is_char_local_array(layout, e->u.index.base->u.var_name)) {
                 stride = 1;
             } else {
                 GlobalVarEntry *gv = find_global(e->u.index.base->u.var_name);
@@ -1044,6 +1067,8 @@ static void gen_value(Expr *e, FuncLayout *layout) {
             if (e->u.index.base->kind == ND_VAR) {
                 if (is_char_ptr_var(layout, e->u.index.base->u.var_name))
                     use_byte = 1;
+                if (is_char_local_array(layout, e->u.index.base->u.var_name))
+                    use_byte = 1;
                 GlobalVarEntry *gv = find_global(e->u.index.base->u.var_name);
                 if (gv && gv->is_char_array)
                     use_byte = 1;
@@ -1158,7 +1183,8 @@ static void gen_value(Expr *e, FuncLayout *layout) {
                 is_char_store = 1;
             if (tgt->kind == ND_INDEX &&
                 tgt->u.index.base->kind == ND_VAR &&
-                is_char_ptr_var(layout, tgt->u.index.base->u.var_name))
+                (is_char_ptr_var(layout, tgt->u.index.base->u.var_name) ||
+                 is_char_local_array(layout, tgt->u.index.base->u.var_name)))
                 is_char_store = 1;
             /* Double-indexed char* array: names[i][j] = val */
             if (tgt->kind == ND_INDEX &&
@@ -1715,10 +1741,14 @@ static void gen_stmt(Stmt *st, FuncLayout *layout, const char *ret_label) {
                     int base_off = find_slot(layout, e->name);
                     char *decoded = decode_c_string(e->init->u.str_val);
                     int slen = strlen(decoded) + 1; /* include null */
+                    int char_arr = is_char_local_array(layout, e->name);
                     for (int k = 0; k < slen && k < e->array_size; k++) {
                         emit("\tmov\tx0, #%d", (unsigned char)decoded[k]);
-                        int elem_off = base_off - k * 8;
-                        if (elem_off <= 255) {
+                        int elem_off = char_arr ? (base_off - k) : (base_off - k * 8);
+                        if (char_arr) {
+                            emit_sub_imm("x9", "x29", elem_off);
+                            emit("\tstrb\tw0, [x9]");
+                        } else if (elem_off <= 255) {
                             emit("\tstr\tx0, [x29, #-%d]", elem_off);
                         } else {
                             emit_sub_imm("x9", "x29", elem_off);

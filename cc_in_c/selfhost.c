@@ -245,6 +245,8 @@ int *lay_char_name[512];
 int nlay_char;
 int *lay_char_arr_name[512];
 int nlay_char_arr;
+int *lay_char_larr_name[512]; // char local arrays: char arr[N]
+int nlay_char_larr;
 int *lay_intptr_name[512];
 int nlay_intptr;
 int *lay_float_name[512];
@@ -4908,6 +4910,16 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
           lay_sv_name[nlay_sv] = my_strdup(vd->name);
           lay_sv_type[nlay_sv] = my_strdup(vd->stype);
           nlay_sv++;
+        } else if (vd->arr_size >= 0 && vd->is_char && vd->is_ptr == 0) {
+          // char local array: allocate bytes (rounded up to 8)
+          int bytes = ((vd->arr_size + 7) / 8) * 8;
+          *offset = *offset + bytes;
+          lay_arr_name[nlay_arr] = my_strdup(vd->name);
+          lay_arr_count[nlay_arr] = vd->arr_size;
+          lay_arr_inner[nlay_arr] = 0 - 1;
+          nlay_arr++;
+          lay_char_larr_name[nlay_char_larr] = my_strdup(vd->name);
+          nlay_char_larr++;
         } else if (vd->arr_size >= 0) {
           int total = vd->arr_size;
           if (vd->arr_size2 >= 0) { total = vd->arr_size * vd->arr_size2; }
@@ -5026,6 +5038,15 @@ int cg_is_char_arr(int *name) {
   return 0;
 }
 
+int cg_is_char_larr(int *name) {
+  int i = 0;
+  while (i < nlay_char_larr) {
+    if (my_strcmp(lay_char_larr_name[i], name) == 0) { return 1; }
+    i++;
+  }
+  return 0;
+}
+
 int cg_is_intptr(int *name) {
   int i = 0;
   while (i < nlay_intptr) {
@@ -5084,6 +5105,7 @@ int layout_func(struct FuncDef *f) {
   nlay_unsigned = 0;
   nlay_char = 0;
   nlay_char_arr = 0;
+  nlay_char_larr = 0;
   nlay_intptr = 0;
   nlay_float = 0;
   int offset = 0;
@@ -5201,6 +5223,9 @@ int gen_addr(struct Expr *e) {
     int idx_is_char = 0;
     if (e->left->kind == ND_VAR) {
       if (cg_is_char(e->left->sval)) {
+        idx_stride = 1;
+        idx_is_char = 1;
+      } else if (cg_is_char_larr(e->left->sval)) {
         idx_stride = 1;
         idx_is_char = 1;
       } else {
@@ -5443,7 +5468,7 @@ int gen_value(struct Expr *e) {
       return 0;
     }
     gen_addr(e);
-    if (e->left->kind == ND_VAR && cg_is_char(e->left->sval)) {
+    if (e->left->kind == ND_VAR && (cg_is_char(e->left->sval) || cg_is_char_larr(e->left->sval))) {
       emit_line("\tldrb\tw0, [x0]");
     } else if ((e->left->kind == ND_ARROW || e->left->kind == ND_FIELD) && cg_field_is_char(e->left->sval2, e->left->sval)) {
       emit_line("\tldrb\tw0, [x0]");
@@ -5548,7 +5573,7 @@ int gen_value(struct Expr *e) {
       }
       int assign_char = 0;
       if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { assign_char = 1; }
-      if (e->left->kind == ND_INDEX && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { assign_char = 1; }
+      if (e->left->kind == ND_INDEX && e->left->left->kind == ND_VAR && (cg_is_char(e->left->left->sval) || cg_is_char_larr(e->left->left->sval))) { assign_char = 1; }
       if (e->left->kind == ND_INDEX && (e->left->left->kind == ND_ARROW || e->left->left->kind == ND_FIELD) && cg_field_is_char(e->left->left->sval2, e->left->left->sval)) { assign_char = 1; }
       if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left->kind == ND_BINARY && e->left->left->left != 0 && e->left->left->left->kind == ND_VAR && cg_is_char(e->left->left->left->sval)) { assign_char = 1; }
       // char *arr[N]; arr[i][j] = val
@@ -6303,14 +6328,24 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
           base_off = cg_find_slot(vd->name);
           int *decoded = cg_decode_string(vd->init->sval);
           int slen = my_strlen(decoded) + 1;
+          int str_char_larr = cg_is_char_larr(vd->name);
           k = 0;
           while (k < slen && k < vd->arr_size) {
             int ch = __read_byte(decoded, k);
             emit_s("\tmov\tx0, #");
             emit_num(ch);
             emit_ch('\n');
-            elem_off = base_off - k * 8;
-            if (elem_off <= 255) {
+            if (str_char_larr) {
+              elem_off = base_off - k;
+            } else {
+              elem_off = base_off - k * 8;
+            }
+            if (str_char_larr) {
+              emit_s("\tsub\tx9, x29, #");
+              emit_num(elem_off);
+              emit_ch('\n');
+              emit_line("\tstrb\tw0, [x9]");
+            } else if (elem_off <= 255) {
               emit_s("\tstr\tx0, [x29, #-");
               emit_num(elem_off);
               emit_line("]");
