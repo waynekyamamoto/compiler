@@ -243,6 +243,8 @@ int *lay_unsigned_name[512];
 int nlay_unsigned;
 int *lay_char_name[512];
 int nlay_char;
+int *lay_char_arr_name[512];
+int nlay_char_arr;
 int *lay_intptr_name[512];
 int nlay_intptr;
 int *lay_float_name[512];
@@ -4915,6 +4917,10 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
           lay_char_name[nlay_char] = my_strdup(vd->name);
           nlay_char++;
         }
+        if (vd->is_char && vd->is_ptr > 0 && vd->arr_size >= 0) {
+          lay_char_arr_name[nlay_char_arr] = my_strdup(vd->name);
+          nlay_char_arr++;
+        }
         if (vd->is_ptr > 0 && vd->stype == 0 && vd->is_char == 0 && vd->arr_size < 0) {
           lay_intptr_name[nlay_intptr] = my_strdup(vd->name);
           nlay_intptr++;
@@ -4995,6 +5001,15 @@ int cg_is_char(int *name) {
   return 0;
 }
 
+int cg_is_char_arr(int *name) {
+  int i = 0;
+  while (i < nlay_char_arr) {
+    if (my_strcmp(lay_char_arr_name[i], name) == 0) { return 1; }
+    i++;
+  }
+  return 0;
+}
+
 int cg_is_intptr(int *name) {
   int i = 0;
   while (i < nlay_intptr) {
@@ -5052,6 +5067,7 @@ int layout_func(struct FuncDef *f) {
   nlay_psv = 0;
   nlay_unsigned = 0;
   nlay_char = 0;
+  nlay_char_arr = 0;
   nlay_intptr = 0;
   nlay_float = 0;
   int offset = 0;
@@ -5188,6 +5204,13 @@ int gen_addr(struct Expr *e) {
     // Check if indexing a char* struct field (e.g. s->buf[i])
     if ((e->left->kind == ND_ARROW || e->left->kind == ND_FIELD) && idx_is_char == 0) {
       if (cg_field_is_char(e->left->sval2, e->left->sval)) {
+        idx_stride = 1;
+        idx_is_char = 1;
+      }
+    }
+    // Check if indexing result of char* array (e.g. names[i][j])
+    if (e->left->kind == ND_INDEX && idx_is_char == 0 && e->left->left != 0 && e->left->left->kind == ND_VAR) {
+      if (cg_is_char_arr(e->left->left->sval)) {
         idx_stride = 1;
         idx_is_char = 1;
       }
@@ -5408,6 +5431,9 @@ int gen_value(struct Expr *e) {
       emit_line("\tldrb\tw0, [x0]");
     } else if ((e->left->kind == ND_ARROW || e->left->kind == ND_FIELD) && cg_field_is_char(e->left->sval2, e->left->sval)) {
       emit_line("\tldrb\tw0, [x0]");
+    } else if (e->left->kind == ND_INDEX && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_char_arr(e->left->left->sval)) {
+      // char *arr[N]; arr[i][j] — second index should byte-load
+      emit_line("\tldrb\tw0, [x0]");
     } else {
       emit_line("\tldr\tx0, [x0]");
     }
@@ -5509,6 +5535,8 @@ int gen_value(struct Expr *e) {
       if (e->left->kind == ND_INDEX && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { assign_char = 1; }
       if (e->left->kind == ND_INDEX && (e->left->left->kind == ND_ARROW || e->left->left->kind == ND_FIELD) && cg_field_is_char(e->left->left->sval2, e->left->left->sval)) { assign_char = 1; }
       if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left->kind == ND_BINARY && e->left->left->left != 0 && e->left->left->left->kind == ND_VAR && cg_is_char(e->left->left->left->sval)) { assign_char = 1; }
+      // char *arr[N]; arr[i][j] = val
+      if (e->left->kind == ND_INDEX && e->left->left->kind == ND_INDEX && e->left->left->left != 0 && e->left->left->left->kind == ND_VAR && cg_is_char_arr(e->left->left->left->sval)) { assign_char = 1; }
       if (assign_char) {
         emit_line("\tstrb\tw0, [x1]");
       } else {
@@ -5628,6 +5656,7 @@ int gen_value(struct Expr *e) {
       int deref_char = 0;
       if (e->left->kind == ND_VAR && cg_is_char(e->left->sval)) { deref_char = 1; }
       if (e->left->kind == ND_BINARY && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { deref_char = 1; }
+      if (e->left->kind == ND_INDEX && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_char_arr(e->left->left->sval)) { deref_char = 1; }
       gen_value(e->left);
       if (deref_char) {
         emit_line("\tldrb\tw0, [x0]");
