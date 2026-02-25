@@ -1179,6 +1179,30 @@ static void gen_value(Expr *e, FuncLayout *layout) {
                 tgt->u.field.struct_type) {
                 st_type = find_field_struct_type(tgt->u.field.struct_type, tgt->u.field.field);
             }
+            /* Deref struct pointer: *p where p is struct* */
+            if (!st_type && tgt->kind == ND_UNARY && tgt->u.unary.op == '*' &&
+                tgt->u.unary.rhs->kind == ND_VAR) {
+                const char *deref_name = tgt->u.unary.rhs->u.var_name;
+                st_type = find_ptr_structvar_type(layout, deref_name);
+                if (!st_type) {
+                    /* Check global struct pointer vars */
+                    GlobalVarEntry *gv = find_global(deref_name);
+                    if (gv && gv->struct_type)
+                        st_type = gv->struct_type;
+                }
+            }
+            /* Indexing struct array: arr[i] where arr has struct type */
+            if (!st_type && tgt->kind == ND_INDEX && tgt->u.index.base->kind == ND_VAR) {
+                const char *arr_name = tgt->u.index.base->u.var_name;
+                st_type = find_structvar_type(layout, arr_name);
+                if (!st_type)
+                    st_type = find_ptr_structvar_type(layout, arr_name);
+                if (!st_type) {
+                    GlobalVarEntry *gv = find_global(arr_name);
+                    if (gv && gv->struct_type)
+                        st_type = gv->struct_type;
+                }
+            }
             /* Global struct var */
             if (!st_type && tgt->kind == ND_VAR) {
                 for (int gi = 0; gi < nglobal_vars; gi++) {
@@ -1445,10 +1469,14 @@ static void gen_value(Expr *e, FuncLayout *layout) {
             } else {
                 /* Scale by 8 for int pointer arithmetic (not char, not struct) */
                 int left_intptr = (e->u.binary.lhs->kind == ND_VAR &&
-                    is_ptr_var(layout, e->u.binary.lhs->u.var_name) &&
+                    (is_ptr_var(layout, e->u.binary.lhs->u.var_name) ||
+                     (is_array(layout, e->u.binary.lhs->u.var_name) &&
+                      !is_char_local_array(layout, e->u.binary.lhs->u.var_name))) &&
                     !is_char_ptr_var(layout, e->u.binary.lhs->u.var_name));
                 int right_intptr = (e->u.binary.rhs->kind == ND_VAR &&
-                    is_ptr_var(layout, e->u.binary.rhs->u.var_name) &&
+                    (is_ptr_var(layout, e->u.binary.rhs->u.var_name) ||
+                     (is_array(layout, e->u.binary.rhs->u.var_name) &&
+                      !is_char_local_array(layout, e->u.binary.rhs->u.var_name))) &&
                     !is_char_ptr_var(layout, e->u.binary.rhs->u.var_name));
                 if (left_intptr && right_intptr && strcmp(op, "-") == 0) {
                     /* ptr - ptr: handled after sub (divide by 8) */

@@ -5554,6 +5554,17 @@ int gen_value(struct Expr *e) {
     if (sa_type == 0 && (e->left->kind == ND_FIELD || e->left->kind == ND_ARROW)) {
       sa_type = cg_field_struct_type(e->left->sval2, e->left->sval);
     }
+    // Deref struct pointer: *p where p is struct*
+    if (sa_type == 0 && e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left->kind == ND_VAR) {
+      sa_type = cg_ptr_structvar_type(e->left->left->sval);
+      if (sa_type == 0) { sa_type = cg_global_stype(e->left->left->sval); }
+    }
+    // Indexing struct array: arr[i]
+    if (sa_type == 0 && e->left->kind == ND_INDEX && e->left->left->kind == ND_VAR) {
+      sa_type = cg_structvar_type(e->left->left->sval);
+      if (sa_type == 0) { sa_type = cg_ptr_structvar_type(e->left->left->sval); }
+      if (sa_type == 0) { sa_type = cg_global_stype(e->left->left->sval); }
+    }
     if (sa_type != 0) {
       sa_nf = cg_struct_nfields(sa_type);
       if (sa_nf > 1) {
@@ -5811,8 +5822,9 @@ int gen_value(struct Expr *e) {
         }
       } else {
         // Scale by 8 for int pointer arithmetic (not char, not struct)
-        int left_intptr = (e->left->kind == ND_VAR && cg_is_intptr(e->left->sval));
-        int right_intptr = (e->right->kind == ND_VAR && cg_is_intptr(e->right->sval));
+        // Also includes arrays (which act as pointers in arithmetic)
+        int left_intptr = (e->left->kind == ND_VAR && (cg_is_intptr(e->left->sval) || (cg_is_array(e->left->sval) && cg_is_char_larr(e->left->sval) == 0)));
+        int right_intptr = (e->right->kind == ND_VAR && (cg_is_intptr(e->right->sval) || (cg_is_array(e->right->sval) && cg_is_char_larr(e->right->sval) == 0)));
         if (left_intptr && right_intptr && my_strcmp(bin_op, "-") == 0) {
           // ptr - ptr: don't scale, divide result by 8 after sub
           // handled below after sub instruction
