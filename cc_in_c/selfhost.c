@@ -184,6 +184,7 @@ int *cg_gnames[65536];
 int cg_gis_array[65536];
 int cg_g_is_char[65536];
 int cg_g_is_char_arr[65536]; // global char *arr[N]
+int *cg_g_stype[65536];      // global struct type name
 int ncg_g;
 
 // Struct/union defs for codegen
@@ -5045,6 +5046,15 @@ int cg_is_char_arr(int *name) {
   return 0;
 }
 
+int *cg_global_stype(int *name) {
+  int i = 0;
+  while (i < ncg_g) {
+    if (my_strcmp(cg_gnames[i], name) == 0) { return cg_g_stype[i]; }
+    i++;
+  }
+  return 0;
+}
+
 int cg_is_char_larr(int *name) {
   int i = 0;
   while (i < nlay_char_larr) {
@@ -5239,6 +5249,10 @@ int gen_addr(struct Expr *e) {
         idx_stype = cg_structvar_type(e->left->sval);
         if (idx_stype == 0) {
           idx_stype = cg_ptr_structvar_type(e->left->sval);
+        }
+        // Check global struct type
+        if (idx_stype == 0) {
+          idx_stype = cg_global_stype(e->left->sval);
         }
         // Check for 2D array: stride = inner_dim * 8
         if (idx_stype == 0) {
@@ -5471,6 +5485,11 @@ int gen_value(struct Expr *e) {
     // For 2D array: arr[i] returns row address (no load), arr[i][j] loads
     if (e->left->kind == ND_VAR && cg_get_arr_inner(e->left->sval) >= 0) {
       // This is indexing a 2D array - return row pointer, don't load
+      gen_addr(e);
+      return 0;
+    }
+    // Global struct array: g_table[i] returns struct address (no load)
+    if (e->left->kind == ND_VAR && cg_global_is_array(e->left->sval) && cg_global_stype(e->left->sval) != 0) {
       gen_addr(e);
       return 0;
     }
@@ -6835,6 +6854,7 @@ int codegen(struct Program *prog) {
     if (gd->array_size >= 0) { cg_gis_array[ncg_g] = 1; }
     cg_g_is_char[ncg_g] = (gd->is_char && gd->is_ptr && gd->array_size < 0) ? 1 : 0;
     cg_g_is_char_arr[ncg_g] = (gd->is_char && gd->is_ptr && gd->array_size >= 0) ? 1 : 0;
+    cg_g_stype[ncg_g] = (gd->is_ptr == 0) ? gd->stype : 0;
     ncg_g++;
   }
 

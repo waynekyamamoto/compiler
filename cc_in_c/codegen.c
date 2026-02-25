@@ -59,6 +59,7 @@ typedef struct {
     int is_func_decl;
     int is_char_array;     /* 1 if string-initialized char array */
     int is_char_ptr_array; /* 1 if char *arr[N] (array of char pointers) */
+    char *struct_type;     /* struct type name, or NULL */
 } GlobalVarEntry;
 
 static GlobalVarEntry *global_vars;
@@ -935,6 +936,12 @@ static void gen_addr(Expr *e, FuncLayout *layout) {
                 idx_stype = find_structvar_type(layout, e->u.index.base->u.var_name);
                 if (!idx_stype)
                     idx_stype = find_ptr_structvar_type(layout, e->u.index.base->u.var_name);
+                /* Check global struct type */
+                if (!idx_stype) {
+                    GlobalVarEntry *gv2 = find_global(e->u.index.base->u.var_name);
+                    if (gv2 && gv2->struct_type)
+                        idx_stype = gv2->struct_type;
+                }
                 /* Check for 2D array: stride = inner_dim * 8 */
                 if (!idx_stype) {
                     int inner = get_array_inner_dim(layout, e->u.index.base->u.var_name);
@@ -1081,9 +1088,16 @@ static void gen_value(Expr *e, FuncLayout *layout) {
         /* For 2D array: arr[i] returns row address (no load), arr[i][j] loads */
         if (e->u.index.base->kind == ND_VAR &&
             get_array_inner_dim(layout, e->u.index.base->u.var_name) >= 0) {
-            /* This is indexing a 2D array — return row pointer, don't load */
             gen_addr(e, layout);
             return;
+        }
+        /* Global struct array: g_table[i] returns struct address (no load) */
+        if (e->u.index.base->kind == ND_VAR) {
+            GlobalVarEntry *gv = find_global(e->u.index.base->u.var_name);
+            if (gv && gv->is_array && gv->struct_type) {
+                gen_addr(e, layout);
+                return;
+            }
         }
         gen_addr(e, layout);
         /* Check if indexing a char pointer or global char array → use byte load */
@@ -2602,6 +2616,7 @@ char *codegen_generate(Program *prog) {
         global_vars[nglobal_vars].is_func_decl = gd->is_func_decl;
         global_vars[nglobal_vars].is_char_array = (gd->array_size >= 0 && gd->is_char && !gd->is_ptr);
         global_vars[nglobal_vars].is_char_ptr_array = (gd->array_size >= 0 && gd->is_char && gd->is_ptr);
+        global_vars[nglobal_vars].struct_type = gd->is_ptr ? NULL : gd->struct_type;
         nglobal_vars++;
     }
 
