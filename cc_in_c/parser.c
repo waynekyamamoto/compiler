@@ -2131,14 +2131,14 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
             proto->ret_is_ptr = ret_is_ptr;
             proto->is_variadic = is_variadic;
             proto->nparams = nparams;
-            proto->ret_struct_type = (ret_stype && ret_is_ptr) ? xstrdup(ret_stype) : NULL;
+            proto->ret_struct_type = ret_stype ? xstrdup(ret_stype) : NULL;
         }
-        if (ret_stype && ret_is_ptr)
+        if (ret_stype)
             add_func_ret_info(name_tok->value, ret_stype);
         return 0;
     }
 
-    if (ret_stype && ret_is_ptr)
+    if (ret_stype)
         add_func_ret_info(name_tok->value, ret_stype);
 
     Block body = parse_block();
@@ -2153,7 +2153,7 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
     fd->is_static = is_static;
     fd->ret_is_ptr = ret_is_ptr;
     fd->is_variadic = is_variadic;
-    fd->ret_struct_type = (ret_stype && ret_is_ptr) ? xstrdup(ret_stype) : NULL;
+    fd->ret_struct_type = ret_stype ? xstrdup(ret_stype) : NULL;
     return 1;
 }
 

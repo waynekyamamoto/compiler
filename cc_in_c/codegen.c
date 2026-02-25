@@ -56,7 +56,8 @@ typedef struct {
     int is_array;
     int is_structvar;
     int is_func_decl;
-    int is_char_array; /* 1 if string-initialized char array */
+    int is_char_array;     /* 1 if string-initialized char array */
+    int is_char_ptr_array; /* 1 if char *arr[N] (array of char pointers) */
 } GlobalVarEntry;
 
 static GlobalVarEntry *global_vars;
@@ -933,9 +934,15 @@ static void gen_addr(Expr *e, FuncLayout *layout) {
         }
         /* Check for double-indexed char* array: arr[i][j] where arr is char*[] */
         if (stride == 8 && e->u.index.base->kind == ND_INDEX &&
-            e->u.index.base->u.index.base->kind == ND_VAR &&
-            is_char_ptr_array_var(layout, e->u.index.base->u.index.base->u.var_name)) {
-            stride = 1;
+            e->u.index.base->u.index.base->kind == ND_VAR) {
+            const char *bname = e->u.index.base->u.index.base->u.var_name;
+            if (is_char_ptr_array_var(layout, bname)) {
+                stride = 1;
+            } else {
+                GlobalVarEntry *gv = find_global(bname);
+                if (gv && gv->is_char_ptr_array)
+                    stride = 1;
+            }
         }
         /* Check if base is arrow/field access returning a struct pointer */
         if (!idx_stype && (e->u.index.base->kind == ND_ARROW || e->u.index.base->kind == ND_FIELD)) {
@@ -1073,11 +1080,18 @@ static void gen_value(Expr *e, FuncLayout *layout) {
                 if (gv && gv->is_char_array)
                     use_byte = 1;
             }
-            /* Double-indexed char* array: names[i][j] */
+            /* Double-indexed char* array: names[i][j] (local or global) */
             if (e->u.index.base->kind == ND_INDEX &&
-                e->u.index.base->u.index.base->kind == ND_VAR &&
-                is_char_ptr_array_var(layout, e->u.index.base->u.index.base->u.var_name))
-                use_byte = 1;
+                e->u.index.base->u.index.base->kind == ND_VAR) {
+                const char *bname = e->u.index.base->u.index.base->u.var_name;
+                if (is_char_ptr_array_var(layout, bname))
+                    use_byte = 1;
+                else {
+                    GlobalVarEntry *gv2 = find_global(bname);
+                    if (gv2 && gv2->is_char_ptr_array)
+                        use_byte = 1;
+                }
+            }
             if (use_byte)
                 emit("\tldrb\tw0, [x0]");
             else
@@ -1186,12 +1200,19 @@ static void gen_value(Expr *e, FuncLayout *layout) {
                 (is_char_ptr_var(layout, tgt->u.index.base->u.var_name) ||
                  is_char_local_array(layout, tgt->u.index.base->u.var_name)))
                 is_char_store = 1;
-            /* Double-indexed char* array: names[i][j] = val */
+            /* Double-indexed char* array: names[i][j] = val (local or global) */
             if (tgt->kind == ND_INDEX &&
                 tgt->u.index.base->kind == ND_INDEX &&
-                tgt->u.index.base->u.index.base->kind == ND_VAR &&
-                is_char_ptr_array_var(layout, tgt->u.index.base->u.index.base->u.var_name))
-                is_char_store = 1;
+                tgt->u.index.base->u.index.base->kind == ND_VAR) {
+                const char *bname = tgt->u.index.base->u.index.base->u.var_name;
+                if (is_char_ptr_array_var(layout, bname))
+                    is_char_store = 1;
+                else {
+                    GlobalVarEntry *gv = find_global(bname);
+                    if (gv && gv->is_char_ptr_array)
+                        is_char_store = 1;
+                }
+            }
             if (is_char_store)
                 emit("\tstrb\tw0, [x1]");
             else
@@ -1727,6 +1748,28 @@ static void gen_stmt(Stmt *st, FuncLayout *layout, const char *ret_label) {
                         } else {
                             emit_sub_imm("x9", "x29", elem_off);
                             emit("\tstr\tx0, [x9]");
+                        }
+                    }
+                } else if (e->init) {
+                    /* Struct init from expression (e.g. function call): copy fields */
+                    int nf = cg_struct_nfields(e->struct_type);
+                    int base_off = find_slot(layout, e->name);
+                    if (e->init->kind == ND_CALL) {
+                        gen_value(e->init, layout);
+                    } else if (e->init->kind == ND_UNARY && e->init->u.unary.op == '*') {
+                        gen_value(e->init->u.unary.rhs, layout);
+                    } else {
+                        gen_addr(e->init, layout);
+                    }
+                    /* x0 = source address; copy fields to local struct */
+                    for (int fi = 0; fi < nf; fi++) {
+                        emit("\tldr\tx9, [x0, #%d]", fi * 8);
+                        int elem_off = base_off - fi * 8;
+                        if (elem_off <= 255) {
+                            emit("\tstr\tx9, [x29, #-%d]", elem_off);
+                        } else {
+                            emit_sub_imm("x10", "x29", elem_off);
+                            emit("\tstr\tx9, [x10]");
                         }
                     }
                 }
@@ -2412,14 +2455,14 @@ char *codegen_generate(Program *prog) {
 
     /* Register function prototypes that return pointers */
     for (int i = 0; i < prog->nprotos; i++) {
-        if (prog->protos[i].ret_is_ptr) {
+        if (prog->protos[i].ret_is_ptr || prog->protos[i].ret_struct_type) {
             GROW(ptr_ret_funcs, nptr_ret_funcs, ptr_ret_funcs_cap, char *);
             ptr_ret_funcs[nptr_ret_funcs++] = prog->protos[i].name;
         }
     }
     /* Also check function definitions */
     for (int i = 0; i < prog->nfuncs; i++) {
-        if (prog->funcs[i].ret_is_ptr) {
+        if (prog->funcs[i].ret_is_ptr || prog->funcs[i].ret_struct_type) {
             GROW(ptr_ret_funcs, nptr_ret_funcs, ptr_ret_funcs_cap, char *);
             ptr_ret_funcs[nptr_ret_funcs++] = prog->funcs[i].name;
         }
@@ -2526,6 +2569,7 @@ char *codegen_generate(Program *prog) {
         global_vars[nglobal_vars].is_structvar = (gd->struct_type != NULL && !gd->is_ptr && gd->array_size < 0);
         global_vars[nglobal_vars].is_func_decl = gd->is_func_decl;
         global_vars[nglobal_vars].is_char_array = (gd->array_size >= 0 && gd->is_char && !gd->is_ptr);
+        global_vars[nglobal_vars].is_char_ptr_array = (gd->array_size >= 0 && gd->is_char && gd->is_ptr);
         nglobal_vars++;
     }
 

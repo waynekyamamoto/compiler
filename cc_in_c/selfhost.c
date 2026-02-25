@@ -183,6 +183,7 @@ int nloop;
 int *cg_gnames[65536];
 int cg_gis_array[65536];
 int cg_g_is_char[65536];
+int cg_g_is_char_arr[65536]; // global char *arr[N]
 int ncg_g;
 
 // Struct/union defs for codegen
@@ -3474,7 +3475,7 @@ struct FuncDef *parse_func() {
     fd->param_is_char = param_is_char;
     fd->param_is_intptr = param_is_intptr;
     if (ret_is_ptr == 0) { fd->ret_stype = ret_stype; }
-    if (ret_stype != 0 && ret_is_ptr == 1) { struct_ret_names[n_struct_ret] = my_strdup(name); struct_ret_stypes[n_struct_ret] = my_strdup(ret_stype); n_struct_ret++; }
+    if (ret_stype != 0) { struct_ret_names[n_struct_ret] = my_strdup(name); struct_ret_stypes[n_struct_ret] = my_strdup(ret_stype); n_struct_ret++; }
     fd->param_stypes = param_stypes;
     fd->param_is_float = param_is_float;
     fd->ret_is_float = ret_is_float;
@@ -3495,7 +3496,7 @@ struct FuncDef *parse_func() {
   fd->param_is_char = param_is_char;
   fd->param_is_intptr = param_is_intptr;
   if (ret_is_ptr == 0) { fd->ret_stype = ret_stype; }
-  if (ret_stype != 0 && ret_is_ptr == 1) { struct_ret_names[n_struct_ret] = my_strdup(name); struct_ret_stypes[n_struct_ret] = my_strdup(ret_stype); n_struct_ret++; }
+  if (ret_stype != 0) { struct_ret_names[n_struct_ret] = my_strdup(name); struct_ret_stypes[n_struct_ret] = my_strdup(ret_stype); n_struct_ret++; }
   fd->param_stypes = param_stypes;
   fd->param_is_float = param_is_float;
   fd->ret_is_float = ret_is_float;
@@ -5033,6 +5034,12 @@ int cg_is_char_arr(int *name) {
   int i = 0;
   while (i < nlay_char_arr) {
     if (my_strcmp(lay_char_arr_name[i], name) == 0) { return 1; }
+    i++;
+  }
+  // Also check global char* arrays
+  i = 0;
+  while (i < ncg_g) {
+    if (cg_g_is_char_arr[i] && my_strcmp(cg_gnames[i], name) == 0) { return 1; }
     i++;
   }
   return 0;
@@ -6713,7 +6720,7 @@ int codegen(struct Program *prog) {
   // Register ptr-returning functions from prototypes
   int pi = 0;
   while (pi < prog->nprotos) {
-    if (prog->proto_ret_is_ptr[pi] != 0) {
+    if (prog->proto_ret_is_ptr[pi] != 0 || prog->proto_ret_stype[pi] != 0) {
       ptr_ret_names[n_ptr_ret] = prog->proto_names[pi];
       n_ptr_ret++;
     }
@@ -6723,7 +6730,7 @@ int codegen(struct Program *prog) {
   pi = 0;
   while (pi < prog->nfuncs) {
     fd = prog->funcs[pi];
-    if (fd->ret_is_ptr != 0) {
+    if (fd->ret_is_ptr != 0 || fd->ret_stype != 0) {
       ptr_ret_names[n_ptr_ret] = fd->name;
       n_ptr_ret++;
     }
@@ -6826,7 +6833,8 @@ int codegen(struct Program *prog) {
     cg_gnames[ncg_g] = gd->name;
     cg_gis_array[ncg_g] = 0;
     if (gd->array_size >= 0) { cg_gis_array[ncg_g] = 1; }
-    cg_g_is_char[ncg_g] = (gd->is_char && gd->is_ptr) ? 1 : 0;
+    cg_g_is_char[ncg_g] = (gd->is_char && gd->is_ptr && gd->array_size < 0) ? 1 : 0;
+    cg_g_is_char_arr[ncg_g] = (gd->is_char && gd->is_ptr && gd->array_size >= 0) ? 1 : 0;
     ncg_g++;
   }
 
