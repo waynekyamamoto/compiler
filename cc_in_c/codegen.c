@@ -1376,6 +1376,21 @@ static void gen_value(Expr *e, FuncLayout *layout) {
                     emit("\tmov\tx9, #%d", scale);
                     emit("\tmul\tx1, x1, x9");
                 }
+            } else {
+                /* Scale by 8 for int pointer arithmetic (not char, not struct) */
+                int left_intptr = (e->u.binary.lhs->kind == ND_VAR &&
+                    is_ptr_var(layout, e->u.binary.lhs->u.var_name) &&
+                    !is_char_ptr_var(layout, e->u.binary.lhs->u.var_name));
+                int right_intptr = (e->u.binary.rhs->kind == ND_VAR &&
+                    is_ptr_var(layout, e->u.binary.rhs->u.var_name) &&
+                    !is_char_ptr_var(layout, e->u.binary.rhs->u.var_name));
+                if (left_intptr && right_intptr && strcmp(op, "-") == 0) {
+                    /* ptr - ptr: handled after sub (divide by 8) */
+                } else if (left_intptr) {
+                    emit("\tlsl\tx0, x0, #3");
+                } else if (right_intptr) {
+                    emit("\tlsl\tx1, x1, #3");
+                }
             }
         }
 
