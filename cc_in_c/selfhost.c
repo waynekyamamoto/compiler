@@ -2238,12 +2238,18 @@ struct Stmt *parse_vardecl_stmt(int vd_is_static) {
     }
     skip_qualifiers();
     int *name = my_strdup(p_eat(TK_ID, 0));
+    int arr_size = 0 - 1;
+    int arr_size2 = 0 - 1;
     if (is_funcptr) {
+      // Handle array of function pointers: type (*name[N])(params)
+      if (p_match(TK_OP, "[")) {
+        p_eat(TK_OP, "[");
+        arr_size = parse_const_expr();
+        p_eat(TK_OP, "]");
+      }
       p_eat(TK_OP, ")");
       skip_param_list();
     }
-    int arr_size = 0 - 1;
-    int arr_size2 = 0 - 1;
     if (p_match(TK_OP, "[")) {
       p_eat(TK_OP, "[");
       if (p_match(TK_OP, "]")) {
