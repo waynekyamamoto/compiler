@@ -170,6 +170,8 @@ typedef struct {
     int nunsigned_slots;
     CharPtrEntry char_ptrs[256];
     int nchar_ptrs;
+    CharPtrEntry char_ptr_arrays[256]; /* char *arr[N] — double-index yields byte */
+    int nchar_ptr_arrays;
     PtrVarEntry ptr_vars[256];
     int nptr_vars;
     int stack_size;
@@ -391,6 +393,13 @@ static int is_unsigned_var(FuncLayout *layout, const char *name) {
 static int is_char_ptr_var(FuncLayout *layout, const char *name) {
     for (int i = 0; i < layout->nchar_ptrs; i++)
         if (strcmp(layout->char_ptrs[i].name, name) == 0)
+            return 1;
+    return 0;
+}
+
+static int is_char_ptr_array_var(FuncLayout *layout, const char *name) {
+    for (int i = 0; i < layout->nchar_ptr_arrays; i++)
+        if (strcmp(layout->char_ptr_arrays[i].name, name) == 0)
             return 1;
     return 0;
 }
@@ -690,13 +699,19 @@ static void walk_stmts_for_layout(StmtArray *stmts, FuncLayout *layout, int *off
                         layout->nunsigned_slots++;
                     }
                 }
-                if (e->is_char && e->is_ptr == 1) {
+                if (e->is_char && e->is_ptr == 1 && e->array_size < 0) {
                     if (layout->nchar_ptrs < 256) {
                         layout->char_ptrs[layout->nchar_ptrs].name = xstrdup(e->name);
                         layout->nchar_ptrs++;
                     }
                 }
-                if (e->is_ptr && !(e->is_char && e->is_ptr == 1)) {
+                if (e->is_char && e->is_ptr == 1 && e->array_size >= 0) {
+                    if (layout->nchar_ptr_arrays < 256) {
+                        layout->char_ptr_arrays[layout->nchar_ptr_arrays].name = xstrdup(e->name);
+                        layout->nchar_ptr_arrays++;
+                    }
+                }
+                if (e->is_ptr && !(e->is_char && e->is_ptr == 1 && e->array_size < 0)) {
                     if (layout->nptr_vars < 256) {
                         layout->ptr_vars[layout->nptr_vars].name = xstrdup(e->name);
                         layout->nptr_vars++;
@@ -893,6 +908,12 @@ static void gen_addr(Expr *e, FuncLayout *layout) {
                 }
             }
         }
+        /* Check for double-indexed char* array: arr[i][j] where arr is char*[] */
+        if (stride == 8 && e->u.index.base->kind == ND_INDEX &&
+            e->u.index.base->u.index.base->kind == ND_VAR &&
+            is_char_ptr_array_var(layout, e->u.index.base->u.index.base->u.var_name)) {
+            stride = 1;
+        }
         /* Check if base is arrow/field access returning a struct pointer */
         if (!idx_stype && (e->u.index.base->kind == ND_ARROW || e->u.index.base->kind == ND_FIELD)) {
             if (e->u.index.base->u.field.struct_type) {
@@ -1027,6 +1048,11 @@ static void gen_value(Expr *e, FuncLayout *layout) {
                 if (gv && gv->is_char_array)
                     use_byte = 1;
             }
+            /* Double-indexed char* array: names[i][j] */
+            if (e->u.index.base->kind == ND_INDEX &&
+                e->u.index.base->u.index.base->kind == ND_VAR &&
+                is_char_ptr_array_var(layout, e->u.index.base->u.index.base->u.var_name))
+                use_byte = 1;
             if (use_byte)
                 emit("\tldrb\tw0, [x0]");
             else
@@ -1133,6 +1159,12 @@ static void gen_value(Expr *e, FuncLayout *layout) {
             if (tgt->kind == ND_INDEX &&
                 tgt->u.index.base->kind == ND_VAR &&
                 is_char_ptr_var(layout, tgt->u.index.base->u.var_name))
+                is_char_store = 1;
+            /* Double-indexed char* array: names[i][j] = val */
+            if (tgt->kind == ND_INDEX &&
+                tgt->u.index.base->kind == ND_INDEX &&
+                tgt->u.index.base->u.index.base->kind == ND_VAR &&
+                is_char_ptr_array_var(layout, tgt->u.index.base->u.index.base->u.var_name))
                 is_char_store = 1;
             if (is_char_store)
                 emit("\tstrb\tw0, [x1]");
