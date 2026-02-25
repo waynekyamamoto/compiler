@@ -185,6 +185,7 @@ typedef struct {
     int *word_indices;   /* which 8-byte word this field maps to (per-field) */
     int nwords;          /* 0 = nfields, >0 = packed word count */
     int *field_array_sizes; /* -1 = not array, >=0 = array count (per-field) */
+    int *field_is_char;     /* 1 = char/char* field (per-field) */
 } StructDef;
 
 typedef struct {

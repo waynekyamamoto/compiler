@@ -12,6 +12,7 @@ typedef struct {
     int is_ptr;
     int bit_width;      /* 0 = normal field, >0 = bitfield width */
     int array_size;     /* -1 = not array, >=0 = array element count */
+    int is_char;        /* 1 if char/char* field */
 } FieldInfo;
 
 typedef struct {
@@ -416,6 +417,7 @@ static char *parse_base_type(void) {
                 } else {
                     isd->field_array_sizes = NULL;
                 }
+                isd->field_is_char = NULL;
             }
             isd->field_ptr_types = xmalloc(nfields * sizeof(char *));
             for (int k = 0; k < nfields; k++) {
@@ -511,6 +513,7 @@ static char *parse_base_type(void) {
                 } else {
                     isd2->field_array_sizes = NULL;
                 }
+                isd2->field_is_char = NULL;
             }
             isd2->field_ptr_types = xmalloc(nf2 * sizeof(char *));
             for (int k = 0; k < nf2; k++) {
@@ -617,6 +620,7 @@ static StructDef parse_struct_or_union_def(int is_union) {
 
     while (!match(TK_OP, "}")) {
         char *ftype = parse_base_type();
+        int field_is_char = last_type_is_char;
         int is_ptr = 0;
         int is_funcptr = 0;
         /* Function pointer field: type (*name)(params) */
@@ -658,6 +662,7 @@ static StructDef parse_struct_or_union_def(int is_union) {
             finfo[nfields].is_ptr = 1;
             finfo[nfields].bit_width = 0;
             finfo[nfields].array_size = -1;
+            finfo[nfields].is_char = 0;
             nfields++;
             continue;
         }
@@ -676,6 +681,7 @@ static StructDef parse_struct_or_union_def(int is_union) {
             finfo[nfields].is_ptr = 1;
             finfo[nfields].bit_width = 0;
             finfo[nfields].array_size = -1;
+            finfo[nfields].is_char = 0;
             nfields++;
             continue;
         }
@@ -729,6 +735,7 @@ static StructDef parse_struct_or_union_def(int is_union) {
             finfo[nfields].is_ptr = decl_is_ptr;
             finfo[nfields].bit_width = bit_width;
             finfo[nfields].array_size = field_arr_size;
+            finfo[nfields].is_char = field_is_char;
             nfields++;
 
             if (match(TK_OP, ",")) {
@@ -787,6 +794,19 @@ static StructDef parse_struct_or_union_def(int is_union) {
             sd.field_array_sizes[i] = finfo[i].array_size;
     } else {
         sd.field_array_sizes = NULL;
+    }
+    /* Build field_is_char */
+    {
+        int has_char = 0;
+        for (int i = 0; i < nfields; i++)
+            if (finfo[i].is_char) { has_char = 1; break; }
+        if (has_char) {
+            sd.field_is_char = xmalloc(nfields * sizeof(int));
+            for (int i = 0; i < nfields; i++)
+                sd.field_is_char[i] = finfo[i].is_char;
+        } else {
+            sd.field_is_char = NULL;
+        }
     }
 
     if (has_bitfields) {
@@ -2583,6 +2603,7 @@ Program *parse_program(TokArray tokarr) {
                         } else {
                             structs[nstructs].field_array_sizes = NULL;
                         }
+                        structs[nstructs].field_is_char = NULL;
                     }
                     nstructs++;
                 }
