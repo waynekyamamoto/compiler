@@ -297,7 +297,7 @@ static int field_index(const char *struct_name, const char *field_name) {
             if (sd->field_types[i])
                 field_slots *= sd->field_array_sizes[i];
             else
-                field_slots = (sd->field_array_sizes[i] + 7) / 8;
+                field_slots = sd->field_array_sizes[i];
         }
         slot += field_slots;
     }
@@ -332,7 +332,7 @@ static int cg_struct_nfields(const char *name) {
             if (sd->field_types[i])
                 field_slots *= sd->field_array_sizes[i];
             else
-                field_slots = (sd->field_array_sizes[i] + 7) / 8;
+                field_slots = sd->field_array_sizes[i];
         }
         if (sd->is_union) {
             if (field_slots > max_field) max_field = field_slots;
