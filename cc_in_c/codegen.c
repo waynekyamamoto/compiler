@@ -1778,6 +1778,12 @@ static void gen_value(Expr *e, FuncLayout *layout) {
                 /* If it's an array of structs, it decays to a pointer — don't pass by value */
                 if (arg_stype && is_array(layout, args[i]->u.var_name))
                     arg_stype = NULL;
+                /* Also check global struct vars */
+                if (!arg_stype) {
+                    GlobalVarEntry *gv = find_global(args[i]->u.var_name);
+                    if (gv && gv->is_structvar && gv->struct_type)
+                        arg_stype = gv->struct_type;
+                }
             } else if (args[i]->kind == ND_CALL && args[i]->u.call.name) {
                 arg_stype = func_ret_struct_type(args[i]->u.call.name);
                 if (arg_stype) arg_is_call_ret = 1;

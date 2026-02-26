@@ -5446,7 +5446,7 @@ int gen_value(struct Expr *e) {
       return 0;
     }
     gen_addr(e);
-    if (cg_is_array(e->sval) == 0 && cg_is_structvar(e->sval) == 0 && cg_global_is_array(e->sval) == 0) {
+    if (cg_is_array(e->sval) == 0 && cg_is_structvar(e->sval) == 0 && cg_global_is_array(e->sval) == 0 && cg_global_stype(e->sval) == 0) {
       emit_line("\tldr\tx0, [x0]");
     }
     return 0;
