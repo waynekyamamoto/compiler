@@ -105,6 +105,7 @@ struct SDef {
   int nwords;
   int *field_is_array;
   int *field_is_char;
+  int *field_is_ptr;
 };
 
 struct SFieldInfo {
@@ -199,6 +200,7 @@ int *cg_s_wi[4096];     // word_indices
 int cg_s_nw[4096];      // nwords
 int *cg_s_fa[4096];     // field_is_array flags
 int *cg_s_fc[4096];     // field_is_char flags
+int *cg_s_fp[4096];     // field_is_ptr flags
 int ncg_s;
 
 // Token arrays
@@ -1963,7 +1965,8 @@ int *parse_base_type() {
       asd->nwords = 0;
       asd->field_is_array = my_malloc(anf * 8);
       asd->field_is_char = my_malloc(anf * 8);
-      for (int afi = 0; afi < anf; afi++) { asd->field_is_array[afi] = 0; asd->field_is_char[afi] = 0; }
+      asd->field_is_ptr = my_malloc(anf * 8);
+      for (int afi = 0; afi < anf; afi++) { asd->field_is_array[afi] = 0; asd->field_is_char[afi] = 0; asd->field_is_ptr[afi] = 0; }
       inline_sdefs[ninline_sdefs] = asd;
       ninline_sdefs++;
       skip_qualifiers();
@@ -2039,7 +2042,8 @@ int *parse_base_type() {
       lsd->nwords = 0;
       lsd->field_is_array = my_malloc(lnf * 8);
       lsd->field_is_char = my_malloc(lnf * 8);
-      for (int lfi2 = 0; lfi2 < lnf; lfi2++) { lsd->field_is_array[lfi2] = 0; lsd->field_is_char[lfi2] = 0; }
+      lsd->field_is_ptr = my_malloc(lnf * 8);
+      for (int lfi2 = 0; lfi2 < lnf; lfi2++) { lsd->field_is_array[lfi2] = 0; lsd->field_is_char[lfi2] = 0; lsd->field_is_ptr[lfi2] = 0; }
       inline_sdefs[ninline_sdefs] = lsd;
       ninline_sdefs++;
     }
@@ -3319,7 +3323,8 @@ struct SDef *parse_struct_or_union_def(int is_union) {
   sd->nwords = 0;
   sd->field_is_array = my_malloc(nf * 8);
   sd->field_is_char = my_malloc(nf * 8);
-  for (int fai = 0; fai < nf; fai++) { sd->field_is_array[fai] = finfo[fai]->is_array; sd->field_is_char[fai] = finfo[fai]->is_char; }
+  sd->field_is_ptr = my_malloc(nf * 8);
+  for (int fai = 0; fai < nf; fai++) { sd->field_is_array[fai] = finfo[fai]->is_array; sd->field_is_char[fai] = finfo[fai]->is_char; sd->field_is_ptr[fai] = finfo[fai]->is_ptr; }
 
   if (has_bf) {
     sd->bit_widths = my_malloc(nf * 8);
@@ -4617,6 +4622,26 @@ int cg_field_is_char(int *sname, int *fname) {
   return 0;
 }
 
+int cg_field_is_ptr(int *sname, int *fname) {
+  if (sname == 0 || fname == 0) return 0;
+  int i = 0;
+  while (i < ncg_s) {
+    if (cg_sname[i] != 0 && my_strcmp(cg_sname[i], sname) == 0) {
+      if (cg_s_fp[i] == 0) return 0;
+      int j = 0;
+      while (j < cg_snfields[i]) {
+        if (cg_sfields[i][j] != 0 && my_strcmp(cg_sfields[i][j], fname) == 0) {
+          return cg_s_fp[i][j];
+        }
+        j++;
+      }
+      return 0;
+    }
+    i++;
+  }
+  return 0;
+}
+
 int cg_struct_nfields(int *sname) {
   int i = 0;
   int j = 0;
@@ -5265,7 +5290,7 @@ int gen_addr(struct Expr *e) {
     }
     // Check if indexing a char* struct field (e.g. s->buf[i])
     if ((e->left->kind == ND_ARROW || e->left->kind == ND_FIELD) && idx_is_char == 0) {
-      if (cg_field_is_char(e->left->sval2, e->left->sval)) {
+      if (cg_field_is_char(e->left->sval2, e->left->sval) && (cg_field_is_ptr(e->left->sval2, e->left->sval) == 0 || cg_field_is_array(e->left->sval2, e->left->sval) == 0)) {
         idx_stride = 1;
         idx_is_char = 1;
       }
@@ -5501,7 +5526,7 @@ int gen_value(struct Expr *e) {
     gen_addr(e);
     if (e->left->kind == ND_VAR && (cg_is_char(e->left->sval) || cg_is_char_larr(e->left->sval))) {
       emit_line("\tldrb\tw0, [x0]");
-    } else if ((e->left->kind == ND_ARROW || e->left->kind == ND_FIELD) && cg_field_is_char(e->left->sval2, e->left->sval)) {
+    } else if ((e->left->kind == ND_ARROW || e->left->kind == ND_FIELD) && cg_field_is_char(e->left->sval2, e->left->sval) && (cg_field_is_ptr(e->left->sval2, e->left->sval) == 0 || cg_field_is_array(e->left->sval2, e->left->sval) == 0)) {
       emit_line("\tldrb\tw0, [x0]");
     } else if (e->left->kind == ND_INDEX && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_char_arr(e->left->left->sval)) {
       // char *arr[N]; arr[i][j] — second index should byte-load
@@ -5618,7 +5643,7 @@ int gen_value(struct Expr *e) {
       int assign_char = 0;
       if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { assign_char = 1; }
       if (e->left->kind == ND_INDEX && e->left->left->kind == ND_VAR && (cg_is_char(e->left->left->sval) || cg_is_char_larr(e->left->left->sval))) { assign_char = 1; }
-      if (e->left->kind == ND_INDEX && (e->left->left->kind == ND_ARROW || e->left->left->kind == ND_FIELD) && cg_field_is_char(e->left->left->sval2, e->left->left->sval)) { assign_char = 1; }
+      if (e->left->kind == ND_INDEX && (e->left->left->kind == ND_ARROW || e->left->left->kind == ND_FIELD) && cg_field_is_char(e->left->left->sval2, e->left->left->sval) && (cg_field_is_ptr(e->left->left->sval2, e->left->left->sval) == 0 || cg_field_is_array(e->left->left->sval2, e->left->left->sval) == 0)) { assign_char = 1; }
       if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left->kind == ND_BINARY && e->left->left->left != 0 && e->left->left->left->kind == ND_VAR && cg_is_char(e->left->left->left->sval)) { assign_char = 1; }
       // char *arr[N]; arr[i][j] = val
       if (e->left->kind == ND_INDEX && e->left->left->kind == ND_INDEX && e->left->left->left != 0 && e->left->left->left->kind == ND_VAR && cg_is_char_arr(e->left->left->left->sval)) { assign_char = 1; }
@@ -6934,6 +6959,7 @@ int codegen(struct Program *prog) {
     cg_s_nw[ncg_s] = sd->nwords;
     cg_s_fa[ncg_s] = sd->field_is_array;
     cg_s_fc[ncg_s] = sd->field_is_char;
+    cg_s_fp[ncg_s] = sd->field_is_ptr;
     ncg_s++;
     i++;
   }
@@ -6952,6 +6978,7 @@ int codegen(struct Program *prog) {
     cg_s_nw[ncg_s] = sd->nwords;
     cg_s_fa[ncg_s] = sd->field_is_array;
     cg_s_fc[ncg_s] = sd->field_is_char;
+    cg_s_fp[ncg_s] = sd->field_is_ptr;
     ncg_s++;
     i++;
   }

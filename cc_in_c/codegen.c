@@ -45,6 +45,7 @@ typedef struct {
     int nwords;          /* 0 = use nfields, >0 = packed word count */
     int *field_array_sizes; /* NULL if no array fields; -1 = not array, >=0 = count */
     int *field_is_char;     /* NULL if no char fields; 1 = char/char* field */
+    int *field_is_ptr;      /* NULL if no ptr fields; 1 = pointer field */
 } CgStructDef;
 
 static CgStructDef *cg_structs;
@@ -330,6 +331,16 @@ static int cg_field_is_char(const char *struct_name, const char *field_name) {
     for (int i = 0; i < sd->nfields; i++) {
         if (strcmp(sd->fields[i], field_name) == 0)
             return sd->field_is_char[i];
+    }
+    return 0;
+}
+
+static int cg_field_is_ptr(const char *struct_name, const char *field_name) {
+    CgStructDef *sd = find_cg_struct(struct_name);
+    if (!sd || !sd->field_is_ptr) return 0;
+    for (int i = 0; i < sd->nfields; i++) {
+        if (strcmp(sd->fields[i], field_name) == 0)
+            return sd->field_is_ptr[i];
     }
     return 0;
 }
@@ -979,7 +990,11 @@ static void gen_addr(Expr *e, FuncLayout *layout) {
         if (stride == 8 && (e->u.index.base->kind == ND_ARROW || e->u.index.base->kind == ND_FIELD)) {
             if (e->u.index.base->u.field.struct_type &&
                 cg_field_is_char(e->u.index.base->u.field.struct_type,
-                                 e->u.index.base->u.field.field))
+                                 e->u.index.base->u.field.field) &&
+                !(cg_field_is_ptr(e->u.index.base->u.field.struct_type,
+                                  e->u.index.base->u.field.field) &&
+                  is_array_field(e->u.index.base->u.field.struct_type,
+                                 e->u.index.base->u.field.field)))
                 stride = 1;
         }
         /* Check if base is arrow/field access returning a struct pointer */
@@ -1129,7 +1144,11 @@ static void gen_value(Expr *e, FuncLayout *layout) {
             if ((e->u.index.base->kind == ND_ARROW || e->u.index.base->kind == ND_FIELD) &&
                 e->u.index.base->u.field.struct_type &&
                 cg_field_is_char(e->u.index.base->u.field.struct_type,
-                                 e->u.index.base->u.field.field))
+                                 e->u.index.base->u.field.field) &&
+                !(cg_field_is_ptr(e->u.index.base->u.field.struct_type,
+                                  e->u.index.base->u.field.field) &&
+                  is_array_field(e->u.index.base->u.field.struct_type,
+                                 e->u.index.base->u.field.field)))
                 use_byte = 1;
             /* Double-indexed char* array: names[i][j] (local or global) */
             if (e->u.index.base->kind == ND_INDEX &&
@@ -1292,7 +1311,11 @@ static void gen_value(Expr *e, FuncLayout *layout) {
                 (tgt->u.index.base->kind == ND_ARROW || tgt->u.index.base->kind == ND_FIELD) &&
                 tgt->u.index.base->u.field.struct_type &&
                 cg_field_is_char(tgt->u.index.base->u.field.struct_type,
-                                 tgt->u.index.base->u.field.field))
+                                 tgt->u.index.base->u.field.field) &&
+                !(cg_field_is_ptr(tgt->u.index.base->u.field.struct_type,
+                                  tgt->u.index.base->u.field.field) &&
+                  is_array_field(tgt->u.index.base->u.field.struct_type,
+                                 tgt->u.index.base->u.field.field)))
                 is_char_store = 1;
             /* Double-indexed char* array: names[i][j] = val (local or global) */
             if (tgt->kind == ND_INDEX &&
@@ -2753,6 +2776,7 @@ char *codegen_generate(Program *prog) {
         cg_structs[ncg_structs].nwords = prog->structs[i].nwords;
         cg_structs[ncg_structs].field_array_sizes = prog->structs[i].field_array_sizes;
         cg_structs[ncg_structs].field_is_char = prog->structs[i].field_is_char;
+        cg_structs[ncg_structs].field_is_ptr = prog->structs[i].field_is_ptr;
         ncg_structs++;
     }
 

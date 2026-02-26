@@ -418,6 +418,7 @@ static char *parse_base_type(void) {
                     isd->field_array_sizes = NULL;
                 }
                 isd->field_is_char = NULL;
+                isd->field_is_ptr = NULL;
             }
             isd->field_ptr_types = xmalloc(nfields * sizeof(char *));
             for (int k = 0; k < nfields; k++) {
@@ -514,6 +515,7 @@ static char *parse_base_type(void) {
                     isd2->field_array_sizes = NULL;
                 }
                 isd2->field_is_char = NULL;
+                isd2->field_is_ptr = NULL;
             }
             isd2->field_ptr_types = xmalloc(nf2 * sizeof(char *));
             for (int k = 0; k < nf2; k++) {
@@ -806,6 +808,19 @@ static StructDef parse_struct_or_union_def(int is_union) {
                 sd.field_is_char[i] = finfo[i].is_char;
         } else {
             sd.field_is_char = NULL;
+        }
+    }
+    /* Build field_is_ptr */
+    {
+        int has_ptr = 0;
+        for (int i = 0; i < nfields; i++)
+            if (finfo[i].is_ptr) { has_ptr = 1; break; }
+        if (has_ptr) {
+            sd.field_is_ptr = xmalloc(nfields * sizeof(int));
+            for (int i = 0; i < nfields; i++)
+                sd.field_is_ptr[i] = finfo[i].is_ptr;
+        } else {
+            sd.field_is_ptr = NULL;
         }
     }
 
@@ -2613,6 +2628,7 @@ Program *parse_program(TokArray tokarr) {
                             structs[nstructs].field_array_sizes = NULL;
                         }
                         structs[nstructs].field_is_char = NULL;
+                        structs[nstructs].field_is_ptr = NULL;
                     }
                     nstructs++;
                 }

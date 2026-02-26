@@ -186,6 +186,7 @@ typedef struct {
     int nwords;          /* 0 = nfields, >0 = packed word count */
     int *field_array_sizes; /* -1 = not array, >=0 = array count (per-field) */
     int *field_is_char;     /* 1 = char/char* field (per-field) */
+    int *field_is_ptr;      /* 1 = pointer field (per-field) */
 } StructDef;
 
 typedef struct {
