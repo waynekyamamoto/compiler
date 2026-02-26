@@ -79,6 +79,17 @@ static int func_returns_ptr(const char *name) {
     return 0;
 }
 
+/* Functions that return unsigned int (skip sxtw after call) */
+static char **unsigned_ret_funcs;
+static int nunsigned_ret_funcs;
+static int unsigned_ret_funcs_cap;
+
+static int func_returns_unsigned(const char *name) {
+    for (int i = 0; i < nunsigned_ret_funcs; i++)
+        if (strcmp(unsigned_ret_funcs[i], name) == 0) return 1;
+    return 0;
+}
+
 /* Functions that return structs by value */
 static char **struct_ret_func_names;
 static char **struct_ret_func_types;
@@ -1575,11 +1586,15 @@ static void gen_value(Expr *e, FuncLayout *layout) {
             }
         }
 
-        /* Check if either operand involves an unsigned variable */
+        /* Check if either operand involves an unsigned variable or unsigned-returning call */
         int use_unsigned = 0;
         if (e->u.binary.lhs->kind == ND_VAR && is_unsigned_var(layout, e->u.binary.lhs->u.var_name))
             use_unsigned = 1;
         if (e->u.binary.rhs->kind == ND_VAR && is_unsigned_var(layout, e->u.binary.rhs->u.var_name))
+            use_unsigned = 1;
+        if (e->u.binary.lhs->kind == ND_CALL && func_returns_unsigned(e->u.binary.lhs->u.call.name))
+            use_unsigned = 1;
+        if (e->u.binary.rhs->kind == ND_CALL && func_returns_unsigned(e->u.binary.rhs->u.call.name))
             use_unsigned = 1;
 
         if (strcmp(op, "+") == 0)      emit("\tadd\tx0, x1, x0");
@@ -1712,7 +1727,7 @@ static void gen_value(Expr *e, FuncLayout *layout) {
                     int var_space = ((n_var * 8 + 15) / 16) * 16;
                     emit_add_imm("sp", "sp", var_space);
                 }
-                if (!func_returns_ptr(name))
+                if (!func_returns_ptr(name) && !func_returns_unsigned(name))
                     emit("\tsxtw\tx0, w0");
                 return;
             }
@@ -1884,7 +1899,7 @@ static void gen_value(Expr *e, FuncLayout *layout) {
         }
         if (total_reg_slots > 0)
             emit_add_imm("sp", "sp", total_reg_slots * 16);
-        if (!func_returns_ptr(name))
+        if (!func_returns_ptr(name) && !func_returns_unsigned(name))
             emit("\tsxtw\tx0, w0");
         return;
     }
@@ -2643,6 +2658,7 @@ char *codegen_generate(Program *prog) {
     ncg_structs = 0;
     nglobal_vars = 0;
     nptr_ret_funcs = 0;
+    nunsigned_ret_funcs = 0;
     nstruct_ret_funcs = 0;
 
     /* Register function prototypes that return pointers */
@@ -2664,6 +2680,20 @@ char *codegen_generate(Program *prog) {
         if (prog->globals[i].is_func_decl && prog->globals[i].is_ptr) {
             GROW(ptr_ret_funcs, nptr_ret_funcs, ptr_ret_funcs_cap, char *);
             ptr_ret_funcs[nptr_ret_funcs++] = prog->globals[i].name;
+        }
+    }
+
+    /* Register functions that return unsigned */
+    for (int i = 0; i < prog->nprotos; i++) {
+        if (prog->protos[i].ret_is_unsigned) {
+            GROW(unsigned_ret_funcs, nunsigned_ret_funcs, unsigned_ret_funcs_cap, char *);
+            unsigned_ret_funcs[nunsigned_ret_funcs++] = prog->protos[i].name;
+        }
+    }
+    for (int i = 0; i < prog->nfuncs; i++) {
+        if (prog->funcs[i].ret_is_unsigned) {
+            GROW(unsigned_ret_funcs, nunsigned_ret_funcs, unsigned_ret_funcs_cap, char *);
+            unsigned_ret_funcs[nunsigned_ret_funcs++] = prog->funcs[i].name;
         }
     }
 

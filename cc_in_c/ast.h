@@ -199,6 +199,7 @@ typedef struct {
     Block body;
     int is_static;
     int ret_is_ptr;
+    int ret_is_unsigned;
     int is_variadic;
     char *ret_struct_type; /* struct type returned (NULL if not struct ptr) */
 } FuncDef;
@@ -218,6 +219,7 @@ typedef struct {
 typedef struct {
     char *name;
     int ret_is_ptr;
+    int ret_is_unsigned;
     int is_variadic;
     int nparams;
     char *ret_struct_type; /* struct type returned (NULL if not struct ptr) */

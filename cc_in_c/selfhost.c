@@ -84,6 +84,7 @@ struct FuncDef {
   struct Stmt **body;
   int nbody;
   int ret_is_ptr;
+  int ret_is_unsigned;
   int is_variadic;
   int *param_is_char;
   int *param_is_intptr;
@@ -143,6 +144,7 @@ struct Program {
   int nfuncs;
   int **proto_names;
   int *proto_ret_is_ptr;
+  int *proto_ret_is_unsigned;
   int *proto_is_variadic;
   int *proto_nparams;
   int **proto_ret_stype;
@@ -161,6 +163,10 @@ int outcap;
 // Ptr-returning function names (for sxtw after bl)
 int *ptr_ret_names[16384];
 int n_ptr_ret;
+
+// Unsigned-returning function names (skip sxtw after bl)
+int *unsigned_ret_names[16384];
+int n_unsigned_ret;
 
 // Struct-returning function names and their struct types
 int *struct_ret_names[4096];
@@ -3367,6 +3373,7 @@ struct FuncDef *parse_func() {
     if (p_match(TK_KW, "float") || p_match(TK_KW, "double")) { ret_is_float = 1; }
     cur_pos = sv_rf; }
   int *ret_stype = parse_base_type();
+  int ret_is_unsigned = last_type_unsigned;
   int ret_is_ptr = 0;
   while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); ret_is_ptr = 1; }
   int *name = my_strdup(p_eat(TK_ID, 0));
@@ -3477,6 +3484,7 @@ struct FuncDef *parse_func() {
     fd->body = 0;
     fd->nbody = 0 - 1;
     fd->ret_is_ptr = ret_is_ptr;
+    fd->ret_is_unsigned = ret_is_unsigned;
     fd->is_variadic = is_variadic;
     fd->param_is_char = param_is_char;
     fd->param_is_intptr = param_is_intptr;
@@ -3498,6 +3506,7 @@ struct FuncDef *parse_func() {
   fd->body = body;
   fd->nbody = blen;
   fd->ret_is_ptr = ret_is_ptr;
+  fd->ret_is_unsigned = ret_is_unsigned;
   fd->is_variadic = is_variadic;
   fd->param_is_char = param_is_char;
   fd->param_is_intptr = param_is_intptr;
@@ -4150,6 +4159,7 @@ struct Program *parse_program() {
   int nf = 0;
   int **proto_names = my_malloc(4096 * 8);
   int *proto_rip = my_malloc(4096 * 8);
+  int *proto_riu = my_malloc(4096 * 8);
   int *proto_is_var = my_malloc(4096 * 8);
   int *proto_np = my_malloc(4096 * 8);
   int **proto_rs = my_malloc(4096 * 8);
@@ -4219,6 +4229,7 @@ struct Program *parse_program() {
         if (fd->nbody == 0 - 1) {
           proto_names[nprotos] = fd->name;
           proto_rip[nprotos] = fd->ret_is_ptr;
+          proto_riu[nprotos] = fd->ret_is_unsigned;
           proto_is_var[nprotos] = fd->is_variadic;
           proto_np[nprotos] = fd->nparams;
           proto_rs[nprotos] = fd->ret_stype;
@@ -4301,6 +4312,7 @@ struct Program *parse_program() {
           if (fd->nbody == 0 - 1) {
             proto_names[nprotos] = fd->name;
             proto_rip[nprotos] = fd->ret_is_ptr;
+            proto_riu[nprotos] = fd->ret_is_unsigned;
             proto_is_var[nprotos] = fd->is_variadic;
             proto_np[nprotos] = fd->nparams;
             proto_rs[nprotos] = fd->ret_stype;
@@ -4396,6 +4408,7 @@ struct Program *parse_program() {
         if (fd->nbody == 0 - 1) {
           proto_names[nprotos] = fd->name;
           proto_rip[nprotos] = fd->ret_is_ptr;
+          proto_riu[nprotos] = fd->ret_is_unsigned;
           proto_is_var[nprotos] = fd->is_variadic;
           proto_np[nprotos] = fd->nparams;
           proto_rs[nprotos] = fd->ret_stype;
@@ -4420,6 +4433,7 @@ struct Program *parse_program() {
   p->nfuncs = nf;
   p->proto_names = proto_names;
   p->proto_ret_is_ptr = proto_rip;
+  p->proto_ret_is_unsigned = proto_riu;
   p->proto_is_variadic = proto_is_var;
   p->proto_nparams = proto_np;
   p->proto_ret_stype = proto_rs;
@@ -4454,6 +4468,15 @@ int func_returns_ptr(int *name) {
   int i = 0;
   while (i < n_ptr_ret) {
     if (my_strcmp(ptr_ret_names[i], name) == 0) { return 1; }
+    i++;
+  }
+  return 0;
+}
+
+int func_returns_unsigned(int *name) {
+  int i = 0;
+  while (i < n_unsigned_ret) {
+    if (my_strcmp(unsigned_ret_names[i], name) == 0) { return 1; }
     i++;
   }
   return 0;
@@ -5930,6 +5953,8 @@ int gen_value(struct Expr *e) {
     int use_unsigned = 0;
     if (e->left->kind == ND_VAR && cg_is_unsigned(e->left->sval)) { use_unsigned = 1; }
     if (e->right->kind == ND_VAR && cg_is_unsigned(e->right->sval)) { use_unsigned = 1; }
+    if (e->left->kind == ND_CALL && func_returns_unsigned(e->left->sval)) { use_unsigned = 1; }
+    if (e->right->kind == ND_CALL && func_returns_unsigned(e->right->sval)) { use_unsigned = 1; }
 
     if (my_strcmp(bin_op, "+") == 0) { emit_line("\tadd\tx0, x1, x0"); }
     else if (my_strcmp(bin_op, "-") == 0) {
@@ -6098,7 +6123,7 @@ int gen_value(struct Expr *e) {
         emit_num(var_space);
         emit_ch('\n');
       }
-      if (func_returns_ptr(name) == 0) {
+      if (func_returns_ptr(name) == 0 && func_returns_unsigned(name) == 0) {
         emit_line("\tsxtw\tx0, w0");
       }
       return 0;
@@ -6231,7 +6256,7 @@ int gen_value(struct Expr *e) {
     }
     if (func_returns_float(name)) {
       emit_line("\tfmov\tx0, d0");
-    } else if (func_returns_ptr(name) == 0 && func_ret_stype(name) == 0) {
+    } else if (func_returns_ptr(name) == 0 && func_ret_stype(name) == 0 && func_returns_unsigned(name) == 0) {
       emit_line("\tsxtw\tx0, w0");
     }
     return 0;
@@ -6819,6 +6844,7 @@ int codegen(struct Program *prog) {
   nloop = 0;
   ncg_s = 0;
   n_ptr_ret = 0;
+  n_unsigned_ret = 0;
   nsl = 0;
 
   // Register ptr-returning functions from prototypes
@@ -6837,6 +6863,26 @@ int codegen(struct Program *prog) {
     if (fd->ret_is_ptr != 0 || fd->ret_stype != 0) {
       ptr_ret_names[n_ptr_ret] = fd->name;
       n_ptr_ret++;
+    }
+    pi++;
+  }
+
+  // Register unsigned-returning functions from prototypes
+  pi = 0;
+  while (pi < prog->nprotos) {
+    if (prog->proto_ret_is_unsigned[pi] != 0) {
+      unsigned_ret_names[n_unsigned_ret] = prog->proto_names[pi];
+      n_unsigned_ret++;
+    }
+    pi++;
+  }
+  // Register unsigned-returning functions from definitions
+  pi = 0;
+  while (pi < prog->nfuncs) {
+    fd = prog->funcs[pi];
+    if (fd->ret_is_unsigned != 0) {
+      unsigned_ret_names[n_unsigned_ret] = fd->name;
+      n_unsigned_ret++;
     }
     pi++;
   }

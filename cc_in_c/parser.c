@@ -2042,6 +2042,7 @@ static Stmt *parse_stmt(void) {
 static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
     nlocal_vars = 0;
     char *ret_stype = parse_base_type();  /* return type */
+    int ret_is_unsigned = last_type_unsigned;
     int ret_is_ptr = 0;
     while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); ret_is_ptr = 1; }
     Tok *name_tok = eat(TK_ID, NULL);
@@ -2173,6 +2174,7 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
         if (proto) {
             proto->name = xstrdup(name_tok->value);
             proto->ret_is_ptr = ret_is_ptr;
+            proto->ret_is_unsigned = ret_is_unsigned;
             proto->is_variadic = is_variadic;
             proto->nparams = nparams;
             proto->ret_struct_type = ret_stype ? xstrdup(ret_stype) : NULL;
@@ -2196,6 +2198,7 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
     fd->body = body;
     fd->is_static = is_static;
     fd->ret_is_ptr = ret_is_ptr;
+    fd->ret_is_unsigned = ret_is_unsigned;
     fd->is_variadic = is_variadic;
     fd->ret_struct_type = ret_stype ? xstrdup(ret_stype) : NULL;
     return 1;
@@ -2414,6 +2417,7 @@ static void skip_funcptr_return_decl(int is_static,
         FuncProto p;
         p.name = xstrdup(name_tok->value);
         p.ret_is_ptr = 1;
+        p.ret_is_unsigned = 0;
         p.is_variadic = 0;
         p.nparams = 0;
         (*protos)[(*nprotos)++] = p;
@@ -2441,6 +2445,7 @@ static void skip_funcptr_return_decl(int is_static,
         fd.body.stmts.cap = 0;
         fd.is_static = is_static;
         fd.ret_is_ptr = 1;
+        fd.ret_is_unsigned = 0;
         fd.is_variadic = 0;
         (*funcs)[(*nfuncs)++] = fd;
     }
