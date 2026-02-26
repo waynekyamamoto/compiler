@@ -1784,6 +1784,22 @@ static void gen_value(Expr *e, FuncLayout *layout) {
                     if (gv && gv->is_structvar && gv->struct_type)
                         arg_stype = gv->struct_type;
                 }
+            } else if (args[i]->kind == ND_INDEX && args[i]->u.index.base->kind == ND_VAR) {
+                /* Element of struct array: items[i] passed by value */
+                const char *base_name = args[i]->u.index.base->u.var_name;
+                /* Check local struct array */
+                arg_stype = find_structvar_type(layout, base_name);
+                if (arg_stype && !is_array(layout, base_name))
+                    arg_stype = NULL; /* Not an array, skip */
+                /* Check local struct pointer */
+                if (!arg_stype)
+                    arg_stype = find_ptr_structvar_type(layout, base_name);
+                /* Check global struct array */
+                if (!arg_stype) {
+                    GlobalVarEntry *gv = find_global(base_name);
+                    if (gv && gv->struct_type)
+                        arg_stype = gv->struct_type;
+                }
             } else if (args[i]->kind == ND_CALL && args[i]->u.call.name) {
                 arg_stype = func_ret_struct_type(args[i]->u.call.name);
                 if (arg_stype) arg_is_call_ret = 1;

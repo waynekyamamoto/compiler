@@ -5493,6 +5493,11 @@ int gen_value(struct Expr *e) {
       gen_addr(e);
       return 0;
     }
+    // Local struct array: items[i] returns struct address (no load)
+    if (e->left->kind == ND_VAR && cg_is_array(e->left->sval) && cg_structvar_type(e->left->sval) != 0) {
+      gen_addr(e);
+      return 0;
+    }
     gen_addr(e);
     if (e->left->kind == ND_VAR && (cg_is_char(e->left->sval) || cg_is_char_larr(e->left->sval))) {
       emit_line("\tldrb\tw0, [x0]");
