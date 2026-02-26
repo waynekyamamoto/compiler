@@ -1466,10 +1466,17 @@ static void gen_value(Expr *e, FuncLayout *layout) {
             const char *pstype = NULL;
             int scale_rhs = 0; /* 1 = scale x0 (rhs), 0 = scale x1 (lhs) */
             const char *lhs_pstype = NULL, *rhs_pstype = NULL;
-            if (e->u.binary.lhs->kind == ND_VAR)
+            if (e->u.binary.lhs->kind == ND_VAR) {
                 lhs_pstype = find_ptr_structvar_type(layout, e->u.binary.lhs->u.var_name);
-            if (e->u.binary.rhs->kind == ND_VAR)
+                /* Also check struct arrays (items + N where items is struct array) */
+                if (!lhs_pstype && is_array(layout, e->u.binary.lhs->u.var_name))
+                    lhs_pstype = find_structvar_type(layout, e->u.binary.lhs->u.var_name);
+            }
+            if (e->u.binary.rhs->kind == ND_VAR) {
                 rhs_pstype = find_ptr_structvar_type(layout, e->u.binary.rhs->u.var_name);
+                if (!rhs_pstype && is_array(layout, e->u.binary.rhs->u.var_name))
+                    rhs_pstype = find_structvar_type(layout, e->u.binary.rhs->u.var_name);
+            }
             if (lhs_pstype && rhs_pstype && strcmp(op, "-") == 0) {
                 /* struct ptr - struct ptr: no scaling, divide after sub */
                 /* handled in the subtraction code below */

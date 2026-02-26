@@ -5811,9 +5811,16 @@ int gen_value(struct Expr *e) {
       int *rhs_pstype = 0;
       if (e->left->kind == ND_VAR) {
         lhs_pstype = cg_ptr_structvar_type(e->left->sval);
+        // Also check struct arrays (items + N where items is struct array)
+        if (lhs_pstype == 0 && cg_is_array(e->left->sval)) {
+          lhs_pstype = cg_structvar_type(e->left->sval);
+        }
       }
       if (e->right->kind == ND_VAR) {
         rhs_pstype = cg_ptr_structvar_type(e->right->sval);
+        if (rhs_pstype == 0 && cg_is_array(e->right->sval)) {
+          rhs_pstype = cg_structvar_type(e->right->sval);
+        }
       }
       if (lhs_pstype != 0 && rhs_pstype != 0 && my_strcmp(bin_op, "-") == 0) {
         // struct ptr - struct ptr: no scaling, divide after sub
