@@ -87,6 +87,7 @@ struct FuncDef {
   int ret_is_unsigned;
   int is_variadic;
   int *param_is_char;
+  int *param_is_unsigned;
   int *param_is_intptr;
   int *ret_stype;
   int **param_stypes;
@@ -3381,6 +3382,7 @@ struct FuncDef *parse_func() {
 
   int **params = my_malloc(64 * 8);
   int *param_is_char = my_malloc(64 * 4);
+  int *param_is_unsigned = my_malloc(64 * 4);
   int *param_is_intptr = my_malloc(64 * 4);
   int *param_is_float = my_malloc(64 * 4);
   int **param_stypes = my_malloc(64 * 8);
@@ -3410,6 +3412,7 @@ struct FuncDef *parse_func() {
         cur_pos = sv2;
       }
       int *stype = parse_base_type();
+      int p_is_unsigned = last_type_unsigned;
       int is_ptr = 0;
       int is_funcptr = 0;
       // Function pointer param: type (*name)(params)
@@ -3453,6 +3456,7 @@ struct FuncDef *parse_func() {
         }
         params[np] = my_strdup(pname);
         param_is_char[np] = (p_is_char && is_ptr > 0) ? 1 : 0;
+        param_is_unsigned[np] = p_is_unsigned;
         param_is_intptr[np] = (is_ptr > 0 && p_is_char == 0 && stype == 0) ? 1 : 0;
         param_is_float[np] = p_is_float;
         if (stype != 0 && is_ptr == 0) {
@@ -3481,7 +3485,7 @@ struct FuncDef *parse_func() {
   if (p_match(TK_OP, ";")) {
     p_eat(TK_OP, ";");
     // Store proto info: name and ret_is_ptr
-    fd = my_malloc(112);
+    fd = my_malloc(128);
     fd->name = name;
     fd->params = 0;
     fd->nparams = np;
@@ -3491,6 +3495,7 @@ struct FuncDef *parse_func() {
     fd->ret_is_unsigned = ret_is_unsigned;
     fd->is_variadic = is_variadic;
     fd->param_is_char = param_is_char;
+    fd->param_is_unsigned = param_is_unsigned;
     fd->param_is_intptr = param_is_intptr;
     if (ret_is_ptr == 0) { fd->ret_stype = ret_stype; }
     if (ret_stype != 0) { struct_ret_names[n_struct_ret] = my_strdup(name); struct_ret_stypes[n_struct_ret] = my_strdup(ret_stype); n_struct_ret++; }
@@ -3503,7 +3508,7 @@ struct FuncDef *parse_func() {
   int blen = 0;
   struct Stmt **body = parse_block(&blen);
 
-  fd = my_malloc(112);
+  fd = my_malloc(128);
   fd->name = name;
   fd->params = params;
   fd->nparams = np;
@@ -3513,6 +3518,7 @@ struct FuncDef *parse_func() {
   fd->ret_is_unsigned = ret_is_unsigned;
   fd->is_variadic = is_variadic;
   fd->param_is_char = param_is_char;
+  fd->param_is_unsigned = param_is_unsigned;
   fd->param_is_intptr = param_is_intptr;
   if (ret_is_ptr == 0) { fd->ret_stype = ret_stype; }
   if (ret_stype != 0) { struct_ret_names[n_struct_ret] = my_strdup(name); struct_ret_stypes[n_struct_ret] = my_strdup(ret_stype); n_struct_ret++; }
@@ -5199,6 +5205,12 @@ int layout_func(struct FuncDef *f) {
       lay_char_name[nlay_char] = my_strdup(f->params[i]);
       nlay_char++;
     }
+    if (f->param_is_unsigned != 0) {
+      if (f->param_is_unsigned[i]) {
+        lay_unsigned_name[nlay_unsigned] = my_strdup(f->params[i]);
+        nlay_unsigned++;
+      }
+    }
     if (f->param_is_intptr != 0 && f->param_is_intptr[i]) {
       lay_intptr_name[nlay_intptr] = my_strdup(f->params[i]);
       nlay_intptr++;
@@ -5959,7 +5971,6 @@ int gen_value(struct Expr *e) {
     if (e->right->kind == ND_VAR && cg_is_unsigned(e->right->sval)) { use_unsigned = 1; }
     if (e->left->kind == ND_CALL && func_returns_unsigned(e->left->sval)) { use_unsigned = 1; }
     if (e->right->kind == ND_CALL && func_returns_unsigned(e->right->sval)) { use_unsigned = 1; }
-
     if (my_strcmp(bin_op, "+") == 0) { emit_line("\tadd\tx0, x1, x0"); }
     else if (my_strcmp(bin_op, "-") == 0) {
       emit_line("\tsub\tx0, x1, x0");

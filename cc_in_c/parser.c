@@ -2054,6 +2054,7 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
     char **param_stypes = NULL;
     int *param_ptrs = NULL;
     int *param_chars = NULL;
+    int *param_unsigneds = NULL;
     int nparams = 0;
     int pcap = 0;
     int is_variadic = 0;
@@ -2075,6 +2076,7 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
                 }
                 char *stype = parse_base_type();
                 int p_is_char = last_type_is_char;
+                int p_is_unsigned = last_type_unsigned;
                 int is_ptr = 0;
                 int is_funcptr = 0;
                 /* Function pointer param: type (*name)(params) or type (*)(params) */
@@ -2111,10 +2113,12 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
                         param_stypes = realloc(param_stypes, pcap * sizeof(char *));
                         param_ptrs = realloc(param_ptrs, pcap * sizeof(int));
                         param_chars = realloc(param_chars, pcap * sizeof(int));
+                        param_unsigneds = realloc(param_unsigneds, pcap * sizeof(int));
                     }
                     param_stypes[nparams] = stype ? xstrdup(stype) : NULL;
                     param_ptrs[nparams] = is_ptr;
                     param_chars[nparams] = p_is_char;
+                    param_unsigneds[nparams] = p_is_unsigned;
                     params[nparams++] = xstrdup("__unnamed");
                     if (match(TK_OP, ",")) { eat(TK_OP, ","); continue; }
                     break;
@@ -2139,10 +2143,12 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
                         param_stypes = realloc(param_stypes, pcap * sizeof(char *));
                         param_ptrs = realloc(param_ptrs, pcap * sizeof(int));
                         param_chars = realloc(param_chars, pcap * sizeof(int));
+                        param_unsigneds = realloc(param_unsigneds, pcap * sizeof(int));
                     }
                     param_stypes[nparams] = stype ? xstrdup(stype) : NULL;
                     param_ptrs[nparams] = is_ptr;
                     param_chars[nparams] = p_is_char;
+                    param_unsigneds[nparams] = p_is_unsigned;
                     params[nparams++] = xstrdup(pname->value);
                     if (stype)
                         add_local(pname->value, stype, is_ptr);
@@ -2154,10 +2160,12 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
                         param_stypes = realloc(param_stypes, pcap * sizeof(char *));
                         param_ptrs = realloc(param_ptrs, pcap * sizeof(int));
                         param_chars = realloc(param_chars, pcap * sizeof(int));
+                        param_unsigneds = realloc(param_unsigneds, pcap * sizeof(int));
                     }
                     param_stypes[nparams] = stype ? xstrdup(stype) : NULL;
                     param_ptrs[nparams] = is_ptr;
                     param_chars[nparams] = p_is_char;
+                    param_unsigneds[nparams] = p_is_unsigned;
                     params[nparams++] = xstrdup("__unnamed");
                 }
                 if (match(TK_OP, ",")) {
@@ -2196,6 +2204,7 @@ static int parse_func_or_proto(FuncDef *fd, FuncProto *proto, int is_static) {
     fd->param_struct_types = param_stypes;
     fd->param_is_ptr = param_ptrs;
     fd->param_is_char = param_chars;
+    fd->param_is_unsigned = param_unsigneds;
     fd->nparams = nparams;
     fd->body = body;
     fd->is_static = is_static;

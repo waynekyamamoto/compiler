@@ -195,6 +195,7 @@ typedef struct {
     char **param_struct_types; /* struct type per param, NULL if not struct */
     int *param_is_ptr;         /* 1 if param is pointer, per param */
     int *param_is_char;        /* 1 if param is char type, per param */
+    int *param_is_unsigned;    /* 1 if param is unsigned type, per param */
     int nparams;
     Block body;
     int is_static;

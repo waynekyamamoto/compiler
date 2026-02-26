@@ -903,6 +903,18 @@ static FuncLayout layout_func(FuncDef *f) {
         }
     }
 
+    /* Register unsigned params */
+    if (f->param_is_unsigned) {
+        for (int i = 0; i < f->nparams; i++) {
+            if (f->param_is_unsigned[i]) {
+                if (layout.nunsigned_slots < 256) {
+                    layout.unsigned_slots[layout.nunsigned_slots].name = xstrdup(f->params[i]);
+                    layout.nunsigned_slots++;
+                }
+            }
+        }
+    }
+
     walk_block_for_layout(&f->body, &layout, &offset);
 
     layout.stack_size = ((offset + 15) / 16) * 16;
