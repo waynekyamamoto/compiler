@@ -3419,13 +3419,17 @@ struct FuncDef *parse_func() {
         is_ptr = 1;
         is_funcptr = 1;
       }
+      int ptr_depth = 0;
       while (p_match(TK_OP, "*")) {
         p_eat(TK_OP, "*");
         is_ptr = 1;
+        ptr_depth = ptr_depth + 1;
       }
       // Skip post-pointer qualifiers and more pointers: char *const *argv
       while (p_match(TK_KW, "const") || p_match(TK_KW, "volatile") || p_match(TK_KW, "restrict") || p_match(TK_KW, "__restrict")) { cur_pos++; }
-      while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); is_ptr = 1; }
+      while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); is_ptr = 1; ptr_depth = ptr_depth + 1; }
+      // char** or deeper: not a char pointer
+      if (ptr_depth > 1) p_is_char = 0;
       // Check for funcptr after pointer stars: type *(*name)(params)
       if (is_funcptr == 0 && is_funcptr_decl()) {
         p_eat(TK_OP, "(");
@@ -4991,11 +4995,11 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
           lay_unsigned_name[nlay_unsigned] = my_strdup(vd->name);
           nlay_unsigned++;
         }
-        if (vd->is_char && vd->is_ptr > 0 && vd->arr_size < 0) {
+        if (vd->is_char && vd->is_ptr == 1 && vd->arr_size < 0) {
           lay_char_name[nlay_char] = my_strdup(vd->name);
           nlay_char++;
         }
-        if (vd->is_char && vd->is_ptr > 0 && vd->arr_size >= 0) {
+        if (vd->is_char && vd->is_ptr == 1 && vd->arr_size >= 0) {
           lay_char_arr_name[nlay_char_arr] = my_strdup(vd->name);
           nlay_char_arr++;
         }

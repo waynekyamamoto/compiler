@@ -324,6 +324,8 @@ static int anon_struct_counter;
 
 static char *parse_base_type(void) {
     skip_qualifiers();
+    last_type_is_char = 0;
+    last_type_unsigned = 0;
 
     if (match(TK_KW, "struct") || match(TK_KW, "union")) {
         int is_union = match(TK_KW, "union");
