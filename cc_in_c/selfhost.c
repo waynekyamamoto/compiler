@@ -5550,6 +5550,8 @@ int gen_value(struct Expr *e) {
     sa_type = 0;
     if (e->left->kind == ND_VAR) {
       sa_type = cg_structvar_type(e->left->sval);
+      // Also check global struct vars
+      if (sa_type == 0) { sa_type = cg_global_stype(e->left->sval); }
     }
     if (sa_type == 0 && (e->left->kind == ND_FIELD || e->left->kind == ND_ARROW)) {
       sa_type = cg_field_struct_type(e->left->sval2, e->left->sval);

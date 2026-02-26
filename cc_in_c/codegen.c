@@ -1219,8 +1219,8 @@ static void gen_value(Expr *e, FuncLayout *layout) {
             if (!st_type && tgt->kind == ND_VAR) {
                 for (int gi = 0; gi < nglobal_vars; gi++) {
                     if (strcmp(global_vars[gi].name, tgt->u.var_name) == 0 &&
-                        global_vars[gi].is_structvar) {
-                        st_type = global_vars[gi].name;
+                        global_vars[gi].is_structvar && global_vars[gi].struct_type) {
+                        st_type = global_vars[gi].struct_type;
                         break;
                     }
                 }
