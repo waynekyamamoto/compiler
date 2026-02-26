@@ -5807,13 +5807,22 @@ int gen_value(struct Expr *e) {
     if (my_strcmp(bin_op, "+") == 0 || my_strcmp(bin_op, "-") == 0) {
       int *pstype = 0;
       int scale_rhs = 0;
+      int *lhs_pstype = 0;
+      int *rhs_pstype = 0;
       if (e->left->kind == ND_VAR) {
-        pstype = cg_ptr_structvar_type(e->left->sval);
-        if (pstype != 0) { scale_rhs = 1; }
+        lhs_pstype = cg_ptr_structvar_type(e->left->sval);
       }
-      if (pstype == 0 && e->right->kind == ND_VAR) {
-        pstype = cg_ptr_structvar_type(e->right->sval);
-        if (pstype != 0) { scale_rhs = 0; }
+      if (e->right->kind == ND_VAR) {
+        rhs_pstype = cg_ptr_structvar_type(e->right->sval);
+      }
+      if (lhs_pstype != 0 && rhs_pstype != 0 && my_strcmp(bin_op, "-") == 0) {
+        // struct ptr - struct ptr: no scaling, divide after sub
+      } else if (lhs_pstype != 0) {
+        pstype = lhs_pstype;
+        scale_rhs = 1;
+      } else if (rhs_pstype != 0) {
+        pstype = rhs_pstype;
+        scale_rhs = 0;
       }
       if (pstype != 0) {
         int scale = cg_struct_nfields(pstype) * 8;
@@ -5886,10 +5895,17 @@ int gen_value(struct Expr *e) {
     if (my_strcmp(bin_op, "+") == 0) { emit_line("\tadd\tx0, x1, x0"); }
     else if (my_strcmp(bin_op, "-") == 0) {
       emit_line("\tsub\tx0, x1, x0");
-      // ptr - ptr: divide by element size (8) to get element count
-      if (e->left->kind == ND_VAR && cg_is_intptr(e->left->sval) &&
-          e->right->kind == ND_VAR && cg_is_intptr(e->right->sval)) {
-        emit_line("\tasr\tx0, x0, #3");
+      // ptr - ptr: divide by element size to get element count
+      if (e->left->kind == ND_VAR && e->right->kind == ND_VAR) {
+        int *left_pstype = cg_ptr_structvar_type(e->left->sval);
+        int *right_pstype = cg_ptr_structvar_type(e->right->sval);
+        if (left_pstype != 0 && right_pstype != 0) {
+          int scale = cg_struct_nfields(left_pstype) * 8;
+          emit_s("\tmov\tx9, #"); emit_num(scale); emit_ch('\n');
+          emit_line("\tsdiv\tx0, x0, x9");
+        } else if (cg_is_intptr(e->left->sval) && cg_is_intptr(e->right->sval)) {
+          emit_line("\tasr\tx0, x0, #3");
+        }
       }
     }
     else if (my_strcmp(bin_op, "*") == 0) { emit_line("\tmul\tx0, x1, x0"); }

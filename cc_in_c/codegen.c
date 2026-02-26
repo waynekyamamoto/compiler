@@ -1465,13 +1465,20 @@ static void gen_value(Expr *e, FuncLayout *layout) {
         if (strcmp(op, "+") == 0 || strcmp(op, "-") == 0) {
             const char *pstype = NULL;
             int scale_rhs = 0; /* 1 = scale x0 (rhs), 0 = scale x1 (lhs) */
-            if (e->u.binary.lhs->kind == ND_VAR) {
-                pstype = find_ptr_structvar_type(layout, e->u.binary.lhs->u.var_name);
-                if (pstype) scale_rhs = 1;
-            }
-            if (!pstype && e->u.binary.rhs->kind == ND_VAR) {
-                pstype = find_ptr_structvar_type(layout, e->u.binary.rhs->u.var_name);
-                if (pstype) scale_rhs = 0;
+            const char *lhs_pstype = NULL, *rhs_pstype = NULL;
+            if (e->u.binary.lhs->kind == ND_VAR)
+                lhs_pstype = find_ptr_structvar_type(layout, e->u.binary.lhs->u.var_name);
+            if (e->u.binary.rhs->kind == ND_VAR)
+                rhs_pstype = find_ptr_structvar_type(layout, e->u.binary.rhs->u.var_name);
+            if (lhs_pstype && rhs_pstype && strcmp(op, "-") == 0) {
+                /* struct ptr - struct ptr: no scaling, divide after sub */
+                /* handled in the subtraction code below */
+            } else if (lhs_pstype) {
+                pstype = lhs_pstype;
+                scale_rhs = 1;
+            } else if (rhs_pstype) {
+                pstype = rhs_pstype;
+                scale_rhs = 0;
             }
             if (pstype) {
                 int nf = cg_struct_nfields(pstype);
