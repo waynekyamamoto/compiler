@@ -86,7 +86,7 @@ typedef struct {
 struct Expr {
     ExprKind kind;
     union {
-        int num;                    /* ND_NUM */
+        long num;                   /* ND_NUM */
         char *var_name;             /* ND_VAR */
         char *str_val;              /* ND_STRLIT (without quotes) */
         struct { char *name; ExprArray args; } call;  /* ND_CALL */
@@ -239,7 +239,7 @@ typedef struct {
 
 /* ---- Constructors ---- */
 
-Expr *new_num(int val);
+Expr *new_num(long val);
 Expr *new_var(const char *name);
 Expr *new_strlit(const char *val);
 Expr *new_call(const char *name, ExprArray args);

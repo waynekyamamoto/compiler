@@ -1074,7 +1074,7 @@ static void gen_addr(Expr *e, FuncLayout *layout) {
 
 static void gen_value(Expr *e, FuncLayout *layout) {
     if (e->kind == ND_NUM) {
-        int val = e->u.num;
+        long val = e->u.num;
         if (val >= -65535 && val <= 65535) {
             emit("\tmov\tx0, #%d", val);
         } else {

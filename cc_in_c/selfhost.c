@@ -3561,12 +3561,20 @@ struct GDecl *parse_global_decl() {
     glv_isptr[nglv] = is_ptr;
     nglv++;
   }
+  int array_size = 0 - 1;
   if (is_funcptr) {
+    if (p_match(TK_OP, "[")) {
+      p_eat(TK_OP, "[");
+      if (p_match(TK_OP, "]")) {
+        array_size = 0;
+      } else {
+        array_size = parse_const_expr();
+      }
+      p_eat(TK_OP, "]");
+    }
     p_eat(TK_OP, ")");
     skip_param_list();
   }
-
-  int array_size = 0 - 1;
   if (p_match(TK_OP, "[")) {
     p_eat(TK_OP, "[");
     if (p_match(TK_OP, "]")) {
@@ -4600,7 +4608,7 @@ int cg_field_index(int *sname, int *fname) {
           if (cg_sfield_types[i][j] != 0) {
             f_sl = cg_struct_nfields(cg_sfield_types[i][j]);
           }
-          if (cg_s_fa[i] != 0 && cg_s_fa[i][j] > 1) {
+          if (cg_s_fa[i] != 0 && cg_s_fa[i][j] > 0) {
             f_sl = f_sl * cg_s_fa[i][j];
           }
           slot += f_sl;
@@ -4693,7 +4701,7 @@ int cg_struct_nfields(int *sname) {
           f_slots = cg_struct_nfields(cg_sfield_types[i][j]);
         }
         // Array fields occupy arr_size slots (or arr_size * nested_struct_size)
-        if (cg_s_fa[i] != 0 && cg_s_fa[i][j] > 1) {
+        if (cg_s_fa[i] != 0 && cg_s_fa[i][j] > 0) {
           f_slots = f_slots * cg_s_fa[i][j];
         }
         total += f_slots;

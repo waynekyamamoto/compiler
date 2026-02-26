@@ -1400,7 +1400,17 @@ static Expr *parse_primary(void) {
 
     if (t->kind == TK_NUMBER) {
         eat(TK_NUMBER, NULL);
-        e = new_num(atoi(t->value));
+        {
+            char *endp;
+            long lv = strtol(t->value, &endp, 0);
+            /* If L/l suffix present, keep full 64-bit value */
+            int has_l = (*endp == 'l' || *endp == 'L');
+            if (!has_l && lv > 2147483647L && lv <= 4294967295L) {
+                /* No L suffix and fits in unsigned 32-bit: sign-extend to match C int semantics */
+                lv = (long)(int)(unsigned int)lv;
+            }
+            e = new_num(lv);
+        }
     } else if (t->kind == TK_STRING) {
         eat(TK_STRING, NULL);
         e = new_strlit(t->value);

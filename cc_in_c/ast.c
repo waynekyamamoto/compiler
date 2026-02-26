@@ -21,7 +21,7 @@ void stmtarray_push(StmtArray *a, Stmt *s) {
     a->data[a->len++] = s;
 }
 
-Expr *new_num(int val) {
+Expr *new_num(long val) {
     Expr *e = xmalloc(sizeof(Expr));
     e->kind = ND_NUM;
     e->u.num = val;
