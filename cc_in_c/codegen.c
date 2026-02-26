@@ -2089,14 +2089,15 @@ static void gen_stmt(Stmt *st, FuncLayout *layout, const char *ret_label) {
             emit("\tcmp\tx0, x1");
             emit("\tb.eq\t%s", case_labels[i]);
         }
-        /* Jump to default or end */
-        if (default_label)
+        /* Jump to default or pop condition and jump to end */
+        if (default_label) {
+            /* Default goes through trampoline which pops the condition */
             emit("\tb\t%s", default_label);
-        else
+        } else {
+            /* No default: pop condition before jumping to end */
+            emit("\tadd\tsp, sp, #16");
             emit("\tb\t%s", end);
-
-        /* Pop condition */
-        emit("\tadd\tsp, sp, #16");
+        }
 
         /* But we need to pop BEFORE emitting case bodies. Let me restructure. */
         /* Actually the pop should happen before case bodies execute.
