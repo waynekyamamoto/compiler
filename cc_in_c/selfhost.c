@@ -7985,7 +7985,9 @@ int main(int argc, int *argv) {
   // __LINE__ and __FILE__ are handled as special cases in the macro expander
   if_depth = 0;
 
-  int *cleaned = my_malloc(srclen * 4 + 1);
+  int pp_bufsz = srclen * 4 + 1;
+  if (pp_bufsz < 262144) { pp_bufsz = 262144; }
+  int *cleaned = my_malloc(pp_bufsz);
   int co = 0;
   co = pp_preprocess(srcbuf, srclen, c_path, cleaned, co, 0);
   __write_byte(cleaned, co, 0);
