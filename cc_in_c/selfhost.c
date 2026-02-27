@@ -8326,8 +8326,7 @@ int main(int argc, int *argv) {
         { int h = 0; int ci = 0; while (ci < ilen) { h = h * 31 + __read_byte(cleaned, istart + ci); ci++; } mc = macro_ht_head[h & 65535]; }
         while (mc >= 0) {
           if (macro_nlens[mc] == ilen &&
-              my_strcmp(idstr2, macro_names[mc]) == 0 &&
-              (macro_nparams[mc] < 0 || istart >= macro_def_pos[mc])) {
+              my_strcmp(idstr2, macro_names[mc]) == 0) {
             if (macro_nparams[mc] >= 0) {
               int fj2 = ei;
               while (fj2 < co && (__read_byte(cleaned, fj2) == ' ' || __read_byte(cleaned, fj2) == '\t')) { fj2++; }
