@@ -3704,19 +3704,18 @@ struct FuncDef *skip_funcptr_return() {
     p_eat(TK_OP, ")");
   }
 
-  struct FuncDef *fd = my_malloc(328);
-  fd->name = fname;
-  fd->nparams = 0;
-  fd->ret_is_ptr = 1;
-  fd->ret_is_unsigned = 0;
-  fd->is_variadic = 0;
-  fd->ret_stype = 0;
-  fd->ret_is_float = 0;
-  fd->is_static = 0;
+  struct FuncDef *fpr = my_malloc(328);
+  fpr->name = fname;
+  fpr->nparams = 0;
+  fpr->ret_is_ptr = 1;
+  fpr->ret_is_unsigned = 0;
+  fpr->is_variadic = 0;
+  fpr->ret_stype = 0;
+  fpr->ret_is_float = 0;
 
   if (p_match(TK_OP, ";")) {
     p_eat(TK_OP, ";");
-    fd->nbody = 0 - 1; // prototype
+    fpr->nbody = 0 - 1; // prototype
   } else if (p_match(TK_OP, "{")) {
     p_eat(TK_OP, "{");
     int bd = 1;
@@ -3726,11 +3725,11 @@ struct FuncDef *skip_funcptr_return() {
       cur_pos++;
     }
     p_eat(TK_OP, "}");
-    fd->nbody = 0; // stub definition
+    fpr->nbody = 0; // stub definition
   } else {
-    fd->nbody = 0 - 1;
+    fpr->nbody = 0 - 1;
   }
-  return fd;
+  return fpr;
 }
 
 // ---- Constant expression evaluator for enum values ----
@@ -6875,6 +6874,7 @@ int gen_stmt(struct Stmt *st, int *ret_label) {
 }
 
 int gen_func(struct FuncDef *f) {
+  if (f->name == 0) { printf("cc: gen_func NULL name, skip\n"); fflush(0); return 0; }
   cg_cur_func_name = f->name;
   cg_cur_func_ret_stype = f->ret_stype;
   cg_cur_func_ret_is_float = f->ret_is_float;
@@ -8524,7 +8524,7 @@ int main(int argc, int *argv) {
   struct Program *prog = parse_program();
 
   // Codegen
-  outcap = 1000 * 100;
+  outcap = 16 * 1000 * 1000;
   outbuf = my_malloc(outcap);
   outlen = 0;
   codegen(prog);
