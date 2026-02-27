@@ -7836,6 +7836,29 @@ int main(int argc, int *argv) {
     return 2;
   }
 
+  // Add default include dir (include/ relative to argv[0]) if no -I given
+  if (ninclude_dirs == 0) {
+    int *exe = argv[0];
+    int elen = my_strlen(exe);
+    // Find last '/'
+    int last_slash = 0 - 1;
+    int si = 0;
+    while (si < elen) {
+      if (__read_byte(exe, si) == '/') { last_slash = si; }
+      si++;
+    }
+    int *def_inc;
+    if (last_slash >= 0) {
+      int *dir = make_str(exe, 0, last_slash + 1);
+      def_inc = pp_concat_paths(dir, "include");
+    } else {
+      def_inc = "include";
+    }
+    include_dirs[ninclude_dirs] = def_inc;
+    ninclude_dirs++;
+    sys_include_dir = def_inc;
+  }
+
   // Read source file
   int *f = fopen(c_path, "r");
   if (f == 0) {
