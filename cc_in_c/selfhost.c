@@ -3168,6 +3168,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     if (is_funcptr_decl()) {
       p_eat(TK_OP, "(");
       p_eat(TK_OP, "*");
+      skip_qualifiers();
       is_ptr = 1;
       is_funcptr = 1;
     }
@@ -3183,6 +3184,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     if (is_funcptr == 0 && is_funcptr_decl()) {
       p_eat(TK_OP, "(");
       p_eat(TK_OP, "*");
+      skip_qualifiers();
       is_funcptr = 1;
     }
     // Nested funcptr: (*(*name)(params))(params) — after eating outer (* we see (
@@ -3547,11 +3549,20 @@ struct GDecl *parse_global_decl() {
   if (is_funcptr_decl()) {
     p_eat(TK_OP, "(");
     p_eat(TK_OP, "*");
+    skip_qualifiers();
     is_ptr = 1;
     is_funcptr = 1;
   }
   while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); is_ptr = 1; }
   skip_qualifiers();
+  // Check again for funcptr after consuming pointer stars: type *(*name)(params)
+  if (is_funcptr == 0 && is_funcptr_decl()) {
+    p_eat(TK_OP, "(");
+    p_eat(TK_OP, "*");
+    skip_qualifiers();
+    is_ptr = 1;
+    is_funcptr = 1;
+  }
   int *name = my_strdup(p_eat(TK_ID, 0));
   // Register global struct variables for resolve_stype
   if (stype != 0) {
