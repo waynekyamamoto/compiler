@@ -3648,6 +3648,80 @@ int is_func_lookahead() {
   return result;
 }
 
+// Check if after parse_base_type() we have a function-returning-funcptr pattern:
+// type (* name ( ...   e.g. void (*sqlite3OsDlSym(sqlite3_vfs*, void*, const char*))(void);
+// Distinguishes from funcptr variable: type (*name)(params) — name is followed by ')' not '('
+int is_funcptr_return() {
+  if (!p_match(TK_OP, "(")) return 0;
+  if (cur_pos + 3 < ntokens &&
+      tok_kind[cur_pos] == TK_OP && my_strcmp(tok_val[cur_pos], "(") == 0 &&
+      tok_kind[cur_pos + 1] == TK_OP && my_strcmp(tok_val[cur_pos + 1], "*") == 0 &&
+      tok_kind[cur_pos + 2] == TK_ID &&
+      tok_kind[cur_pos + 3] == TK_OP && my_strcmp(tok_val[cur_pos + 3], "(") == 0) {
+    return 1;
+  }
+  return 0;
+}
+
+// Skip a funcptr-return declaration/definition, returning a FuncDef*.
+// Pattern: type (* name (params))(ret_params) ; or { body }
+// cur_pos is at '(' of '(* name (...'
+struct FuncDef *skip_funcptr_return() {
+  p_eat(TK_OP, "(");
+  p_eat(TK_OP, "*");
+  int *fname = my_strdup(p_eat(TK_ID, 0));
+  // Skip parameter list: name ( ... )
+  int pd = 1;
+  p_eat(TK_OP, "(");
+  while (pd > 0 && !p_match(TK_EOF, 0)) {
+    if (p_match(TK_OP, "(")) { pd++; }
+    else if (p_match(TK_OP, ")")) { pd--; if (pd == 0) break; }
+    cur_pos++;
+  }
+  p_eat(TK_OP, ")");
+  // closing ) of (* name(params) )
+  p_eat(TK_OP, ")");
+  // Skip return type param list if present
+  if (p_match(TK_OP, "(")) {
+    int rd = 1;
+    p_eat(TK_OP, "(");
+    while (rd > 0 && !p_match(TK_EOF, 0)) {
+      if (p_match(TK_OP, "(")) { rd++; }
+      else if (p_match(TK_OP, ")")) { rd--; if (rd == 0) break; }
+      cur_pos++;
+    }
+    p_eat(TK_OP, ")");
+  }
+
+  struct FuncDef *fd = my_malloc(328);
+  fd->name = fname;
+  fd->nparams = 0;
+  fd->ret_is_ptr = 1;
+  fd->ret_is_unsigned = 0;
+  fd->is_variadic = 0;
+  fd->ret_stype = 0;
+  fd->ret_is_float = 0;
+  fd->is_static = 0;
+
+  if (p_match(TK_OP, ";")) {
+    p_eat(TK_OP, ";");
+    fd->nbody = 0 - 1; // prototype
+  } else if (p_match(TK_OP, "{")) {
+    p_eat(TK_OP, "{");
+    int bd = 1;
+    while (bd > 0 && !p_match(TK_EOF, 0)) {
+      if (p_match(TK_OP, "{")) { bd++; }
+      else if (p_match(TK_OP, "}")) { bd--; if (bd == 0) break; }
+      cur_pos++;
+    }
+    p_eat(TK_OP, "}");
+    fd->nbody = 0; // stub definition
+  } else {
+    fd->nbody = 0 - 1;
+  }
+  return fd;
+}
+
 // ---- Constant expression evaluator for enum values ----
 int parse_const_expr();
 
@@ -4242,6 +4316,29 @@ struct Program *parse_program() {
       }
       // enum as type in func/global decl
       cur_pos = saved;
+      // Check for function returning funcptr: enum type (* name(params))(ret);
+      {
+        int sv_fpr = cur_pos;
+        parse_base_type();
+        if (is_funcptr_return()) {
+          fd = skip_funcptr_return();
+          if (fd->nbody == 0 - 1) {
+            proto_names[nprotos] = fd->name;
+            proto_rip[nprotos] = fd->ret_is_ptr;
+            proto_riu[nprotos] = fd->ret_is_unsigned;
+            proto_is_var[nprotos] = fd->is_variadic;
+            proto_np[nprotos] = fd->nparams;
+            proto_rs[nprotos] = fd->ret_stype;
+            proto_rif[nprotos] = fd->ret_is_float;
+            nprotos++;
+          } else {
+            funcs[nf] = fd;
+            nf++;
+          }
+          continue;
+        }
+        cur_pos = sv_fpr;
+      }
       if (is_func_lookahead()) {
         fd = parse_func();
         if (fd->nbody == 0 - 1) {
@@ -4325,6 +4422,32 @@ struct Program *parse_program() {
         p_eat(TK_OP, ";");
       } else {
         cur_pos = saved;
+        // Check for function returning funcptr: struct type (* name(params))(ret);
+        int did_fpr2 = 0;
+        {
+          int sv_fpr2 = cur_pos;
+          parse_base_type();
+          if (is_funcptr_return()) {
+            fd = skip_funcptr_return();
+            if (fd->nbody == 0 - 1) {
+              proto_names[nprotos] = fd->name;
+              proto_rip[nprotos] = fd->ret_is_ptr;
+              proto_riu[nprotos] = fd->ret_is_unsigned;
+              proto_is_var[nprotos] = fd->is_variadic;
+              proto_np[nprotos] = fd->nparams;
+              proto_rs[nprotos] = fd->ret_stype;
+              proto_rif[nprotos] = fd->ret_is_float;
+              nprotos++;
+            } else {
+              funcs[nf] = fd;
+              nf++;
+            }
+            did_fpr2 = 1;
+          } else {
+            cur_pos = sv_fpr2;
+          }
+        }
+        if (!did_fpr2) {
         if (is_func_lookahead()) {
           fd = parse_func();
           if (fd->nbody == 0 - 1) {
@@ -4334,7 +4457,7 @@ struct Program *parse_program() {
             proto_is_var[nprotos] = fd->is_variadic;
             proto_np[nprotos] = fd->nparams;
             proto_rs[nprotos] = fd->ret_stype;
-          proto_rif[nprotos] = fd->ret_is_float;
+            proto_rif[nprotos] = fd->ret_is_float;
             nprotos++;
           } else {
             funcs[nf] = fd;
@@ -4344,6 +4467,7 @@ struct Program *parse_program() {
         } else {
           globals[ng] = parse_global_decl();
           ng++;
+        }
         }
       }
     } else {
@@ -4386,37 +4510,29 @@ struct Program *parse_program() {
           if (p_match(TK_OP, ";")) { p_eat(TK_OP, ";"); }
           continue;
         }
-        // Function pointer variable/func returning funcptr: type (*name)(...); or type (*name(params))(params){...}
-        if (p_match(TK_OP, "(") && cur_pos + 1 < ntokens && my_strcmp(tok_val[cur_pos + 1], "*") == 0) {
-          // Check if this is a function (has { body) or just a declaration (ends with ;)
-          int fp_scan = cur_pos;
-          int fp_depth2 = 0;
-          int fp_is_func = 0;
-          while (fp_scan < ntokens) {
-            if (my_strcmp(tok_val[fp_scan], "(") == 0 || my_strcmp(tok_val[fp_scan], "{") == 0) { fp_depth2++; }
-            else if (my_strcmp(tok_val[fp_scan], ")") == 0 || my_strcmp(tok_val[fp_scan], "}") == 0) { fp_depth2--; }
-            if (fp_depth2 == 0 && my_strcmp(tok_val[fp_scan], ";") == 0) { break; }
-            if (fp_depth2 == 0 && my_strcmp(tok_val[fp_scan], "{") == 0) { fp_is_func = 1; break; }
-            fp_scan++;
-          }
-          if (fp_is_func) {
-            // Function returning function pointer — skip body
-            while (!p_match(TK_OP, "{") && !p_match(TK_EOF, 0)) { cur_pos++; }
-            p_eat(TK_OP, "{");
-            int fp_bd = 1;
-            while (fp_bd > 0 && !p_match(TK_EOF, 0)) {
-              if (p_match(TK_OP, "{")) { fp_bd++; }
-              else if (p_match(TK_OP, "}")) { fp_bd--; if (fp_bd == 0) break; }
-              cur_pos++;
-            }
-            p_eat(TK_OP, "}");
-            if (p_match(TK_OP, ";")) { p_eat(TK_OP, ";"); }
+        // Function returning funcptr: type (*name(params))(ret); or { body }
+        if (is_funcptr_return()) {
+          fd = skip_funcptr_return();
+          if (fd->nbody == 0 - 1) {
+            proto_names[nprotos] = fd->name;
+            proto_rip[nprotos] = fd->ret_is_ptr;
+            proto_riu[nprotos] = fd->ret_is_unsigned;
+            proto_is_var[nprotos] = fd->is_variadic;
+            proto_np[nprotos] = fd->nparams;
+            proto_rs[nprotos] = fd->ret_stype;
+            proto_rif[nprotos] = fd->ret_is_float;
+            nprotos++;
           } else {
-            // Function pointer global variable — parse it
-            cur_pos = save2;
-            globals[ng] = parse_global_decl();
-            ng++;
+            funcs[nf] = fd;
+            nf++;
           }
+          continue;
+        }
+        // Function pointer variable: type (*name)(params);
+        if (p_match(TK_OP, "(") && cur_pos + 1 < ntokens && my_strcmp(tok_val[cur_pos + 1], "*") == 0) {
+          cur_pos = save2;
+          globals[ng] = parse_global_decl();
+          ng++;
           continue;
         }
         cur_pos = save2;
