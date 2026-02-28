@@ -22,7 +22,7 @@ test: $(TARGET)
 	rm -f hello_test hanoi_test ptr_test_out ../hello.s ../hanoi.s ../ptr_test.s ../hello.o ../hanoi.o ../ptr_test.o
 
 test-new: $(TARGET)
-	@for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 37 38 39 40 41 42 43 44 45 46 49 50 51 52 53 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97; do \
+	@for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 37 38 39 40 41 42 43 44 45 46 49 50 51 52 53 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98; do \
 		echo "=== test_batch$$n ==="; \
 		./cc tests/test_batch$$n.c -o tests/test_batch$${n}_out && ./tests/test_batch$${n}_out || exit 1; \
 	done

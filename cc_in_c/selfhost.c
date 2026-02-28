@@ -3535,18 +3535,8 @@ struct FuncDef *parse_func() {
 }
 
 // Parse global variable declaration: type [*]* name [[ N ]] [= expr] ;
-struct GDecl *parse_global_decl() {
-  int g_is_char = 0;
-  {
-    int sv = cur_pos;
-    skip_qualifiers();
-    if (p_match(TK_KW, "char")) { g_is_char = 1; }
-    else if (p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) {
-      if (tok_kind[cur_pos + 1] == TK_KW && my_strcmp(tok_val[cur_pos + 1], "char") == 0) { g_is_char = 1; }
-    }
-    cur_pos = sv;
-  }
-  int *stype = parse_base_type();
+// Parse one global declarator given already-parsed base type info
+struct GDecl *parse_global_decl_one(int *stype, int g_is_char) {
   int is_ptr = 0;
   int is_funcptr = 0;
   // Function pointer global: type (*name)(params)
@@ -3622,7 +3612,7 @@ struct GDecl *parse_global_decl() {
     if (p_match(TK_STR, 0)) {
       init_str = my_strdup(p_eat(TK_STR, 0));
     } else if (p_match(TK_OP, "&") || p_match(TK_OP, "{")) {
-      // Complex initializer (address-of, compound literal) - skip to semicolon
+      // Complex initializer (address-of, compound literal) - skip to semicolon or comma
       int gdepth = 0;
       while (1) {
         if (p_match(TK_OP, "(") || p_match(TK_OP, "{")) { gdepth++; }
@@ -3636,7 +3626,6 @@ struct GDecl *parse_global_decl() {
     }
   }
   while (skip_attribute()) {}
-  p_eat(TK_OP, ";");
 
   struct GDecl *gd = my_malloc(80);
   gd->name = name;
@@ -3649,6 +3638,53 @@ struct GDecl *parse_global_decl() {
   gd->stype = stype;
   gd->is_char = g_is_char;
   gd->is_static = 0;
+  return gd;
+}
+
+// Parse global declaration with multi-declarator support: int a, b, c;
+// Stores additional declarators directly via globals/ng pointers
+int parse_global_decls(struct GDecl **globals, int ng, int top_is_static) {
+  int g_is_char = 0;
+  {
+    int sv = cur_pos;
+    skip_qualifiers();
+    if (p_match(TK_KW, "char")) { g_is_char = 1; }
+    else if (p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) {
+      if (tok_kind[cur_pos + 1] == TK_KW && my_strcmp(tok_val[cur_pos + 1], "char") == 0) { g_is_char = 1; }
+    }
+    cur_pos = sv;
+  }
+  int *stype = parse_base_type();
+  struct GDecl *gd = parse_global_decl_one(stype, g_is_char);
+  gd->is_static = top_is_static;
+  globals[ng] = gd;
+  ng++;
+  while (p_match(TK_OP, ",")) {
+    p_eat(TK_OP, ",");
+    struct GDecl *gd2 = parse_global_decl_one(stype, g_is_char);
+    gd2->is_static = top_is_static;
+    globals[ng] = gd2;
+    ng++;
+  }
+  p_eat(TK_OP, ";");
+  return ng;
+}
+
+// Legacy single-declarator wrapper (used for funcptr globals)
+struct GDecl *parse_global_decl() {
+  int g_is_char = 0;
+  {
+    int sv = cur_pos;
+    skip_qualifiers();
+    if (p_match(TK_KW, "char")) { g_is_char = 1; }
+    else if (p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) {
+      if (tok_kind[cur_pos + 1] == TK_KW && my_strcmp(tok_val[cur_pos + 1], "char") == 0) { g_is_char = 1; }
+    }
+    cur_pos = sv;
+  }
+  int *stype = parse_base_type();
+  struct GDecl *gd = parse_global_decl_one(stype, g_is_char);
+  p_eat(TK_OP, ";");
   return gd;
 }
 
@@ -4376,9 +4412,7 @@ struct Program *parse_program() {
           nf++;
         }
       } else {
-        globals[ng] = parse_global_decl();
-        globals[ng]->is_static = top_is_static;
-        ng++;
+        ng = parse_global_decls(globals, ng, top_is_static);
       }
       continue;
     }
@@ -4489,9 +4523,7 @@ struct Program *parse_program() {
             nf++;
           }
         } else {
-          globals[ng] = parse_global_decl();
-          globals[ng]->is_static = top_is_static;
-          ng++;
+          ng = parse_global_decls(globals, ng, top_is_static);
         }
         }
       }
@@ -4582,9 +4614,7 @@ struct Program *parse_program() {
           nf++;
         }
       } else {
-        globals[ng] = parse_global_decl();
-        globals[ng]->is_static = top_is_static;
-        ng++;
+        ng = parse_global_decls(globals, ng, top_is_static);
       }
     }
   }
@@ -6222,6 +6252,46 @@ int gen_value(struct Expr *e) {
       gen_value(e->args[0]);
       return 0;
     }
+
+    // __builtin_abort() => call abort
+    if (my_strcmp(name, "__builtin_abort") == 0) {
+      emit_line("\tbl\t_abort");
+      return 0;
+    }
+
+    // __builtin_trap() => call abort
+    if (my_strcmp(name, "__builtin_trap") == 0) {
+      emit_line("\tbl\t_abort");
+      return 0;
+    }
+
+    // __builtin_unreachable() => nop (undefined behavior)
+    if (my_strcmp(name, "__builtin_unreachable") == 0) {
+      return 0;
+    }
+
+    // __builtin_constant_p(expr) => always 0 (not a compile-time constant)
+    if (my_strcmp(name, "__builtin_constant_p") == 0) {
+      emit_line("\tmov\tx0, #0");
+      return 0;
+    }
+
+    // __builtin libc wrappers: call the underlying libc function
+    if (my_strcmp(name, "__builtin_memcpy") == 0) { name = "memcpy"; }
+    if (my_strcmp(name, "__builtin_memset") == 0) { name = "memset"; }
+    if (my_strcmp(name, "__builtin_memcmp") == 0) { name = "memcmp"; }
+    if (my_strcmp(name, "__builtin_strcmp") == 0) { name = "strcmp"; }
+    if (my_strcmp(name, "__builtin_strlen") == 0) { name = "strlen"; }
+    if (my_strcmp(name, "__builtin_strcpy") == 0) { name = "strcpy"; }
+    if (my_strcmp(name, "__builtin_strncpy") == 0) { name = "strncpy"; }
+    if (my_strcmp(name, "__builtin_printf") == 0) { name = "printf"; }
+    if (my_strcmp(name, "__builtin_sprintf") == 0) { name = "sprintf"; }
+    if (my_strcmp(name, "__builtin_malloc") == 0) { name = "malloc"; }
+    if (my_strcmp(name, "__builtin_calloc") == 0) { name = "calloc"; }
+    if (my_strcmp(name, "__builtin_free") == 0) { name = "free"; }
+    if (my_strcmp(name, "__builtin_alloca") == 0) { name = "alloca"; }
+    if (my_strcmp(name, "__builtin_abs") == 0) { name = "abs"; }
+    if (my_strcmp(name, "__builtin_exit") == 0) { name = "exit"; }
 
     // __builtin_offsetof(type, member) => handled at parse time
     // __builtin_types_compatible_p(type1, type2) => always return 1
@@ -8012,7 +8082,31 @@ int main(int argc, int *argv) {
     }
     di++;
   }
-  // Built-in macros
+  // Built-in type macros (GCC compatibility)
+  {
+    int *bi_names[8];
+    int *bi_vals[8];
+    int nbi = 0;
+    bi_names[0] = "__SIZE_TYPE__"; bi_vals[0] = "unsigned long"; nbi++;
+    bi_names[1] = "__INTPTR_TYPE__"; bi_vals[1] = "long"; nbi++;
+    bi_names[2] = "__UINTPTR_TYPE__"; bi_vals[2] = "unsigned long"; nbi++;
+    bi_names[3] = "__PTRDIFF_TYPE__"; bi_vals[3] = "long"; nbi++;
+    bi_names[4] = "__INT32_TYPE__"; bi_vals[4] = "int"; nbi++;
+    bi_names[5] = "__UINT32_TYPE__"; bi_vals[5] = "unsigned int"; nbi++;
+    bi_names[6] = "__WCHAR_TYPE__"; bi_vals[6] = "int"; nbi++;
+    bi_names[7] = "__SIZEOF_POINTER__"; bi_vals[7] = "8"; nbi++;
+    int bi = 0;
+    while (bi < nbi) {
+      macro_names[nmacros] = my_strdup(bi_names[bi]);
+      macro_values[nmacros] = my_strdup(bi_vals[bi]);
+      macro_nparams[nmacros] = 0 - 1;
+      macro_params[nmacros] = 0;
+      macro_bodies[nmacros] = 0;
+      macro_def_pos[nmacros] = 0;
+      nmacros++;
+      bi++;
+    }
+  }
   // __LINE__ and __FILE__ are handled as special cases in the macro expander
   if_depth = 0;
 
