@@ -93,6 +93,7 @@ struct FuncDef {
   int **param_stypes;
   int *param_is_float;
   int ret_is_float;
+  int is_static;
 };
 
 struct SDef {
@@ -136,6 +137,7 @@ struct GDecl {
   struct Expr *init_list;  // ND_INITLIST node for array init (NULL if no array init)
   int *stype;  // struct type name (or 0 for non-struct)
   int is_char;
+  int is_static;
 };
 
 struct Program {
@@ -3504,6 +3506,7 @@ struct FuncDef *parse_func() {
     fd->param_stypes = param_stypes;
     fd->param_is_float = param_is_float;
     fd->ret_is_float = ret_is_float;
+    fd->is_static = 0;
     return fd;
   }
 
@@ -3527,6 +3530,7 @@ struct FuncDef *parse_func() {
   fd->param_stypes = param_stypes;
   fd->param_is_float = param_is_float;
   fd->ret_is_float = ret_is_float;
+  fd->is_static = 0;
   return fd;
 }
 
@@ -3634,7 +3638,7 @@ struct GDecl *parse_global_decl() {
   while (skip_attribute()) {}
   p_eat(TK_OP, ";");
 
-  struct GDecl *gd = my_malloc(72);
+  struct GDecl *gd = my_malloc(80);
   gd->name = name;
   gd->is_ptr = is_ptr;
   gd->array_size = array_size;
@@ -3644,6 +3648,7 @@ struct GDecl *parse_global_decl() {
   gd->init_list = init_list;
   gd->stype = stype;
   gd->is_char = g_is_char;
+  gd->is_static = 0;
   return gd;
 }
 
@@ -3712,6 +3717,7 @@ struct FuncDef *skip_funcptr_return() {
   fpr->is_variadic = 0;
   fpr->ret_stype = 0;
   fpr->ret_is_float = 0;
+  fpr->is_static = 0;
 
   if (p_match(TK_OP, ";")) {
     p_eat(TK_OP, ";");
@@ -4305,8 +4311,10 @@ struct Program *parse_program() {
     }
 
     // static/inline/__attribute__/__extension__ — skip keywords
+    int top_is_static = 0;
     if (p_match(TK_KW, "static")) {
       p_eat(TK_KW, "static");
+      top_is_static = 1;
     }
     if (p_match(TK_KW, "inline")) {
       p_eat(TK_KW, "inline");
@@ -4342,6 +4350,7 @@ struct Program *parse_program() {
             proto_rif[nprotos] = fd->ret_is_float;
             nprotos++;
           } else {
+            fd->is_static = top_is_static;
             funcs[nf] = fd;
             nf++;
           }
@@ -4361,12 +4370,14 @@ struct Program *parse_program() {
           proto_rif[nprotos] = fd->ret_is_float;
           nprotos++;
         } else {
+          fd->is_static = top_is_static;
           funcs[nf] = fd;
 
           nf++;
         }
       } else {
         globals[ng] = parse_global_decl();
+        globals[ng]->is_static = top_is_static;
         ng++;
       }
       continue;
@@ -4411,11 +4422,12 @@ struct Program *parse_program() {
             }
           }
           p_eat(TK_OP, ";");
-          struct GDecl *sv_gd = my_malloc(72);
+          struct GDecl *sv_gd = my_malloc(80);
           sv_gd->name = sv_name; sv_gd->is_ptr = sv_ptr; sv_gd->array_size = sv_arr;
           sv_gd->init_val = sv_init_val; sv_gd->has_init = sv_has_init;
           sv_gd->init_str = sv_init_str; sv_gd->init_list = sv_init_list;
           sv_gd->stype = sv_stype; sv_gd->is_char = 0;
+          sv_gd->is_static = top_is_static;
           globals[ng] = sv_gd; ng++;
           // Register for resolve_stype
           if (sv_stype != 0) {
@@ -4449,6 +4461,7 @@ struct Program *parse_program() {
               proto_rif[nprotos] = fd->ret_is_float;
               nprotos++;
             } else {
+              fd->is_static = top_is_static;
               funcs[nf] = fd;
               nf++;
             }
@@ -4470,12 +4483,14 @@ struct Program *parse_program() {
             proto_rif[nprotos] = fd->ret_is_float;
             nprotos++;
           } else {
+            fd->is_static = top_is_static;
             funcs[nf] = fd;
 
             nf++;
           }
         } else {
           globals[ng] = parse_global_decl();
+          globals[ng]->is_static = top_is_static;
           ng++;
         }
         }
@@ -4533,6 +4548,7 @@ struct Program *parse_program() {
             proto_rif[nprotos] = fd->ret_is_float;
             nprotos++;
           } else {
+            fd->is_static = top_is_static;
             funcs[nf] = fd;
             nf++;
           }
@@ -4542,6 +4558,7 @@ struct Program *parse_program() {
         if (p_match(TK_OP, "(") && cur_pos + 1 < ntokens && my_strcmp(tok_val[cur_pos + 1], "*") == 0) {
           cur_pos = save2;
           globals[ng] = parse_global_decl();
+          globals[ng]->is_static = top_is_static;
           ng++;
           continue;
         }
@@ -4559,12 +4576,14 @@ struct Program *parse_program() {
           proto_rif[nprotos] = fd->ret_is_float;
           nprotos++;
         } else {
+          fd->is_static = top_is_static;
           funcs[nf] = fd;
 
           nf++;
         }
       } else {
         globals[ng] = parse_global_decl();
+        globals[ng]->is_static = top_is_static;
         ng++;
       }
     }
@@ -6886,7 +6905,7 @@ int gen_func(struct FuncDef *f) {
 
   emit_ch('\n');
   emit_line("\t.p2align\t2");
-  emit_s("\t.globl\t_"); emit_line(f->name);
+  if (f->is_static == 0) { emit_s("\t.globl\t_"); emit_line(f->name); }
   emit_s("_"); emit_s(f->name); emit_line(":");
   emit_line("\tstp\tx29, x30, [sp, #-16]!");
   emit_line("\tmov\tx29, sp");
@@ -7197,7 +7216,7 @@ int codegen(struct Program *prog) {
       if (gd->array_size >= 0 && gd->init_list != 0 && gd->init_list->kind == ND_INITLIST) {
         // Initialized array: emit .data with .quad per element
         if (has_data == 0) { emit_ch('\n'); emit_line("\t.data"); has_data = 1; }
-        emit_s("\t.globl\t_"); emit_line(gd->name);
+        if (gd->is_static == 0) { emit_s("\t.globl\t_"); emit_line(gd->name); }
         emit_line("\t.p2align\t3");
         emit_s("_"); emit_s(gd->name); emit_line(":");
         k = 0;
@@ -7217,7 +7236,7 @@ int codegen(struct Program *prog) {
         int *decoded = cg_decode_string(gd->init_str);
         int slen = my_strlen(decoded) + 1;
         if (has_data == 0) { emit_ch('\n'); emit_line("\t.data"); has_data = 1; }
-        emit_s("\t.globl\t_"); emit_line(gd->name);
+        if (gd->is_static == 0) { emit_s("\t.globl\t_"); emit_line(gd->name); }
         emit_line("\t.p2align\t3");
         emit_s("_"); emit_s(gd->name); emit_line(":");
         k = 0;
@@ -7227,7 +7246,7 @@ int codegen(struct Program *prog) {
           k++;
         }
       } else if (gd->array_size >= 0) {
-        // Uninitialized array: use .comm
+        // Uninitialized array: use .comm (or .zerofill for static)
         int elem_sz = 8;
         if (gd->stype != 0 && gd->is_ptr == 0) {
           int nf = cg_struct_nfields(gd->stype);
@@ -7235,15 +7254,21 @@ int codegen(struct Program *prog) {
         }
         int sz = gd->array_size * elem_sz;
         if (sz == 0 && gd->stype != 0) { sz = elem_sz; }
-        emit_s("\t.comm\t_");
-        emit_s(gd->name);
-        emit_s(", ");
-        emit_num(sz);
-        emit_line(", 3");
+        if (gd->is_static) {
+          emit_s("\t.zerofill __DATA,__bss,_");
+          emit_s(gd->name);
+          emit_s(","); emit_num(sz); emit_line(",3");
+        } else {
+          emit_s("\t.comm\t_");
+          emit_s(gd->name);
+          emit_s(", ");
+          emit_num(sz);
+          emit_line(", 3");
+        }
       } else if (gd->has_init != 0 && gd->init_str != 0) {
         // String initialized
         if (has_data == 0) { emit_ch('\n'); emit_line("\t.data"); has_data = 1; }
-        emit_s("\t.globl\t_"); emit_line(gd->name);
+        if (gd->is_static == 0) { emit_s("\t.globl\t_"); emit_line(gd->name); }
         emit_line("\t.p2align\t3");
         emit_s("_"); emit_s(gd->name); emit_line(":");
         int *slabel = cg_intern_string(cg_decode_string(gd->init_str));
@@ -7251,20 +7276,26 @@ int codegen(struct Program *prog) {
       } else if (gd->has_init != 0) {
         // Integer initialized
         if (has_data == 0) { emit_ch('\n'); emit_line("\t.data"); has_data = 1; }
-        emit_s("\t.globl\t_"); emit_line(gd->name);
+        if (gd->is_static == 0) { emit_s("\t.globl\t_"); emit_line(gd->name); }
         emit_line("\t.p2align\t3");
         emit_s("_"); emit_s(gd->name); emit_line(":");
         emit_s("\t.quad\t"); emit_num(gd->init_val); emit_ch('\n');
       } else {
-        // Uninitialized: use .comm
+        // Uninitialized: use .comm (or .zerofill for static)
         int gsz = 8;
         if (gd->stype != 0 && gd->is_ptr == 0) {
           int gnf = cg_struct_nfields(gd->stype);
           if (gnf > 1) { gsz = gnf * 8; }
         }
-        emit_s("\t.comm\t_");
-        emit_s(gd->name);
-        emit_s(", "); emit_num(gsz); emit_line(", 3");
+        if (gd->is_static) {
+          emit_s("\t.zerofill __DATA,__bss,_");
+          emit_s(gd->name);
+          emit_s(","); emit_num(gsz); emit_line(",3");
+        } else {
+          emit_s("\t.comm\t_");
+          emit_s(gd->name);
+          emit_s(", "); emit_num(gsz); emit_line(", 3");
+        }
       }
       i++;
     }
