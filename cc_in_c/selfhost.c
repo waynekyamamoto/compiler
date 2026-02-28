@@ -3547,12 +3547,26 @@ struct FuncDef *parse_func() {
         if (p_match(TK_OP, ",")) { p_eat(TK_OP, ","); continue; }
         break;
       }
+      // Unnamed array parameter in prototype: int [], char *[]
+      if (p_match(TK_OP, "[")) {
+        p_eat(TK_OP, "[");
+        while (!p_match(TK_OP, "]") && !p_match(TK_EOF, 0)) { cur_pos++; }
+        p_eat(TK_OP, "]");
+        is_ptr = 1;
+      }
       // Parameter might be unnamed (in prototypes)
       if (p_match(TK_ID, 0)) {
         int *pname = my_strdup(p_eat(TK_ID, 0));
         if (is_funcptr) {
           p_eat(TK_OP, ")");
           skip_param_list();
+        }
+        // Array parameter: int a[], char *argv[] — treat as pointer
+        if (p_match(TK_OP, "[")) {
+          p_eat(TK_OP, "[");
+          while (!p_match(TK_OP, "]") && !p_match(TK_EOF, 0)) { cur_pos++; }
+          p_eat(TK_OP, "]");
+          is_ptr = 1;
         }
         params[np] = my_strdup(pname);
         param_is_char[np] = (p_is_char && is_ptr > 0) ? 1 : 0;
@@ -4448,16 +4462,14 @@ struct Program *parse_program() {
       continue;
     }
 
-    // static/inline/__attribute__/__extension__ — skip keywords
+    // static/inline/__attribute__/__extension__ — skip keywords (any order)
     int top_is_static = 0;
-    if (p_match(TK_KW, "static")) {
-      p_eat(TK_KW, "static");
-      top_is_static = 1;
+    while (1) {
+      if (p_match(TK_KW, "static")) { p_eat(TK_KW, "static"); top_is_static = 1; }
+      else if (p_match(TK_KW, "inline")) { p_eat(TK_KW, "inline"); }
+      else if (skip_attribute()) {}
+      else { break; }
     }
-    if (p_match(TK_KW, "inline")) {
-      p_eat(TK_KW, "inline");
-    }
-    while (skip_attribute()) {}
 
     // enum definition
     if (p_match(TK_KW, "enum")) {
@@ -8186,8 +8198,8 @@ int main(int argc, int *argv) {
   }
   // Built-in type macros (GCC compatibility)
   {
-    int *bi_names[8];
-    int *bi_vals[8];
+    int *bi_names[16];
+    int *bi_vals[16];
     int nbi = 0;
     bi_names[0] = "__SIZE_TYPE__"; bi_vals[0] = "unsigned long"; nbi++;
     bi_names[1] = "__INTPTR_TYPE__"; bi_vals[1] = "long"; nbi++;
@@ -8197,6 +8209,13 @@ int main(int argc, int *argv) {
     bi_names[5] = "__UINT32_TYPE__"; bi_vals[5] = "unsigned int"; nbi++;
     bi_names[6] = "__WCHAR_TYPE__"; bi_vals[6] = "int"; nbi++;
     bi_names[7] = "__SIZEOF_POINTER__"; bi_vals[7] = "8"; nbi++;
+    bi_names[8] = "__CHAR_BIT__"; bi_vals[8] = "8"; nbi++;
+    bi_names[9] = "__INT_MAX__"; bi_vals[9] = "2147483647"; nbi++;
+    bi_names[10] = "__LONG_MAX__"; bi_vals[10] = "9223372036854775807L"; nbi++;
+    bi_names[11] = "__LONG_LONG_MAX__"; bi_vals[11] = "9223372036854775807LL"; nbi++;
+    bi_names[12] = "__SIZEOF_INT__"; bi_vals[12] = "4"; nbi++;
+    bi_names[13] = "__SIZEOF_LONG__"; bi_vals[13] = "8"; nbi++;
+    bi_names[14] = "__SIZEOF_LONG_LONG__"; bi_vals[14] = "8"; nbi++;
     int bi = 0;
     while (bi < nbi) {
       macro_names[nmacros] = my_strdup(bi_names[bi]);
