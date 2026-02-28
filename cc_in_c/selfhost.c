@@ -1741,10 +1741,20 @@ struct Stmt *new_switch_s(struct Expr *cond, int *case_vals, struct Stmt ***case
 
 int skip_qualifiers() {
   int skipped = 0;
-  while (p_match(TK_KW, "const") || p_match(TK_KW, "volatile") || p_match(TK_KW, "register") || p_match(TK_KW, "restrict") ||
-         p_match(TK_KW, "__restrict") || p_match(TK_KW, "__restrict__") || p_match(TK_KW, "__volatile__") || p_match(TK_KW, "__const__")) {
-    cur_pos++;
-    skipped = 1;
+  while (1) {
+    if (p_match(TK_KW, "const") || p_match(TK_KW, "volatile") || p_match(TK_KW, "register") || p_match(TK_KW, "restrict") ||
+        p_match(TK_KW, "__restrict") || p_match(TK_KW, "__restrict__") || p_match(TK_KW, "__volatile__") || p_match(TK_KW, "__const__")) {
+      cur_pos++;
+      skipped = 1;
+    } else if (p_match(TK_KW, "__attribute__")) {
+      skip_attribute();
+      skipped = 1;
+    } else if (p_match(TK_KW, "__extension__") || p_match(TK_KW, "__inline__") || p_match(TK_KW, "__inline") || p_match(TK_KW, "_Noreturn")) {
+      cur_pos++;
+      skipped = 1;
+    } else {
+      break;
+    }
   }
   return skipped;
 }
@@ -3381,6 +3391,7 @@ struct FuncDef *parse_func() {
   int ret_is_unsigned = last_type_unsigned;
   int ret_is_ptr = 0;
   while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); ret_is_ptr = 1; }
+  skip_qualifiers();
   int *name = my_strdup(p_eat(TK_ID, 0));
   p_eat(TK_OP, "(");
 
@@ -3780,6 +3791,7 @@ int is_func_lookahead() {
   int saved = cur_pos;
   parse_base_type();
   while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); }
+  skip_qualifiers();
   if (p_match(TK_ID, 0)) { p_eat(TK_ID, 0); }
   int result = p_match(TK_OP, "(");
   cur_pos = saved;
@@ -4129,7 +4141,7 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
         int td_fp = 0;
         if (is_funcptr_decl()) { p_eat(TK_OP, "("); p_eat(TK_OP, "*"); fis_ptr = 1; td_fp = 1; }
         while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); fis_ptr = 1; }
-        while (p_match(TK_KW, "const") || p_match(TK_KW, "volatile") || p_match(TK_KW, "restrict") || p_match(TK_KW, "__restrict")) { cur_pos++; }
+        skip_qualifiers();
         if (td_fp == 0 && is_funcptr_decl()) { p_eat(TK_OP, "("); p_eat(TK_OP, "*"); td_fp = 1; }
         fname = my_strdup(p_eat(TK_ID, 0));
         if (td_fp) { p_eat(TK_OP, ")"); skip_param_list(); }
@@ -4206,8 +4218,9 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
       }
     }
 
-    // Skip pointer stars
+    // Skip pointer stars and qualifiers/attributes
     while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); }
+    skip_qualifiers();
 
     // The typedef alias name
     if (p_match(TK_ID, 0)) {
@@ -4243,6 +4256,7 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
       }
       add_typedef(alias, tag_name);
     }
+    skip_qualifiers();
     p_eat(TK_OP, ";");
     return 0;
   }
@@ -4295,6 +4309,7 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
   } else {
     // Normal: typedef type [*]* Name;
     while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); ptd_stype = 0; }
+    skip_qualifiers();
     // Check again for funcptr after stars: typedef int *(*Name)(params);
     if (p_match(TK_OP, "(") && cur_pos + 1 < ntokens && tok_kind[cur_pos + 1] == TK_OP && my_strcmp(tok_val[cur_pos + 1], "*") == 0) {
       p_eat(TK_OP, "(");
@@ -4319,6 +4334,7 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
       if (!p_match(TK_OP, "]")) { p_eat(TK_NUM, 0); }
       p_eat(TK_OP, "]");
     }
+    skip_qualifiers();
     p_eat(TK_OP, ";");
     add_typedef(alias, ptd_stype);
   }
