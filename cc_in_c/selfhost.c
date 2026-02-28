@@ -3393,6 +3393,91 @@ struct FuncDef *parse_func() {
   int np = 0;
   int is_variadic = 0;
 
+  // Detect K&R style: f(a, b, c) int a; char *b; long c; { ... }
+  // K&R if first token after ( is an identifier that is NOT a type/typedef
+  int is_knr = 0;
+  if (!p_match(TK_OP, ")")) {
+    if (tok_kind[cur_pos] == TK_ID && !has_typedef(tok_val[cur_pos])) {
+      // Check next token is , or ) — confirms it's just a name, not "typedef_name var"
+      int nxt = cur_pos + 1;
+      if (nxt < ntokens && (my_strcmp(tok_val[nxt], ",") == 0 || my_strcmp(tok_val[nxt], ")") == 0)) {
+        is_knr = 1;
+      }
+    }
+  }
+
+  if (is_knr) {
+    // K&R: collect parameter names
+    while (1) {
+      int *pname = my_strdup(p_eat(TK_ID, 0));
+      params[np] = my_strdup(pname);
+      param_is_char[np] = 0;
+      param_is_unsigned[np] = 0;
+      param_is_intptr[np] = 0;
+      param_is_float[np] = 0;
+      param_stypes[np] = 0;
+      np++;
+      if (p_match(TK_OP, ",")) { p_eat(TK_OP, ","); continue; }
+      break;
+    }
+    p_eat(TK_OP, ")");
+    // Skip __attribute__ after parameter list
+    while (skip_attribute()) {}
+    // Now parse K&R type declarations until '{'
+    while (!p_match(TK_OP, "{") && !p_match(TK_OP, ";")) {
+      // Parse: type [*]* name [, [*]* name2] ;
+      int kr_is_char = 0;
+      int kr_is_float = 0;
+      {
+        int sv2 = cur_pos;
+        skip_qualifiers();
+        if (p_match(TK_KW, "char")) { kr_is_char = 1; }
+        else if (p_match(TK_KW, "float") || p_match(TK_KW, "double")) { kr_is_float = 1; }
+        else if (p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) {
+          if (tok_kind[cur_pos + 1] == TK_KW && my_strcmp(tok_val[cur_pos + 1], "char") == 0) { kr_is_char = 1; }
+        }
+        cur_pos = sv2;
+      }
+      int *kr_stype = parse_base_type();
+      int kr_is_unsigned = last_type_unsigned;
+      // Loop over comma-separated declarators for this type
+      while (1) {
+        int kr_is_ptr = 0;
+        int kr_ptr_depth = 0;
+        while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); kr_is_ptr = 1; kr_ptr_depth++; }
+        skip_qualifiers();
+        int *kr_pname = my_strdup(p_eat(TK_ID, 0));
+        // Skip array dimensions: name[]
+        if (p_match(TK_OP, "[")) {
+          p_eat(TK_OP, "[");
+          while (!p_match(TK_OP, "]")) { cur_pos++; }
+          p_eat(TK_OP, "]");
+          kr_is_ptr = 1;
+        }
+        // Find matching param and update its type info
+        int ki = 0;
+        while (ki < np) {
+          if (my_strcmp(params[ki], kr_pname) == 0) {
+            param_is_char[ki] = (kr_is_char && kr_is_ptr > 0) ? 1 : 0;
+            param_is_unsigned[ki] = kr_is_unsigned;
+            param_is_intptr[ki] = (kr_is_ptr > 0 && kr_is_char == 0 && kr_stype == 0) ? 1 : 0;
+            param_is_float[ki] = kr_is_float;
+            if (kr_stype != 0 && kr_is_ptr == 0) {
+              param_stypes[ki] = my_strdup(kr_stype);
+            }
+            if (kr_stype != 0) {
+              add_lv(kr_pname, kr_stype, kr_is_ptr);
+            }
+            break;
+          }
+          ki++;
+        }
+        if (p_match(TK_OP, ",")) { p_eat(TK_OP, ","); continue; }
+        break;
+      }
+      p_eat(TK_OP, ";");
+    }
+  } else {
   if (!p_match(TK_OP, ")")) {
     while (1) {
       // Handle ... (variadic)
@@ -3484,6 +3569,7 @@ struct FuncDef *parse_func() {
 
   // Skip __attribute__ after function parameter list
   while (skip_attribute()) {}
+  } // end of modern-style else
 
   // Prototype: semicolon after )
   if (p_match(TK_OP, ";")) {
