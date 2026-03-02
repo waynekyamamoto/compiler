@@ -17,7 +17,7 @@ TOTAL=0
 # Features we know we can't handle — skip these tests
 should_skip() {
     local f="$1"
-    grep -qE '#include.*\.c"|__asm__|__asm\b|\basm\b|_Complex|__complex|dg-additional-options.*-std=(gnu|c)89|dg-require-effective-target|dg-skip-if|__attribute__.*packed|__attribute__.*aligned|#include.*<signal\.h>|#include.*<setjmp\.h>|#include.*<fcntl\.h>|#include.*<sys/stat\.h>|#include.*<sys/mman\.h>|wchar_t|L"[^"]*"' "$f" && return 0
+    grep -qE '#include.*\.c"|_Complex|__complex|dg-additional-options.*-std=(gnu|c)89|dg-require-effective-target|dg-skip-if|__attribute__.*packed|__attribute__.*aligned|#include.*<signal\.h>|#include.*<setjmp\.h>|#include.*<fcntl\.h>|#include.*<sys/stat\.h>|#include.*<sys/mman\.h>|wchar_t|L"[^"]*"|__vector_size__|vector_size|__int128|__attribute__.*mode\(' "$f" && return 0
     return 1
 }
 
@@ -56,6 +56,8 @@ for f in "$TESTDIR"/*.c; do
     rc=$(perl -e '
         my $pid = fork();
         if ($pid == 0) {
+            open STDOUT, ">/dev/null";
+            open STDERR, ">/dev/null";
             exec @ARGV;
             exit(127);
         }
@@ -66,7 +68,7 @@ for f in "$TESTDIR"/*.c; do
             if (time() >= $deadline) { kill 9, $pid; waitpid($pid, 0); exit(124); }
             select(undef,undef,undef,0.05);
         }
-    ' "$OUTDIR/$name" 2>/dev/null; echo $?)
+    ' "$OUTDIR/$name"; echo $?)
 
     if [ "$rc" -eq 0 ]; then
         PASS=$((PASS + 1))

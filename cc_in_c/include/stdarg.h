@@ -4,7 +4,7 @@
 typedef char *va_list;
 
 void __builtin_va_start(va_list *ap);
-#define va_start(ap, last) __builtin_va_start(&(ap))
+#define va_start(ap, ...) __builtin_va_start(&(ap))
 
 #define va_arg(ap, type) (*(type*)((ap += 8) - 8))
 

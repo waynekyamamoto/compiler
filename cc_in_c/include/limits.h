@@ -2,6 +2,8 @@
 #ifndef _LIMITS_H
 #define _LIMITS_H
 #define CHAR_BIT 8
+#define SCHAR_MAX 127
+#define SCHAR_MIN (-128)
 #define CHAR_MAX 127
 #define CHAR_MIN (-128)
 #define UCHAR_MAX 255
