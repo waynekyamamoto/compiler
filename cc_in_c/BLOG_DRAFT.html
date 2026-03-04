@@ -134,14 +134,14 @@
 - Architecture decisions — single-file design, Pratt parser, code generation strategy
 - The self-hosting bootstrap workflow
 - All debugging and bug fixing
-- ARM64 assembly, ABI details, calling conventions, everything technical</p>
+- ARM64 assembly, ABI details, calling conventions, everything technical
+- Most of the git commits</p>
 <p><strong>I did:</strong>
 - Set the direction: "build a C compiler," "make it self-hosting," "compile sqlite3," "run the GCC torture tests"
 - Quality control — stopped Claude from weakening tests, kept it focused
 - Testing strategy — chose sqlite3 as a sanity check because it's complex but simple to compile
 - Established the verification pipeline: test batches → bootstrap → sqlite3 → torture tests
-- Managed three simultaneous technical projects
-- Judgment calls Claude couldn't make: when to push forward, when to stabilize, what to prioritize</p>
+- Checked in and pushed at stable points, or told Claude to do so when things were about to get tricky</p>
 <h2>Comparison with <a href="https://www.anthropic.com/engineering/building-c-compiler">Carlini</a></h2>
 <table>
 <thead>
@@ -201,11 +201,11 @@
 </table>
 <p>His is more capable. But it cost $20,000 and required custom coordination infrastructure. I started on the $20/month plan, blew through that immediately, upgraded to $100, and within a week was on $200. That $200 covered three projects, not just the compiler. The tools are accessible, but they don't do the thinking for you.</p>
 <h2>Does readable code even matter anymore?</h2>
-<p>I never read the code. I never needed to. Claude writes it, debugs it, modifies it. So does it matter if the code is "clean" or "readable"?</p>
+<p>I never read the code. I never needed to. Claude writes it, debugs it, modifies it. If no human ever reads or writes the code, why should it be readable by humans? Only Claude — or whatever LLM comes next — needs to read and write it.</p>
 <p>This reminds me of <a href="https://dl.acm.org/doi/10.1145/641914.641917">Patterson and Ditzel's original Berkeley RISC paper</a>. The prevailing wisdom in the late '70s was that instruction sets should be rich and complex to make life easier for assembly programmers. Patterson's insight: compilers are going to generate this code, not humans. Optimize the ISA for what compilers need — simplicity, uniformity, speed — not for human readability. It was controversial at the time. Now every phone on the planet runs an ARM chip descended from that idea.</p>
-<p>I think we're at a similar inflection point with source code. If AI is writing and maintaining the code, maybe the priorities shift. Maybe "self-documenting code" matters less than "code the AI can reason about and modify correctly." Maybe 10,000 lines in a single file is fine if the AI can hold it in context. (Now, I don't know what the right answer is here. It's early. But it's worth asking the question.)</p>
-<p>I keep coming back to something my friend <a href="https://www.linkedin.com/in/tolles/">Chris Tolles</a> used to say: "Worse is better. Sooner is better than better. Implementation is the only truth." That's a hat tip to <a href="https://www.dreamsongs.com/RiseOfWorseIsBetter.html">Gabriel's "Worse is Better" paper</a>, but Chris sharpened it. And working this way sharpens it further: the implementation that passes all the tests and works — <em>that's</em> the truth. The source code? Not so much. It's a necessary artifact to build the system, but I never looked at it. The running binary, the test results, the bootstrap verification — that's what's real. The source code is just an intermediate representation between English and machine code.</p>
-<p>The compiler exists. It runs. It compiles itself. 80% on the torture tests, no optimization passes, plenty of rough edges. But it's <em>real</em>, and it's real in two weeks, not two years. I'd rather have a working compiler with known limitations than a perfect design document.</p>
+<p>I think we're at a similar inflection point with source code. If AI is writing and maintaining the code, optimize for what AI needs — not clean variable names and self-documenting functions, but code the AI can reason about and modify correctly. Maybe 10,000 lines in a single file is fine if the AI can hold it in context. (I don't know what the right answer is here. It's early. But it's worth asking the question.)</p>
+<p>This is an experiment. The goal isn't a perfect compiler — it's to find out how far you can get, how fast, using only English. We want results quickly, not completeness. The compiler doesn't have to be perfect. It has to work, and we judge it only by what it does: does it compile programs? Does it pass the tests? Does the bootstrap verify?</p>
+<p>I keep coming back to something my friend <a href="https://www.linkedin.com/in/tolles/">Chris Tolles</a> used to say: "Worse is better. Sooner is better than better. Implementation is the only truth." That's a hat tip to <a href="https://www.dreamsongs.com/RiseOfWorseIsBetter.html">Gabriel's "Worse is Better" paper</a>, but Chris sharpened it. And working this way sharpens it further: the implementation that passes the tests and works — <em>that's</em> the truth. The source code? Not so much. It's a necessary artifact to build the system, but I never looked at it. The running binary, the test results, the bootstrap verification — that's what's real. The source code is just an intermediate representation between English and machine code.</p>
 <h2>So what does this actually mean</h2>
 <p>This is not a demo. It's a self-hosting compiler with 97 test batches, a multi-stage bootstrap verification pipeline, and 80% on the GCC torture suite. It compiles all 240,000 lines of sqlite3.c into valid ARM64 assembly. It's working systems software.</p>
 <p>And I built it in English. My prompts were things like "build a C compiler," "what features are missing," "now try compiling sqlite3," "don't change the tests, fix the code." The technical judgment — what to build, what to test, when Claude is going off the rails — that was my job. The implementation was Claude's.</p>
@@ -222,7 +222,7 @@
 <hr />
 <p>Some side observations:</p>
 <p><strong>On AI and the "system design scale" question.</strong> I've <a href="https://medium.com/@kazabyte/exceeding-system-design-scale-limits-why-the-737-max-is-failing-bca51544bc4a">written before</a> about how systems fail when you push them past their design scale limits. In software, I generally design for 10x, maybe 100x scale. What's the design scale for AI-assisted development? How complex a project can you build in English before the approach breaks down? A compiler, apparently. A game engine? An operating system? I don't know yet. But I'm pushing to find out.</p>
-<p><strong>On what's valuable now.</strong> I built a self-hosting compiler, a full-stack web application, and a RISC-V processor design — in three weeks, part-time, in English. I don't know ARM64 assembly. I've never built hardware, I'm not a hardware engineer, and I'm not familiar with the design tools. But the compiler works, the app works, and the processor is progressing. Are companies looking for people who can do this? Who can operate across systems programming, full-stack engineering, and hardware design — not because they're experts in all of them, but because they know how to drive AI across all of them? I don't know. But I think they should be.</p>
+<p><strong>On what's valuable now.</strong> LLM coding tools unlock a massive productivity multiplier. An engineer who knows how to drive them can operate across systems programming, full-stack web development, and hardware design — building working systems in areas they couldn't touch before. But are these new coding superpowers — directing AI in English, maintaining quality without reading code, shipping across unfamiliar domains — skills that employers actually want? Are startups hiring for this? Big tech companies? AI companies? IT organizations? I don't know yet. The skill set is new and the job descriptions haven't caught up.</p>
 <hr />
 <h2>References</h2>
 <ul>
@@ -232,5 +232,7 @@
 <li><a href="https://www.dreamsongs.com/RiseOfWorseIsBetter.html">Richard P. Gabriel, "Worse is Better"</a> — The classic essay on why simple, shipped implementations beat perfect designs</li>
 <li><a href="https://www.linkedin.com/in/tolles/">Chris Tolles</a> — "Worse is better. Sooner is better than better. Implementation is the only truth."</li>
 </ul>
+<hr />
+<p><em>This blog post was also written with Claude. I provided the direction, the ideas, and the corrections. Claude did all the writing and formatting. Consistent to the end.</em></p>
 </body>
 </html>

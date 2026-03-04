@@ -78,14 +78,14 @@ A lot of AI project posts are hand-wavy about this. I want to be upfront.
 - The self-hosting bootstrap workflow
 - All debugging and bug fixing
 - ARM64 assembly, ABI details, calling conventions, everything technical
+- Most of the git commits
 
 **I did:**
 - Set the direction: "build a C compiler," "make it self-hosting," "compile sqlite3," "run the GCC torture tests"
 - Quality control — stopped Claude from weakening tests, kept it focused
 - Testing strategy — chose sqlite3 as a sanity check because it's complex but simple to compile
 - Established the verification pipeline: test batches → bootstrap → sqlite3 → torture tests
-- Managed three simultaneous technical projects
-- Judgment calls Claude couldn't make: when to push forward, when to stabilize, what to prioritize
+- Checked in and pushed at stable points, or told Claude to do so when things were about to get tricky
 
 ## Comparison with [Carlini](https://www.anthropic.com/engineering/building-c-compiler)
 
@@ -105,15 +105,15 @@ His is more capable. But it cost $20,000 and required custom coordination infras
 
 ## Does readable code even matter anymore?
 
-I never read the code. I never needed to. Claude writes it, debugs it, modifies it. So does it matter if the code is "clean" or "readable"?
+I never read the code. I never needed to. Claude writes it, debugs it, modifies it. If no human ever reads or writes the code, why should it be readable by humans? Only Claude — or whatever LLM comes next — needs to read and write it.
 
 This reminds me of [Patterson and Ditzel's original Berkeley RISC paper](https://dl.acm.org/doi/10.1145/641914.641917). The prevailing wisdom in the late '70s was that instruction sets should be rich and complex to make life easier for assembly programmers. Patterson's insight: compilers are going to generate this code, not humans. Optimize the ISA for what compilers need — simplicity, uniformity, speed — not for human readability. It was controversial at the time. Now every phone on the planet runs an ARM chip descended from that idea.
 
-I think we're at a similar inflection point with source code. If AI is writing and maintaining the code, maybe the priorities shift. Maybe "self-documenting code" matters less than "code the AI can reason about and modify correctly." Maybe 10,000 lines in a single file is fine if the AI can hold it in context. (Now, I don't know what the right answer is here. It's early. But it's worth asking the question.)
+I think we're at a similar inflection point with source code. If AI is writing and maintaining the code, optimize for what AI needs — not clean variable names and self-documenting functions, but code the AI can reason about and modify correctly. Maybe 10,000 lines in a single file is fine if the AI can hold it in context. (I don't know what the right answer is here. It's early. But it's worth asking the question.)
 
-I keep coming back to something my friend [Chris Tolles](https://www.linkedin.com/in/tolles/) used to say: "Worse is better. Sooner is better than better. Implementation is the only truth." That's a hat tip to [Gabriel's "Worse is Better" paper](https://www.dreamsongs.com/RiseOfWorseIsBetter.html), but Chris sharpened it. And working this way sharpens it further: the implementation that passes all the tests and works — *that's* the truth. The source code? Not so much. It's a necessary artifact to build the system, but I never looked at it. The running binary, the test results, the bootstrap verification — that's what's real. The source code is just an intermediate representation between English and machine code.
+This is an experiment. The goal isn't a perfect compiler — it's to find out how far you can get, how fast, using only English. We want results quickly, not completeness. The compiler doesn't have to be perfect. It has to work, and we judge it only by what it does: does it compile programs? Does it pass the tests? Does the bootstrap verify?
 
-The compiler exists. It runs. It compiles itself. 80% on the torture tests, no optimization passes, plenty of rough edges. But it's *real*, and it's real in two weeks, not two years. I'd rather have a working compiler with known limitations than a perfect design document.
+I keep coming back to something my friend [Chris Tolles](https://www.linkedin.com/in/tolles/) used to say: "Worse is better. Sooner is better than better. Implementation is the only truth." That's a hat tip to [Gabriel's "Worse is Better" paper](https://www.dreamsongs.com/RiseOfWorseIsBetter.html), but Chris sharpened it. And working this way sharpens it further: the implementation that passes the tests and works — *that's* the truth. The source code? Not so much. It's a necessary artifact to build the system, but I never looked at it. The running binary, the test results, the bootstrap verification — that's what's real. The source code is just an intermediate representation between English and machine code.
 
 ## So what does this actually mean
 
@@ -147,7 +147,7 @@ Some side observations:
 
 **On AI and the "system design scale" question.** I've [written before](https://medium.com/@kazabyte/exceeding-system-design-scale-limits-why-the-737-max-is-failing-bca51544bc4a) about how systems fail when you push them past their design scale limits. In software, I generally design for 10x, maybe 100x scale. What's the design scale for AI-assisted development? How complex a project can you build in English before the approach breaks down? A compiler, apparently. A game engine? An operating system? I don't know yet. But I'm pushing to find out.
 
-**On what's valuable now.** I built a self-hosting compiler, a full-stack web application, and a RISC-V processor design — in three weeks, part-time, in English. I don't know ARM64 assembly. I've never built hardware, I'm not a hardware engineer, and I'm not familiar with the design tools. But the compiler works, the app works, and the processor is progressing. Are companies looking for people who can do this? Who can operate across systems programming, full-stack engineering, and hardware design — not because they're experts in all of them, but because they know how to drive AI across all of them? I don't know. But I think they should be.
+**On what's valuable now.** LLM coding tools unlock a massive productivity multiplier. An engineer who knows how to drive them can operate across systems programming, full-stack web development, and hardware design — building working systems in areas they couldn't touch before. But are these new coding superpowers — directing AI in English, maintaining quality without reading code, shipping across unfamiliar domains — skills that employers actually want? Are startups hiring for this? Big tech companies? AI companies? IT organizations? I don't know yet. The skill set is new and the job descriptions haven't caught up.
 
 ---
 
@@ -158,3 +158,7 @@ Some side observations:
 - [David A. Patterson and David R. Ditzel, "The Case for the Reduced Instruction Set Computer" (1980)](https://dl.acm.org/doi/10.1145/641914.641917) — The original RISC paper arguing that instruction sets should be optimized for compilers, not human programmers
 - [Richard P. Gabriel, "Worse is Better"](https://www.dreamsongs.com/RiseOfWorseIsBetter.html) — The classic essay on why simple, shipped implementations beat perfect designs
 - [Chris Tolles](https://www.linkedin.com/in/tolles/) — "Worse is better. Sooner is better than better. Implementation is the only truth."
+
+---
+
+*This blog post was also written with Claude. I provided the direction, the ideas, and the corrections. Claude did all the writing and formatting. Consistent to the end.*
