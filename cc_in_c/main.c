@@ -1162,6 +1162,16 @@ int main(int argc, char **argv) {
     int ninputs = 0;
     int icap = 0;
 
+    /* Default include search paths for #include <...> */
+    GROW(include_paths, ninclude_paths, include_paths_cap, char *);
+    include_paths[ninclude_paths++] = ".";
+    GROW(include_paths, ninclude_paths, include_paths_cap, char *);
+    include_paths[ninclude_paths++] = "include";
+    GROW(include_paths, ninclude_paths, include_paths_cap, char *);
+    include_paths[ninclude_paths++] = "/usr/include";
+    GROW(include_paths, ninclude_paths, include_paths_cap, char *);
+    include_paths[ninclude_paths++] = "/usr/local/include";
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0) {
             if (i + 1 >= argc) fatal("Missing argument for -o");

@@ -79,6 +79,10 @@ static GlobalVarInfo *global_var_infos;
 static int nglobal_var_infos;
 static int global_var_infos_cap;
 
+static GlobalDecl *pending_globals;
+static int npending_globals;
+static int pending_globals_cap;
+
 static void add_global_var_info(const char *name, const char *struct_type, int is_ptr) {
     GROW(global_var_infos, nglobal_var_infos, global_var_infos_cap, GlobalVarInfo);
     global_var_infos[nglobal_var_infos].name = xstrdup(name);
@@ -302,6 +306,31 @@ static void skip_qualifiers(void) {
         eat(TK_KW, NULL);
 }
 
+static void skip_gnu_attributes(void) {
+    while (cur()->kind == TK_ID && strcmp(cur()->value, "__attribute__") == 0) {
+        eat(TK_ID, NULL);
+        if (match(TK_OP, "(")) {
+            int depth = 0;
+            do {
+                if (match(TK_OP, "(")) {
+                    eat(TK_OP, "(");
+                    depth++;
+                } else if (match(TK_OP, ")")) {
+                    eat(TK_OP, ")");
+                    depth--;
+                } else {
+                    eat(cur()->kind, NULL);
+                }
+            } while (depth > 0);
+        }
+    }
+}
+
+static int is_builtin_type_name(const char *name) {
+    return strcmp(name, "__builtin_va_list") == 0 ||
+           strcmp(name, "__builtin_ms_va_list") == 0;
+}
+
 /* Check if the current token starts a type specifier */
 static int is_type_start(void) {
     if (match(TK_KW, "int") || match(TK_KW, "char") || match(TK_KW, "void") ||
@@ -315,6 +344,8 @@ static int is_type_start(void) {
         return 1;
     /* Check if current identifier is a typedef name */
     if (cur()->kind == TK_ID && find_typedef(cur()->value))
+        return 1;
+    if (cur()->kind == TK_ID && is_builtin_type_name(cur()->value))
         return 1;
     return 0;
 }
@@ -533,6 +564,21 @@ static char *parse_base_type(void) {
         eat(TK_KW, "enum");
         if (match(TK_ID, NULL))
             eat(TK_ID, NULL);  /* skip enum tag */
+        if (match(TK_OP, "{")) {
+            eat(TK_OP, "{");
+            int value = 0;
+            while (!match(TK_OP, "}")) {
+                Tok *ename = eat(TK_ID, NULL);
+                if (match(TK_OP, "=")) {
+                    eat(TK_OP, "=");
+                    value = parse_const_expr();
+                }
+                add_enum_const(ename->value, value);
+                value++;
+                if (match(TK_OP, ",")) eat(TK_OP, ",");
+            }
+            eat(TK_OP, "}");
+        }
         last_type = ty_enum();
         return NULL;
     }
@@ -576,6 +622,12 @@ static char *parse_base_type(void) {
         if (last_type_unsigned) last_type = ty_unsigned(last_type);
         return NULL;
     }
+    if (cur()->kind == TK_ID && is_builtin_type_name(cur()->value)) {
+        eat(TK_ID, NULL);
+        skip_qualifiers();
+        last_type = ty_int();
+        return NULL;
+    }
     /* Check if it's a typedef name */
     if (cur()->kind == TK_ID) {
         TypedefEntry *td = find_typedef(cur()->value);
@@ -605,6 +657,7 @@ static char *parse_base_type(void) {
 static Expr *parse_expr(int min_prec);
 static Stmt *parse_stmt(void);
 static Block parse_block(void);
+static GlobalDecl parse_extern_decl(void);
 
 /* ---- Struct definition ---- */
 
@@ -1424,7 +1477,14 @@ static Expr *parse_primary(void) {
         } else if (match(TK_OP, "(")) {
             eat(TK_OP, "(");
             ExprArray args = {NULL, 0, 0};
-            if (!match(TK_OP, ")")) {
+            if (strcmp(name, "__builtin_va_arg") == 0) {
+                exprarray_push(&args, parse_expr(0));  /* va_list lvalue */
+                eat(TK_OP, ",");
+                /* Second argument is a type, not an expression. */
+                parse_base_type();
+                while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); }
+                skip_qualifiers();
+            } else if (!match(TK_OP, ")")) {
                 while (1) {
                     exprarray_push(&args, parse_expr(0));
                     if (match(TK_OP, ",")) {
@@ -2007,6 +2067,25 @@ static Stmt *parse_stmt(void) {
         return new_exprstmt(new_num(0));
     }
 
+    /* Local enum definition: enum { ... }; or enum Tag { ... }; */
+    if (match(TK_KW, "enum")) {
+        int saved_pos = pos;
+        eat(TK_KW, "enum");
+        if (match(TK_ID, NULL)) eat(TK_ID, NULL);
+        int is_enum_def = match(TK_OP, "{");
+        pos = saved_pos;
+        if (is_enum_def) {
+            parse_enum_def();
+            return new_exprstmt(new_num(0));
+        }
+    }
+
+    /* Local extern declaration */
+    if (match(TK_KW, "extern")) {
+        parse_extern_decl();
+        return new_exprstmt(new_num(0));
+    }
+
     /* Variable declaration: starts with a type keyword */
     if (starts_type()) {
         int local_static = 0;
@@ -2014,8 +2093,26 @@ static Stmt *parse_stmt(void) {
             eat(TK_KW, "static");
             local_static = 1;
         }
-        /* Standalone struct/union definition: struct Name { ... }; with no variable */
-        if (match(TK_KW, "struct") || match(TK_KW, "union")) {
+        /* Local function prototype declaration: type name(params); */
+        {
+            int saved_pos = pos;
+            parse_base_type();
+            while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); }
+            skip_qualifiers();
+            if (match(TK_ID, NULL)) {
+                eat(TK_ID, NULL);
+                if (match(TK_OP, "(")) {
+                    skip_param_list();
+                    if (match(TK_OP, ";")) {
+                        eat(TK_OP, ";");
+                        return new_exprstmt(new_num(0));
+                    }
+                }
+            }
+            pos = saved_pos;
+        }
+        /* Standalone struct/union/enum definition: type Name { ... }; with no variable */
+        if (match(TK_KW, "struct") || match(TK_KW, "union") || match(TK_KW, "enum")) {
             int saved_pos = pos;
             parse_base_type();
             if (match(TK_OP, ";")) {
@@ -2246,6 +2343,7 @@ static GlobalDecl parse_extern_decl(void) {
         skip_qualifiers();
         is_ptr++;
     }
+    if (is_ptr > 1) base_is_char = 0;
     Tok *name_tok = eat(TK_ID, NULL);
     if (is_funcptr) {
         eat(TK_OP, ")");
@@ -2270,6 +2368,19 @@ static GlobalDecl parse_extern_decl(void) {
             if (depth > 0) eat(cur()->kind, NULL);
         }
         eat(TK_OP, ")");
+    }
+    if (!is_func) {
+        while (match(TK_OP, ",")) {
+            eat(TK_OP, ",");
+            while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); }
+            eat(TK_ID, NULL);
+            if (match(TK_OP, "[")) {
+                eat(TK_OP, "[");
+                if (!match(TK_OP, "]")) parse_const_expr();
+                eat(TK_OP, "]");
+            }
+            skip_gnu_attributes();
+        }
     }
     eat(TK_OP, ";");
 
@@ -2305,6 +2416,7 @@ static int is_func_lookahead(void) {
 
 /* ---- Global variable declaration ---- */
 static GlobalDecl parse_global_decl(int is_static) {
+    npending_globals = 0;
     char *stype = parse_base_type();
     int base_is_char = last_type_is_char;
     int is_ptr = 0;
@@ -2321,6 +2433,7 @@ static GlobalDecl parse_global_decl(int is_static) {
         skip_qualifiers();
         is_ptr++;
     }
+    if (is_ptr > 1) base_is_char = 0;
     /* funcptr after pointer stars: type *(*name)(params) */
     if (!is_funcptr && is_funcptr_decl()) {
         eat(TK_OP, "(");
@@ -2380,6 +2493,57 @@ static GlobalDecl parse_global_decl(int is_static) {
         } else {
             init = parse_expr(0);
         }
+    }
+    while (match(TK_OP, ",")) {
+        int ex_is_ptr = 0;
+        int ex_arr = -1;
+        int ex_is_char = base_is_char;
+        Expr *ex_init = NULL;
+        eat(TK_OP, ",");
+        while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); ex_is_ptr++; }
+        if (ex_is_ptr > 1) ex_is_char = 0;
+        skip_qualifiers();
+        Tok *ex_name_tok = eat(TK_ID, NULL);
+        if (match(TK_OP, "[")) {
+            eat(TK_OP, "[");
+            if (match(TK_OP, "]")) ex_arr = 0;
+            else ex_arr = parse_const_expr();
+            eat(TK_OP, "]");
+            while (match(TK_OP, "[")) {
+                eat(TK_OP, "[");
+                parse_const_expr();
+                eat(TK_OP, "]");
+            }
+        }
+        if (match(TK_OP, "=")) {
+            eat(TK_OP, "=");
+            if (ex_arr >= 0 && match(TK_STRING, NULL)) {
+                Tok *str_tok = eat(TK_STRING, NULL);
+                int slen = strlen(str_tok->value) + 1;
+                if (ex_arr == 0) ex_arr = slen;
+                ex_init = new_strlit(str_tok->value);
+            } else if (match(TK_OP, "{")) {
+                ex_init = parse_init_list(stype);
+                if (ex_arr == 0)
+                    ex_arr = ex_init->u.initlist.elems.len;
+            } else {
+                ex_init = parse_expr(0);
+            }
+        }
+        skip_gnu_attributes();
+
+        GROW(pending_globals, npending_globals, pending_globals_cap, GlobalDecl);
+        pending_globals[npending_globals].name = xstrdup(ex_name_tok->value);
+        pending_globals[npending_globals].struct_type = stype ? xstrdup(stype) : NULL;
+        pending_globals[npending_globals].is_ptr = ex_is_ptr;
+        pending_globals[npending_globals].array_size = ex_arr;
+        pending_globals[npending_globals].init = ex_init;
+        pending_globals[npending_globals].is_extern = 0;
+        pending_globals[npending_globals].is_static = is_static;
+        pending_globals[npending_globals].is_func_decl = 0;
+        pending_globals[npending_globals].is_char = ex_is_char;
+        npending_globals++;
+        if (stype) add_global_var_info(ex_name_tok->value, stype, ex_is_ptr);
     }
     eat(TK_OP, ";");
 
@@ -2509,6 +2673,14 @@ static void parse_func_or_global(int is_static,
             *globals = realloc(*globals, *gcap * sizeof(GlobalDecl));
         }
         (*globals)[(*nglobals)++] = parse_global_decl(is_static);
+        for (int gi = 0; gi < npending_globals; gi++) {
+            if (*nglobals >= *gcap) {
+                *gcap = *gcap ? *gcap * 2 : 8;
+                *globals = realloc(*globals, *gcap * sizeof(GlobalDecl));
+            }
+            (*globals)[(*nglobals)++] = pending_globals[gi];
+        }
+        npending_globals = 0;
     }
 }
 
@@ -2584,6 +2756,12 @@ Program *parse_program(TokArray tokarr) {
                             if (!match(TK_OP, "]")) arr_sz = parse_const_expr();
                             else arr_sz = 0; /* flexible array */
                             eat(TK_OP, "]");
+                            while (match(TK_OP, "[")) {
+                                eat(TK_OP, "[");
+                                int dim2 = parse_const_expr();
+                                eat(TK_OP, "]");
+                                if (arr_sz > 0 && dim2 > 0) arr_sz *= dim2;
+                            }
                         }
                         int bw = 0;
                         if (match(TK_OP, ":")) { eat(TK_OP, ":"); bw = parse_const_expr(); }
@@ -2659,6 +2837,7 @@ Program *parse_program(TokArray tokarr) {
                     nstructs++;
                 }
 
+                skip_gnu_attributes();
                 /* Skip pointer stars */
                 while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); }
 
@@ -2689,6 +2868,7 @@ Program *parse_program(TokArray tokarr) {
                     }
                     eat(TK_OP, "}");
                 }
+                skip_gnu_attributes();
                 /* alias name */
                 if (match(TK_ID, NULL)) {
                     char *alias = xstrdup(eat(TK_ID, NULL)->value);
@@ -2742,15 +2922,21 @@ Program *parse_program(TokArray tokarr) {
                         add_typedef(alias, NULL);
                         continue;
                     }
-                    char *alias = xstrdup(eat(TK_ID, NULL)->value);
-                    /* skip array dimensions like typedef int Arr[10]; */
-                    if (match(TK_OP, "[")) {
-                        eat(TK_OP, "[");
-                        if (!match(TK_OP, "]")) parse_const_expr();
-                        eat(TK_OP, "]");
+                    while (1) {
+                        char *alias = xstrdup(eat(TK_ID, NULL)->value);
+                        /* skip array dimensions like typedef int Arr[10]; */
+                        if (match(TK_OP, "[")) {
+                            eat(TK_OP, "[");
+                            if (!match(TK_OP, "]")) parse_const_expr();
+                            eat(TK_OP, "]");
+                        }
+                        skip_gnu_attributes();
+                        add_typedef_ex(alias, stype, td_is_char);
+                        if (!match(TK_OP, ",")) break;
+                        eat(TK_OP, ",");
+                        while (match(TK_OP, "*")) { eat(TK_OP, "*"); skip_qualifiers(); stype = NULL; td_is_char = 0; }
                     }
                     eat(TK_OP, ";");
-                    add_typedef_ex(alias, stype, td_is_char);
                 }
             }
             continue;
@@ -2768,17 +2954,30 @@ Program *parse_program(TokArray tokarr) {
 
         /* enum definition */
         if (match(TK_KW, "enum")) {
-            /* Peek: is this "enum { ... }" or "enum Name { ... }" (definition)
-               vs "enum Name varname" (usage as type)? */
+            /* Peek enum forms:
+               1) enum { ... }; or enum Name { ... };  (definition only)
+               2) enum { ... } var; / enum Name var;   (declaration) */
             int saved = pos;
             eat(TK_KW, "enum");
             if (match(TK_ID, NULL)) eat(TK_ID, NULL);
+            int def_only = 0;
             if (match(TK_OP, "{")) {
+                eat(TK_OP, "{");
+                int depth = 1;
+                while (depth > 0) {
+                    if (match(TK_OP, "{")) depth++;
+                    else if (match(TK_OP, "}")) depth--;
+                    if (depth > 0) eat(cur()->kind, NULL);
+                }
+                eat(TK_OP, "}");
+                def_only = match(TK_OP, ";");
+            }
+            pos = saved;
+            if (def_only) {
                 pos = saved;
                 parse_enum_def();
             } else {
                 /* enum used as type for function or global */
-                pos = saved;
                 parse_func_or_global(0, &funcs, &nfuncs, &fcap, &globals, &nglobals, &gcap, &protos, &nprotos, &pcap2);
             }
             continue;

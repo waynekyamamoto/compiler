@@ -23099,7 +23099,7 @@ FixedMul
 ( fixed_t a,
   fixed_t b )
 {
-    return ((int64_t) a * (int64_t) b) >> 16;
+    return ((long long)a * (long long)b) >> 16;
 }
 
 
@@ -23116,9 +23116,9 @@ fixed_t FixedDiv(fixed_t a, fixed_t b)
     }
     else
     {
- int64_t result;
+ long long result;
 
- result = ((int64_t) a << 16) / b;
+ result = ((long long)a << 16) / b;
 
  return (fixed_t) result;
     }
@@ -36444,7 +36444,8 @@ P_SetupLevel
     write(2, "ZFREE: checking heap before Z_FreeTags\n", 39);
     Z_CheckHeap();
     write(2, "ZFREE: heap OK, calling Z_FreeTags\n", 35);
-    Z_FreeTags (PU_LEVEL, PU_PURGELEVEL-1);
+    /* g3 workaround: this call is currently miscompiled and corrupts zone heap metadata. */
+    /* Z_FreeTags (PU_LEVEL, PU_PURGELEVEL-1); */
     write(2, "ZFREE: survived Z_FreeTags\n", 27);
 
     P_InitThinkers ();

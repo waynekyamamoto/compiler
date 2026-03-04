@@ -47,14 +47,36 @@ TokArray lex(const char *src) {
     char *buf = xmalloc(slen + 1);
     int j = 0;
     for (int i = 0; i < slen; ) {
-        if (src[i] == '/' && i + 1 < slen && src[i+1] == '/') {
+        if (src[i] == '"') {
+            buf[j++] = src[i++];
+            while (i < slen && src[i] != '"') {
+                if (src[i] == '\\' && i + 1 < slen) {
+                    buf[j++] = src[i++];
+                }
+                buf[j++] = src[i++];
+            }
+            if (i < slen) buf[j++] = src[i++];
+        } else if (src[i] == '\'') {
+            buf[j++] = src[i++];
+            while (i < slen && src[i] != '\'') {
+                if (src[i] == '\\' && i + 1 < slen) {
+                    buf[j++] = src[i++];
+                }
+                buf[j++] = src[i++];
+            }
+            if (i < slen) buf[j++] = src[i++];
+        } else if (src[i] == '/' && i + 1 < slen && src[i+1] == '/') {
             /* line comment */
             i += 2;
             while (i < slen && src[i] != '\n') i++;
+            if (i < slen && src[i] == '\n') buf[j++] = src[i++];
         } else if (src[i] == '/' && i + 1 < slen && src[i+1] == '*') {
             /* block comment */
             i += 2;
-            while (i + 1 < slen && !(src[i] == '*' && src[i+1] == '/')) i++;
+            while (i + 1 < slen && !(src[i] == '*' && src[i+1] == '/')) {
+                if (src[i] == '\n') buf[j++] = '\n';
+                i++;
+            }
             if (i + 1 < slen) i += 2;
         } else {
             buf[j++] = src[i++];
