@@ -1,23 +1,48 @@
+# Compiled binaries
+gen[0-9]*
+doom_gen*
+sqlite3_test*
+
+# Assembly output
 *.s
+
+# Object files
 *.o
-a.out
-foobar
+
+# dSYM bundles (macOS debug symbols)
+*.dSYM/
+
+# Archives
+*.tar.gz
+
+# Editor/IDE
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
+
+# Test output
+*_err.txt
+test_batch*_out
+/tests/*_out
+
+# Logs and backups
+*.log
+*.bak
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
 .venv/
-.claude/
-cc_in_c/cc
-cc_in_c/gcc
-cc_in_c/selfhost_gen*
-cc_in_c/selfhost_test*
-cc_in_c/*_out
-cc_in_c/tests/*_out
-cc_in_c/tests/test_simple.c
-cc_in_c/tests/test_trivial.c
-cc_in_c/tests/test_fopen.c
-cc_in_c/tests/test_malloc_rw.c
-cc_in_c/tests/test_readfile.c
-cc_in_c/tests/test_fgetc_loop.c
-cc_in_c/tests/test_eof.c
-cc_in_c/tests/test_ptr_sxtw.c
-cc_in_c/tests/test_argv_fopen.c
-cc_in_c/one_more_time/
-cc_in_c/sqlite/
+
+# Large external files (download separately)
+gcc-torture/
+sqlite/
+sqlite3.c
+doom/doom1.wad
+
+# Build artifacts
+a.out
+/out/
