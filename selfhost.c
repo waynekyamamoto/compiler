@@ -10,7 +10,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef __STDC__
+#ifdef __STDC__
+static inline int __read_byte(void *p, int i) { return ((unsigned char*)p)[i]; }
+static inline void __write_byte(void *p, int i, int v) { ((unsigned char*)p)[i] = v; }
+#else
 int printf(int *fmt, ...);
 int *fopen(int *path, int *mode);
 int fgetc(int *f);
@@ -156,6 +159,7 @@ struct SDefInfo {
   struct SFieldInfo **flds;
   int nflds;
   int nwords;
+  int is_union;
 };
 
 struct GDecl {
@@ -433,6 +437,22 @@ struct StaticLocal {
 struct StaticLocal sl[MAX_STATIC_LOCALS];
 int nsl;
 
+// ---- Forward declarations (needed for clang, which doesn't allow implicit decls) ----
+#ifdef __STDC__
+extern int *include_dirs[64];
+extern int ninclude_dirs;
+int skip_attribute();
+int parse_const_expr();
+struct Expr *parse_expr(int min_prec);
+struct Expr *parse_unary();
+struct Expr *parse_primary();
+int parse_enum_def();
+int parse_const_unary();
+int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset);
+int gen_value(struct Expr *e);
+int gen_stmt(struct Stmt *st, int *ret_label);
+#endif
+
 // ---- Utility functions ----
 
 int my_fatal(int *msg) {
@@ -588,7 +608,7 @@ int emit_mov_imm(int *reg, int val) {
   } else {
     int lo = val & 0xFFFF;
     int hi = (val >> 16) & 0xFFFF;
-    int hi2 = (val >> 32) & 0xFFFF;
+    int hi2 = ((val >> 16) >> 16) & 0xFFFF;
     emit_s("\tmovz\t"); emit_s(reg); emit_s(", #"); emit_num(lo); emit_ch('\n');
     if (hi != 0) {
       emit_s("\tmovk\t"); emit_s(reg); emit_s(", #"); emit_num(hi); emit_s(", lsl #16"); emit_ch('\n');
@@ -1544,7 +1564,7 @@ int *str_to_double_bits(int *s) {
   if (c == '0' && (__read_byte(s, i + 1) == 'x' || __read_byte(s, i + 1) == 'X')) {
     i += 2; c = __read_byte(s, i);
     // Parse hex integer part
-    int hm = 0;
+    long hm = 0;
     int hbits = 0;
     while (is_hex_digit(c)) {
       int hd = 0;
@@ -1581,15 +1601,15 @@ int *str_to_double_bits(int *s) {
     if (hm == 0) { return 0; }
     // bin_exp: mantissa needs shifting by -hfrac_bits, then apply hexp
     int bin_exp = hexp - hfrac_bits;
-    int m = hm;
-    int one_shl_52 = 1 << 52;
-    int one_shl_53 = 1 << 53;
+    long m = hm;
+    long one_shl_52 = (long)1 << 52;
+    long one_shl_53 = (long)1 << 53;
     // Normalize to 53 bits
-    int tmp = m; int nbits = 0;
+    long tmp = m; int nbits = 0;
     while (tmp > 0) { tmp = tmp / 2; nbits++; }
     if (nbits > 53) {
       int shift = nbits - 53;
-      int half = 1; int si = 0;
+      long half = 1; int si = 0;
       while (si < shift - 1) { half = half * 2; si++; }
       m = m / (half * 2);
       bin_exp = bin_exp + shift;
@@ -1599,24 +1619,24 @@ int *str_to_double_bits(int *s) {
       while (si < shift) { m = m * 2; si++; }
       bin_exp = bin_exp - shift;
     }
-    int frac = m - one_shl_52;
+    long frac = m - one_shl_52;
     int biased = bin_exp + 52 + 1023;
     if (biased <= 0) { return 0; }
     if (biased >= 2047) { biased = 2047; frac = 0; }
-    int result = frac + (biased << 52);
-    if (sign) { result = result + (1 << 63); }
+    long result = frac + ((long)biased << 52);
+    if (sign) { result = result + ((long)1 << 63); }
     return result;
   }
 
-  // Parse integer part
-  int intpart = 0;
+  // Parse integer part (long to handle large mantissas under clang's 32-bit int)
+  long intpart = 0;
   while (c >= '0' && c <= '9') {
     intpart = intpart * 10 + (c - '0');
     i++; c = __read_byte(s, i);
   }
 
   // Parse fractional part
-  int fracpart = 0;
+  long fracpart = 0;
   int frac_digits = 0;
   if (c == '.') {
     i++; c = __read_byte(s, i);
@@ -1644,7 +1664,7 @@ int *str_to_double_bits(int *s) {
   // Skip f/F/l/L suffix
   // Now: value = (intpart + fracpart/10^frac_digits) * 10^exp_val
   // Build mantissa: intpart * 10^frac_digits + fracpart
-  int mantissa = intpart;
+  long mantissa = intpart;
   int d = 0;
   while (d < frac_digits) { mantissa = mantissa * 10; d++; }
   mantissa = mantissa + fracpart;
@@ -1652,13 +1672,13 @@ int *str_to_double_bits(int *s) {
 
   if (mantissa == 0) { return 0; } // +0.0
 
-  // Precompute large constants using shifts to avoid 64-bit literal issues
-  int one_shl_52 = 1 << 52;
-  int one_shl_53 = 1 << 53;
-  int one_shl_62 = 1 << 62;
-  int overflow_limit = one_shl_62 / 5;
+  // Use long to avoid 32-bit int UB under clang (self-hosting: long == int == 8 bytes)
+  long one_shl_52 = (long)1 << 52;
+  long one_shl_53 = (long)1 << 53;
+  long one_shl_62 = (long)1 << 62;
+  long overflow_limit = one_shl_62 / 5;
   int bin_exp = 0;
-  int m = mantissa;
+  long m = mantissa;
 
   // Apply decimal exponent: multiply/divide by powers of 10
   if (decimal_exp > 0) {
@@ -1683,17 +1703,17 @@ int *str_to_double_bits(int *s) {
   }
 
   // Normalize: shift so bit 52 is the highest set bit
-  int tmp = m;
+  long tmp = m;
   int nbits = 0;
   while (tmp > 0) { tmp = tmp / 2; nbits++; }
 
   // We want nbits == 53 (bit 52 is MSB)
   if (nbits > 53) {
     int shift = nbits - 53;
-    int half = 1;
+    long half = 1;
     int si = 0;
     while (si < shift - 1) { half = half * 2; si++; }
-    int remainder = m & (half * 2 - 1);
+    long remainder = m & (half * 2 - 1);
     m = m / (half * 2);
     if (remainder > half) { m = m + 1; }
     else if (remainder == half && (m & 1)) { m = m + 1; }
@@ -1707,7 +1727,7 @@ int *str_to_double_bits(int *s) {
   }
 
   // Remove implicit leading 1 (bit 52)
-  int frac = m - one_shl_52;
+  long frac = m - one_shl_52;
 
   // Biased exponent: bin_exp + 52 + 1023
   int biased = bin_exp + 52 + 1023;
@@ -1715,10 +1735,10 @@ int *str_to_double_bits(int *s) {
   if (biased >= 2047) { biased = 2047; frac = 0; } // overflow to inf
 
   // Pack: sign(1) | exponent(11) | fraction(52)
-  int result = frac;
-  result = result + (biased << 52);
+  long result = frac;
+  result = result + ((long)biased << 52);
   if (sign) {
-    result = result + (1 << 63);
+    result = result + ((long)1 << 63);
   }
   return result;
 }
@@ -2309,8 +2329,10 @@ int p_sizeof_struct_proper(int *sname) {
   if (sd == 0) return 8;
   // Bitfield structs: use nwords * 4 bytes
   if (sd->nwords > 0) return sd->nwords * 4;
+  int p_is_union = sd->is_union;
   int offset = 0;
   int max_align = 1;
+  int max_size = 0;
   int fi = 0;
   while (fi < sd->nflds) {
     int *fst = sd->flds[fi]->stype;
@@ -2364,12 +2386,21 @@ int p_sizeof_struct_proper(int *sname) {
         fsz = fsz * f_arr;
       }
     }
-    offset = p_align_up(offset, falign);
-    offset = offset + fsz;
+    if (p_is_union == 0) {
+      offset = p_align_up(offset, falign);
+      offset = offset + fsz;
+    } else {
+      if (fsz > max_size) { max_size = fsz; }
+    }
     if (falign > max_align) { max_align = falign; }
     fi++;
   }
-  int total = p_align_up(offset, max_align);
+  int total;
+  if (p_is_union) {
+    total = p_align_up(max_size, max_align);
+  } else {
+    total = p_align_up(offset, max_align);
+  }
   if (total == 0) { total = max_align; }
   return total;
 }
@@ -3017,11 +3048,12 @@ int *parse_base_type() {
       }
       p_eat(TK_OP, "}");
       // Register in parser's struct table
-      struct SDefInfo *asdi = my_malloc(32);
+      struct SDefInfo *asdi = my_malloc(48);
       asdi->name = my_strdup(synth_name);
       asdi->flds = aflds;
       asdi->nflds = anf;
       asdi->nwords = 0;
+      asdi->is_union = is_union_kw;
       p_sdefs[np_sdefs] = asdi;
       np_sdefs++;
       // Register for codegen
@@ -3041,7 +3073,33 @@ int *parse_base_type() {
       asd->field_is_short = my_malloc(anf * 8);
       asd->field_is_long = my_malloc(anf * 8);
       asd->field_is_char_type = my_malloc(anf * 8);
-      for (int afi = 0; afi < anf; afi++) { asd->field_is_array[afi] = 0; asd->field_is_char[afi] = 0; asd->field_is_ptr[afi] = 0; asd->field_is_short[afi] = 0; asd->field_is_long[afi] = 0; asd->field_is_char_type[afi] = 0; }
+      // Extract field flags from SFieldInfo into temp arrays first, then copy
+      // (workaround for gen0 codegen issue with struct field access in loops)
+      int *tmp_fa = my_malloc(anf * 8);
+      int *tmp_fc = my_malloc(anf * 8);
+      int *tmp_fp = my_malloc(anf * 8);
+      int *tmp_fsh = my_malloc(anf * 8);
+      int *tmp_fl = my_malloc(anf * 8);
+      int *tmp_fct = my_malloc(anf * 8);
+      { int ti = 0; while (ti < anf) {
+        struct SFieldInfo *src = aflds[ti];
+        tmp_fa[ti] = src->is_array;
+        tmp_fc[ti] = src->is_char;
+        tmp_fp[ti] = src->is_ptr;
+        tmp_fsh[ti] = src->is_short;
+        tmp_fl[ti] = src->is_long;
+        tmp_fct[ti] = src->is_char_type;
+        ti = ti + 1;
+      } }
+      { int ci = 0; while (ci < anf) {
+        asd->field_is_array[ci] = tmp_fa[ci];
+        asd->field_is_char[ci] = tmp_fc[ci];
+        asd->field_is_ptr[ci] = tmp_fp[ci];
+        asd->field_is_short[ci] = tmp_fsh[ci];
+        asd->field_is_long[ci] = tmp_fl[ci];
+        asd->field_is_char_type[ci] = tmp_fct[ci];
+        ci = ci + 1;
+      } }
       inline_sdefs[ninline_sdefs] = asd;
       ninline_sdefs++;
       skip_qualifiers();
@@ -3094,11 +3152,12 @@ int *parse_base_type() {
         p_eat(TK_OP, ";");
       }
       p_eat(TK_OP, "}");
-      struct SDefInfo *lsdi = my_malloc(32);
+      struct SDefInfo *lsdi = my_malloc(48);
       lsdi->name = my_strdup(name);
       lsdi->flds = lflds;
       lsdi->nflds = lnf;
       lsdi->nwords = 0;
+      lsdi->is_union = is_union_kw;
       p_sdefs[np_sdefs] = lsdi;
       np_sdefs++;
       struct SDef *lsd = my_malloc(128);
@@ -3117,7 +3176,21 @@ int *parse_base_type() {
       lsd->field_is_short = my_malloc(lnf * 8);
       lsd->field_is_long = my_malloc(lnf * 8);
       lsd->field_is_char_type = my_malloc(lnf * 8);
-      for (int lfi2 = 0; lfi2 < lnf; lfi2++) { lsd->field_is_array[lfi2] = 0; lsd->field_is_char[lfi2] = 0; lsd->field_is_ptr[lfi2] = 0; lsd->field_is_short[lfi2] = 0; lsd->field_is_long[lfi2] = 0; lsd->field_is_char_type[lfi2] = 0; }
+      // Extract field flags via temp arrays (workaround for gen0 codegen issue)
+      { int *lfa = my_malloc(lnf * 8); int *lfc = my_malloc(lnf * 8); int *lfp = my_malloc(lnf * 8);
+        int *lfsh = my_malloc(lnf * 8); int *lfl = my_malloc(lnf * 8); int *lfct = my_malloc(lnf * 8);
+        int li2 = 0; while (li2 < lnf) {
+          struct SFieldInfo *src = lflds[li2];
+          lfa[li2] = src->is_array; lfc[li2] = src->is_char; lfp[li2] = src->is_ptr;
+          lfsh[li2] = src->is_short; lfl[li2] = src->is_long; lfct[li2] = src->is_char_type;
+          li2 = li2 + 1;
+        }
+        li2 = 0; while (li2 < lnf) {
+          lsd->field_is_array[li2] = lfa[li2]; lsd->field_is_char[li2] = lfc[li2]; lsd->field_is_ptr[li2] = lfp[li2];
+          lsd->field_is_short[li2] = lfsh[li2]; lsd->field_is_long[li2] = lfl[li2]; lsd->field_is_char_type[li2] = lfct[li2];
+          li2 = li2 + 1;
+        }
+      }
       inline_sdefs[ninline_sdefs] = lsd;
       ninline_sdefs++;
     }
@@ -4624,6 +4697,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     int f_is_char = 0;
     int f_is_short = 0;
     int f_is_long = 0;
+    int f_is_funcptr_td = 0;
     if (inline_sname != 0) {
       // Anonymous struct/union member: struct { ... }; — no field name, inject fields
       // parse_struct_or_union_def already ate the trailing ';', so check if next is not a field name
@@ -4668,12 +4742,17 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     } else {
       if (p_match(TK_KW, "char")) { f_is_char = 1; }
       f_is_short = p_match(TK_KW, "short");
+      // Pre-scan: check if type token is a funcptr typedef before parse_base_type resolves it
+      { int sv_fp = cur_pos; skip_qualifiers();
+        if (tok[cur_pos].kind == TK_ID && td_lookup_is_funcptr(tok[cur_pos].val)) { f_is_funcptr_td = 1; }
+        cur_pos = sv_fp; }
       ftype = parse_base_type();
       if (last_type_is_long) { f_is_short = 0; }
       f_is_long = last_type_is_long;
     }
     int is_ptr = 0;
     int is_funcptr = 0;
+    if (f_is_funcptr_td) { is_ptr = 1; }
     // Function pointer field: type (*name)(params) or type (*(*name)(params))(params)
     if (is_funcptr_decl()) {
       p_eat(TK_OP, "(");
@@ -4825,11 +4904,12 @@ struct SDef *parse_struct_or_union_def(int is_union) {
   if (p_match(TK_OP, ";")) { p_eat(TK_OP, ";"); }
 
   // Register in parser struct defs
-  struct SDefInfo *sdi = my_malloc(32);
+  struct SDefInfo *sdi = my_malloc(48);
   sdi->name = my_strdup(name);
   sdi->flds = finfo;
   sdi->nflds = nf;
   sdi->nwords = 0;
+  sdi->is_union = is_union;
   p_sdefs[np_sdefs] = sdi;
   np_sdefs++;
 
@@ -5794,11 +5874,12 @@ int skip_extern_decl() {
 }
 
 void register_td_struct(int *sname, int **td_fields, struct SFieldInfo **td_finfo, int td_nf, int is_union, struct SDef **structs, int *ns_ptr) {
-  struct SDefInfo *sdi = my_malloc(32);
+  struct SDefInfo *sdi = my_malloc(48);
   sdi->name = my_strdup(sname);
   sdi->flds = td_finfo;
   sdi->nflds = td_nf;
   sdi->nwords = 0;
+  sdi->is_union = is_union;
   p_sdefs[np_sdefs] = sdi;
   np_sdefs++;
   int **ftypes = my_malloc(512 * 8);
@@ -5897,6 +5978,7 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
         int f_is_char = 0;
         int tf_is_short = 0;
         int tf_is_long = 0;
+        int tf_is_funcptr_td = 0;
         if (td_inline_sname != 0) {
           ftype = td_inline_sname;
         } else {
@@ -5912,6 +5994,7 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
           else if (tok[cur_pos].kind == TK_ID) {
             int ftdc = td_lookup_is_char(tok[cur_pos].val);
             if (ftdc) { f_is_char = 1; }
+            if (td_lookup_is_funcptr(tok[cur_pos].val)) { tf_is_funcptr_td = 1; }
           }
           cur_pos = sv_fc;
           ftype = parse_base_type();
@@ -5920,6 +6003,7 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
         }
         fis_ptr = 0;
         int td_fp = 0;
+        if (tf_is_funcptr_td) { fis_ptr = 1; }
         if (is_funcptr_decl()) { p_eat(TK_OP, "("); p_eat(TK_OP, "*"); fis_ptr = 1; td_fp = 1; }
         while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); fis_ptr = 1; }
         skip_qualifiers();
@@ -6989,7 +7073,7 @@ int cg_struct_nfields(int *sname) {
     }
     i++;
   }
-  printf("cc: struct '%s' not found for nfields\n", sname);
+  printf("cc: struct '%s' not found for nfields in %s\n", sname, cg_cur_func_name);
   return 1;
 }
 
@@ -8056,7 +8140,11 @@ int gen_val_cast(struct Expr *e) {
     emit_line("\tuxth\tw0, w0");
     emit_line("\tmov\tx0, x0");
   }
+#ifdef __STDC__
+  return 0;
+#else
   return;
+#endif
 }
 
 int gen_val_num(struct Expr *e) {
@@ -8065,13 +8153,11 @@ int gen_val_num(struct Expr *e) {
   if (e->nargs == 1) {
     int w0 = val & 65535;
     int v1 = val;
-    // Use logical right shift (>>>) equivalent: divide by power of 2 but handle sign
-    // Actually we can use the & operator with shifting
     v1 = val >> 16;
     int w1 = v1 & 65535;
-    v1 = val >> 32;
+    v1 = (val >> 16) >> 16;
     int w2 = v1 & 65535;
-    v1 = val >> 48;
+    v1 = ((val >> 16) >> 16) >> 16;
     int w3 = v1 & 65535;
     emit_s("\tmovz\tx0, #"); emit_unum(w0); emit_ch('\n');
     if (w1 != 0) { emit_s("\tmovk\tx0, #"); emit_unum(w1); emit_s(", lsl #16\n"); }
@@ -8084,8 +8170,8 @@ int gen_val_num(struct Expr *e) {
   } else {
     int lo = val & 65535;
     int w1 = (val >> 16) & 65535;
-    int w2 = (val >> 32) & 65535;
-    int w3 = (val >> 48) & 65535;
+    int w2 = ((val >> 16) >> 16) & 65535;
+    int w3 = (((val >> 16) >> 16) >> 16) & 65535;
     emit_s("\tmovz\tx0, #");
     emit_unum(lo);
     emit_ch('\n');
@@ -10420,7 +10506,9 @@ int cg_compute_struct_layout(int si) {
 }
 
 int cg_register_structs(struct Program *prog) {
+#ifndef __STDC__
   struct SDef *sd = 0;
+#endif
   // Register struct/union definitions
   int i = 0;
   struct SDef *sd = 0;
@@ -10512,6 +10600,9 @@ int cg_emit_globals(struct Program *prog) {
   int ch = 0;
   int i = 0;
   int k = 0;
+#ifdef __STDC__
+  int fsi = 0;
+#endif
   struct GDecl *gd = 0;
   // Emit global variables
   if (prog->nglobals > 0) {
@@ -10639,18 +10730,31 @@ int cg_emit_globals(struct Program *prog) {
               int plen = my_strlen(decoded);
               int byte_start = 0;
               if (ca_slot_byte_off != 0) { byte_start = ca_slot_byte_off[fsi % nf_per_elem]; }
-              int packed = 0;
+              int packed_lo = 0;
+              int packed_hi = 0;
               int pi = 0;
-              while (pi < 8 && (byte_start + pi) < plen) {
+              while (pi < 4 && (byte_start + pi) < plen) {
                 int byte_val = __read_byte(decoded, byte_start + pi);
-                packed = packed | (byte_val << (pi * 8));
+                packed_lo = packed_lo | (byte_val << (pi * 8));
                 pi++;
               }
-              // Emit as hex to avoid emit_num truncation
+              while (pi < 8 && (byte_start + pi) < plen) {
+                int byte_val = __read_byte(decoded, byte_start + pi);
+                packed_hi = packed_hi | (byte_val << ((pi - 4) * 8));
+                pi++;
+              }
+              // Emit as hex: high 32 bits then low 32 bits
               emit_s("\t.quad\t0x");
-              int hi = 15;
+              int hi = 7;
               while (hi >= 0) {
-                int nibble = (packed >> (hi * 4)) & 0xF;
+                int nibble = (packed_hi >> (hi * 4)) & 0xF;
+                if (nibble < 10) { emit_ch('0' + nibble); }
+                else { emit_ch('a' + nibble - 10); }
+                hi = hi - 1;
+              }
+              hi = 7;
+              while (hi >= 0) {
+                int nibble = (packed_lo >> (hi * 4)) & 0xF;
                 if (nibble < 10) { emit_ch('0' + nibble); }
                 else { emit_ch('a' + nibble - 10); }
                 hi = hi - 1;
@@ -10784,6 +10888,23 @@ int cg_emit_globals(struct Program *prog) {
         emit_s("_"); emit_s(gd->name); emit_line(":");
         emit_s("\t.quad\t"); emit_num(gd->init_val); emit_ch('\n');
       } else {
+        // Uninitialized (tentative def): skip if an initialized def exists
+        int skip_tentative = 0;
+        int ti = 0;
+        while (ti < prog->nglobals) {
+          if (ti != i) {
+            struct GDecl *tgd = prog->globals[ti];
+            if (tgd != 0 && tgd >= 4096) {
+              if (my_strcmp(tgd->name, gd->name) == 0) {
+                if (tgd->has_init || tgd->init_list != 0 || tgd->init_str != 0) {
+                  skip_tentative = 1;
+                }
+              }
+            }
+          }
+          ti++;
+        }
+        if (skip_tentative) { i++; continue; }
         // Uninitialized: use .comm (or .zerofill for static)
         int gsz = 8;
         if (gd->stype != 0 && gd->is_ptr == 0) {
@@ -10967,7 +11088,11 @@ int ninclude_dirs;
 int *cc_out_path;
 int *cc_c_path;
 
+#ifdef __STDC__
+int *parse_args(int argc, char **argv) {
+#else
 int *parse_args(int argc, int *argv) {
+#endif
   int *out_path = "a.out";
   int *c_path = 0;
 
@@ -11137,7 +11262,11 @@ int write_and_link(int *c_path, int *out_path) {
   return 0;
 }
 
+#ifdef __STDC__
+int main(int argc, char **argv) {
+#else
 int main(int argc, int *argv) {
+#endif
   int *c_path = parse_args(argc, argv);
   if (c_path == 0) { return 2; }
   int *out_path = cc_out_path;

@@ -5,7 +5,7 @@ CC = clang
 all: gen1
 
 gen1: selfhost.c
-	$(CC) -o gen1 selfhost.c
+	$(CC) -Wno-incompatible-pointer-types -Wno-format -Wno-implicit-function-declaration -Wno-int-conversion -Wno-shift-count-overflow -Wno-pointer-integer-compare -Wno-compare-distinct-pointer-types -Wno-pointer-type-mismatch -o gen1 selfhost.c
 
 bootstrap: gen1
 	@echo "=== Stage 1: gen1 compiles selfhost.c ==="
@@ -28,7 +28,7 @@ bootstrap: gen1
 
 test: gen1
 	@pass=0; fail=0; \
-	for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99; do \
+	for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99 100 101 102; do \
 		if [ -f tests/test_batch$$n.c ]; then \
 			if ./gen1 tests/test_batch$$n.c -o /tmp/test_batch$${n}_out 2>/dev/null && /tmp/test_batch$${n}_out 2>/dev/null; then \
 				pass=$$((pass + 1)); \
