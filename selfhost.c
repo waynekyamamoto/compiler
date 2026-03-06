@@ -235,6 +235,7 @@ struct CGlobal {
   int *ptr_stype;
   int is_barechar;
   int is_intptr;
+  int is_bare_char_arr;
 };
 struct CGlobal cgg[MAX_CG_GLOBALS];
 int ncg_g;
@@ -4742,9 +4743,11 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     } else {
       if (p_match(TK_KW, "char")) { f_is_char = 1; }
       f_is_short = p_match(TK_KW, "short");
-      // Pre-scan: check if type token is a funcptr typedef before parse_base_type resolves it
+      // Pre-scan: check if type token is a funcptr or char typedef before parse_base_type resolves it
       { int sv_fp = cur_pos; skip_qualifiers();
         if (tok[cur_pos].kind == TK_ID && td_lookup_is_funcptr(tok[cur_pos].val)) { f_is_funcptr_td = 1; }
+        if (tok[cur_pos].kind == TK_ID) { int ftdc = td_lookup_is_char(tok[cur_pos].val); if (ftdc) { f_is_char = 1; } }
+        if ((p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) && cur_pos + 1 < ntokens && tok[cur_pos + 1].kind == TK_KW && my_strcmp(tok[cur_pos + 1].val, "char") == 0) { f_is_char = 1; }
         cur_pos = sv_fp; }
       ftype = parse_base_type();
       if (last_type_is_long) { f_is_short = 0; }
@@ -6787,6 +6790,16 @@ int cg_global_is_array(int *name) {
   return 0;
 }
 
+int cg_global_is_bare_char_arr(int *name) {
+  if (cg_is_local(name)) return 0;
+  int i = 0;
+  while (i < ncg_g) {
+    if (my_strcmp(cgg[i].name, name) == 0) { return cgg[i].is_bare_char_arr; }
+    i++;
+  }
+  return 0;
+}
+
 int func_returns_ptr(int *name) {
   int i = 0;
   while (i < n_ptr_ret) {
@@ -7952,6 +7965,9 @@ int gen_addr(struct Expr *e) {
       } else if (cg_is_char_larr(e->left->sval)) {
         idx_stride = 1;
         idx_is_char = 1;
+      } else if (use_proper_layout && cg_global_is_bare_char_arr(e->left->sval)) {
+        idx_stride = 1;
+        idx_is_char = 1;
       } else {
         idx_stype = cg_structvar_type(e->left->sval);
         if (idx_stype == 0) {
@@ -8262,7 +8278,7 @@ int gen_val_index(struct Expr *e) {
     return 0;
   }
   gen_addr(e);
-  if (e->left->kind == ND_VAR && (cg_is_char(e->left->sval) || cg_is_char_larr(e->left->sval))) {
+  if (e->left->kind == ND_VAR && (cg_is_char(e->left->sval) || cg_is_char_larr(e->left->sval) || (use_proper_layout && cg_global_is_bare_char_arr(e->left->sval)))) {
     emit_line("\tldrb\tw0, [x0]");
   } else if ((e->left->kind == ND_ARROW || e->left->kind == ND_FIELD) && cg_field_is_char(e->left->sval2, e->left->sval) && (cg_field_is_ptr(e->left->sval2, e->left->sval) == 0 || cg_field_is_array(e->left->sval2, e->left->sval) == 0)) {
     emit_line("\tldrb\tw0, [x0]");
@@ -8430,7 +8446,7 @@ int gen_val_assign(struct Expr *e) {
     if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { assign_char = 1; }
     // *char_ptr++ = val or *char_ptr-- = val
     if (e->left->kind == ND_UNARY && e->left->ival == '*' && (e->left->left->kind == ND_POSTINC || e->left->left->kind == ND_POSTDEC) && e->left->left->left != 0 && e->left->left->left->kind == ND_VAR && cg_is_char(e->left->left->left->sval)) { assign_char = 1; }
-    if (e->left->kind == ND_INDEX && e->left->left->kind == ND_VAR && (cg_is_char(e->left->left->sval) || cg_is_char_larr(e->left->left->sval))) { assign_char = 1; }
+    if (e->left->kind == ND_INDEX && e->left->left->kind == ND_VAR && (cg_is_char(e->left->left->sval) || cg_is_char_larr(e->left->left->sval) || (use_proper_layout && cg_global_is_bare_char_arr(e->left->left->sval)))) { assign_char = 1; }
     if (e->left->kind == ND_INDEX && (e->left->left->kind == ND_ARROW || e->left->left->kind == ND_FIELD) && cg_field_is_char(e->left->left->sval2, e->left->left->sval) && (cg_field_is_ptr(e->left->left->sval2, e->left->left->sval) == 0 || cg_field_is_array(e->left->left->sval2, e->left->left->sval) == 0)) { assign_char = 1; }
     if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left->kind == ND_BINARY && e->left->left->left != 0 && e->left->left->left->kind == ND_VAR && cg_is_char(e->left->left->left->sval)) { assign_char = 1; }
     // char *arr[N]; arr[i][j] = val
@@ -8742,14 +8758,14 @@ int gen_val_binary(struct Expr *e) {
       if (e->left->kind == ND_VAR) {
         if (cg_is_intptr(e->left->sval) || (cg_is_array(e->left->sval) && cg_is_char_larr(e->left->sval) == 0)) {
           left_intptr = 1;
-        } else if (cg_global_is_array(e->left->sval) && cg_is_char_arr(e->left->sval) == 0) {
+        } else if (cg_global_is_array(e->left->sval) && cg_is_char_arr(e->left->sval) == 0 && cg_global_is_bare_char_arr(e->left->sval) == 0) {
           left_intptr = 1;
         }
       }
       if (e->right->kind == ND_VAR) {
         if (cg_is_intptr(e->right->sval) || (cg_is_array(e->right->sval) && cg_is_char_larr(e->right->sval) == 0)) {
           right_intptr = 1;
-        } else if (cg_global_is_array(e->right->sval) && cg_is_char_arr(e->right->sval) == 0) {
+        } else if (cg_global_is_array(e->right->sval) && cg_is_char_arr(e->right->sval) == 0 && cg_global_is_bare_char_arr(e->right->sval) == 0) {
           right_intptr = 1;
         }
       }
@@ -10372,6 +10388,10 @@ int cg_register_globals(struct Program *prog) {
     if (gd->is_ptr == 1) { if (gd->array_size < 0) { cgg[ncg_g].ptr_stype = gd->stype; } }
     cgg[ncg_g].is_barechar = (gd->is_char && gd->is_ptr == 0 && gd->array_size < 0) ? (gd->is_unsigned ? 2 : 1) : 0;
     cgg[ncg_g].is_intptr = (gd->is_ptr > 0 && gd->stype == 0 && (gd->is_char == 0 || gd->is_ptr >= 2) && gd->array_size < 0) ? 1 : 0;
+    cgg[ncg_g].is_bare_char_arr = 0;
+    if (gd->is_char && gd->is_ptr == 0 && gd->array_size >= 0) {
+      cgg[ncg_g].is_bare_char_arr = 1;
+    }
     ncg_g++;
   }
   return 0;
@@ -10503,6 +10523,94 @@ int cg_compute_struct_layout(int si) {
   cg_s_fbytesize[si] = fbytesize;
   cg_s_bytesize[si] = total;
   return 0;
+}
+
+// Build flat slot layout: for each flattened slot index, compute byte offset and byte size
+// Returns number of slots filled
+int cg_build_slot_layout(int *sname, int *slot_off, int *slot_sz, int max_slots) {
+  sname = cg_resolve_sname(sname);
+  int si = cg_find_struct_index(sname);
+  if (si < 0 || cg_s_fbyteoff[si] == 0) return 0;
+
+  // Union: 1 slot at offset 0
+  if (cg_s_is_union[si]) {
+    if (max_slots > 0) { slot_off[0] = 0; slot_sz[0] = cg_s_bytesize[si]; }
+    return 1;
+  }
+
+  int slot = 0;
+  int j = 0;
+  while (j < cg_snfields[si]) {
+    int f_off = cg_s_fbyteoff[si][j];
+    int f_sz = cg_s_fbytesize[si][j];
+    int f_is_ptr = (cg_s_fp[si] != 0) ? cg_s_fp[si][j] : 0;
+    int f_is_arr = (cg_s_fa[si] != 0) ? cg_s_fa[si][j] : 0;
+    int f_is_char = (cg_s_fc[si] != 0) ? cg_s_fc[si][j] : 0;
+    int *f_stype = cg_sfield_types[si][j];
+
+    if (f_stype != 0 && f_is_ptr == 0 && f_is_arr == 0) {
+      // Embedded struct: recurse into sub-fields
+      int sub_nf = cg_struct_nfields(f_stype);
+      int *sub_off = my_malloc(sub_nf * 8);
+      int *sub_sz = my_malloc(sub_nf * 8);
+      int sub_n = cg_build_slot_layout(f_stype, sub_off, sub_sz, sub_nf);
+      int si2 = 0;
+      while (si2 < sub_n && slot < max_slots) {
+        slot_off[slot] = f_off + sub_off[si2];
+        slot_sz[slot] = sub_sz[si2];
+        slot++;
+        si2++;
+      }
+    } else if (f_is_arr > 0 && f_is_char && f_is_ptr == 0) {
+      // Char array: ceil(arr_size / 8) packed slots
+      int ca_nslots = (f_is_arr + 7) / 8;
+      int csi = 0;
+      while (csi < ca_nslots && slot < max_slots) {
+        slot_off[slot] = f_off + csi * 8;
+        slot_sz[slot] = 8;
+        slot++;
+        csi++;
+      }
+    } else if (f_is_arr > 0 && f_stype != 0 && f_is_ptr == 0) {
+      // Array of structs
+      int sub_nf = cg_struct_nfields(f_stype);
+      int elem_bsz = cg_struct_byte_size(f_stype);
+      int ai = 0;
+      while (ai < f_is_arr) {
+        int *sub_off = my_malloc(sub_nf * 8);
+        int *sub_sz = my_malloc(sub_nf * 8);
+        int sub_n = cg_build_slot_layout(f_stype, sub_off, sub_sz, sub_nf);
+        int si2 = 0;
+        while (si2 < sub_n && slot < max_slots) {
+          slot_off[slot] = f_off + ai * elem_bsz + sub_off[si2];
+          slot_sz[slot] = sub_sz[si2];
+          slot++;
+          si2++;
+        }
+        ai++;
+      }
+    } else if (f_is_arr > 0) {
+      // Array of scalars
+      int elem_sz = f_sz / f_is_arr;
+      if (elem_sz < 1) { elem_sz = 1; }
+      int ai = 0;
+      while (ai < f_is_arr && slot < max_slots) {
+        slot_off[slot] = f_off + ai * elem_sz;
+        slot_sz[slot] = elem_sz;
+        slot++;
+        ai++;
+      }
+    } else {
+      // Simple scalar field
+      if (slot < max_slots) {
+        slot_off[slot] = f_off;
+        slot_sz[slot] = f_sz;
+        slot++;
+      }
+    }
+    j++;
+  }
+  return slot;
 }
 
 int cg_register_structs(struct Program *prog) {
@@ -10712,17 +10820,21 @@ int cg_emit_globals(struct Program *prog) {
         }
         if (has_data == 0) { emit_ch('\n'); emit_line("\t.data"); has_data = 1; }
         if (gd->is_static == 0) { emit_s("\t.globl\t_"); emit_line(gd->name); }
-        emit_line("\t.p2align\t3");
+        int gd_is_char_arr = (gd->is_char && gd->is_ptr == 0);
+        int *gd_dir = "\t.quad\t";
+        if (gd_is_char_arr) { gd_dir = "\t.byte\t"; }
+        if (gd_is_char_arr) { emit_line("\t.p2align\t0"); }
+        else { emit_line("\t.p2align\t3"); }
         emit_s("_"); emit_s(gd->name); emit_line(":");
         fsi = 0;
         while (fsi < total_slots) {
           struct Expr *fe = flat[fsi];
           if (fe == 0) {
-            emit_line("\t.quad\t0");
+            emit_s(gd_dir); emit_line("0");
           } else if (fe->kind == ND_NUM) {
-            emit_s("\t.quad\t"); emit_num(fe->ival); emit_ch('\n');
+            emit_s(gd_dir); emit_num(fe->ival); emit_ch('\n');
           } else if (fe->kind == ND_UNARY && fe->ival == '-' && fe->left->kind == ND_NUM) {
-            emit_s("\t.quad\t-"); emit_num(fe->left->ival); emit_ch('\n');
+            emit_s(gd_dir); emit_ch('-'); emit_num(fe->left->ival); emit_ch('\n');
           } else if (fe->kind == ND_STRLIT) {
             // Check if this slot is a char array field - pack bytes inline
             if (ca_slot_map != 0 && ca_slot_map[fsi % nf_per_elem] > 0) {
@@ -10769,36 +10881,57 @@ int cg_emit_globals(struct Program *prog) {
           } else if (fe->kind == ND_UNARY && fe->ival == '&' && fe->left != 0 && fe->left->kind == ND_VAR) {
             emit_s("\t.quad\t_"); emit_line(fe->left->sval);
           } else if (fe->kind == ND_CAST && fe->left != 0 && fe->left->kind == ND_NUM) {
-            emit_s("\t.quad\t"); emit_num(fe->left->ival); emit_ch('\n');
+            emit_s(gd_dir); emit_num(fe->left->ival); emit_ch('\n');
           } else if (fe->kind == ND_CAST && fe->left != 0 && fe->left->kind == ND_VAR) {
             emit_s("\t.quad\t_"); emit_line(fe->left->sval);
           } else {
             int cval = 0;
             if (try_eval_const(fe, &cval)) {
-              emit_s("\t.quad\t"); emit_num(cval); emit_ch('\n');
+              emit_s(gd_dir); emit_num(cval); emit_ch('\n');
             } else {
-              emit_line("\t.quad\t0");
+              emit_s(gd_dir); emit_line("0");
             }
           }
           fsi++;
         }
       } else if (gd->array_size >= 0 && gd->init_str != 0) {
-        // String-initialized array: emit .quad per character
+        // String-initialized array
         int *decoded = cg_decode_string(gd->init_str);
         int slen = my_strlen(decoded) + 1;
         if (has_data == 0) { emit_ch('\n'); emit_line("\t.data"); has_data = 1; }
         if (gd->is_static == 0) { emit_s("\t.globl\t_"); emit_line(gd->name); }
-        emit_line("\t.p2align\t3");
-        emit_s("_"); emit_s(gd->name); emit_line(":");
-        k = 0;
-        while (k < slen && k < gd->array_size) {
-          ch = __read_byte(decoded, k);
-          emit_s("\t.quad\t"); emit_num(ch); emit_ch('\n');
-          k++;
+        if (gd->is_char && gd->is_ptr == 0) {
+          // Bare char array: emit .byte per character
+          emit_line("\t.p2align\t0");
+          emit_s("_"); emit_s(gd->name); emit_line(":");
+          k = 0;
+          while (k < slen && k < gd->array_size) {
+            ch = __read_byte(decoded, k);
+            emit_s("\t.byte\t"); emit_num(ch); emit_ch('\n');
+            k++;
+          }
+          // Zero-pad remaining bytes if array_size > slen
+          while (k < gd->array_size) {
+            emit_line("\t.byte\t0");
+            k++;
+          }
+        } else {
+          // Non-char array: emit .quad per character (8 bytes each)
+          emit_line("\t.p2align\t3");
+          emit_s("_"); emit_s(gd->name); emit_line(":");
+          k = 0;
+          while (k < slen && k < gd->array_size) {
+            ch = __read_byte(decoded, k);
+            emit_s("\t.quad\t"); emit_num(ch); emit_ch('\n');
+            k++;
+          }
         }
       } else if (gd->array_size >= 0) {
         // Uninitialized array: use .comm (or .zerofill for static)
         int elem_sz = 8;
+        if (use_proper_layout && gd->is_char && gd->is_ptr == 0) {
+          elem_sz = 1;
+        }
         if (gd->stype != 0 && gd->is_ptr == 0) {
           int nf = cg_struct_nfields(gd->stype);
           if (use_proper_layout) {
@@ -10822,6 +10955,7 @@ int cg_emit_globals(struct Program *prog) {
         }
       } else if (gd->init_list != 0 && gd->init_list->kind == ND_INITLIST) {
         // Struct (non-array) with init list: struct S obj = {10, 20};
+        if (gd->stype != 0 && use_proper_layout) { printf("cc: struct init '%s' stype='%s' nargs=%d\n", gd->name, gd->stype, gd->init_list->nargs); }
         int nf_total = 0;
         if (gd->stype != 0) { nf_total = cg_struct_nfields(gd->stype); }
         if (nf_total < gd->init_list->nargs) { nf_total = gd->init_list->nargs; }
@@ -10842,35 +10976,97 @@ int cg_emit_globals(struct Program *prog) {
         if (gd->is_static == 0) { emit_s("\t.globl\t_"); emit_line(gd->name); }
         emit_line("\t.p2align\t3");
         emit_s("_"); emit_s(gd->name); emit_line(":");
-        fsi = 0;
-        while (fsi < nf_total) {
-          struct Expr *fe = sflat[fsi];
-          if (fe == 0) {
-            emit_line("\t.quad\t0");
-          } else if (fe->kind == ND_NUM) {
-            emit_s("\t.quad\t"); emit_num(fe->ival); emit_ch('\n');
-          } else if (fe->kind == ND_UNARY && fe->ival == '-' && fe->left->kind == ND_NUM) {
-            emit_s("\t.quad\t-"); emit_num(fe->left->ival); emit_ch('\n');
-          } else if (fe->kind == ND_STRLIT) {
-            int *slabel = cg_intern_string(fe->sval);
-            emit_s("\t.quad\t"); emit_line(slabel);
-          } else if (fe->kind == ND_VAR) {
-            emit_s("\t.quad\t_"); emit_line(fe->sval);
-          } else if (fe->kind == ND_UNARY && fe->ival == '&' && fe->left != 0 && fe->left->kind == ND_VAR) {
-            emit_s("\t.quad\t_"); emit_line(fe->left->sval);
-          } else if (fe->kind == ND_CAST && fe->left != 0 && fe->left->kind == ND_NUM) {
-            emit_s("\t.quad\t"); emit_num(fe->left->ival); emit_ch('\n');
-          } else if (fe->kind == ND_CAST && fe->left != 0 && fe->left->kind == ND_VAR) {
-            emit_s("\t.quad\t_"); emit_line(fe->left->sval);
-          } else {
-            int cval = 0;
-            if (try_eval_const(fe, &cval)) {
-              emit_s("\t.quad\t"); emit_num(cval); emit_ch('\n');
-            } else {
-              emit_line("\t.quad\t0");
-            }
+        if (use_proper_layout && gd->stype != 0) {
+          // Proper layout: emit each slot at its correct byte offset with correct size
+          int *sl_off = my_malloc(nf_total * 8);
+          int *sl_sz = my_malloc(nf_total * 8);
+          int sl_n = cg_build_slot_layout(gd->stype, sl_off, sl_sz, nf_total);
+          if (my_strcmp(gd->name, "sqlite3Config") == 0) {
+            printf("cc: slot_layout for '%s': sl_n=%d nf_total=%d\n", gd->name, sl_n, nf_total);
+            int di = 0;
+            while (di < sl_n && di < 15) { printf("  slot[%d]: off=%d sz=%d\n", di, sl_off[di], sl_sz[di]); di++; }
           }
-          fsi++;
+          int cur_off = 0;
+          fsi = 0;
+          while (fsi < nf_total) {
+            int f_off = (fsi < sl_n) ? sl_off[fsi] : cur_off;
+            int f_sz = (fsi < sl_n) ? sl_sz[fsi] : 8;
+            // Emit padding
+            if (f_off > cur_off) {
+              emit_s("\t.zero\t"); emit_num(f_off - cur_off); emit_ch('\n');
+              cur_off = f_off;
+            }
+            // Choose directive
+            int *dir = "\t.quad\t";
+            if (f_sz == 1) { dir = "\t.byte\t"; }
+            else if (f_sz == 2) { dir = "\t.short\t"; }
+            else if (f_sz == 4) { dir = "\t.long\t"; }
+            struct Expr *fe = sflat[fsi];
+            if (fe == 0) {
+              emit_s(dir); emit_line("0");
+            } else if (fe->kind == ND_NUM) {
+              emit_s(dir); emit_num(fe->ival); emit_ch('\n');
+            } else if (fe->kind == ND_UNARY && fe->ival == '-' && fe->left->kind == ND_NUM) {
+              emit_s(dir); emit_ch('-'); emit_num(fe->left->ival); emit_ch('\n');
+            } else if (fe->kind == ND_STRLIT) {
+              int *slabel = cg_intern_string(fe->sval);
+              emit_s("\t.quad\t"); emit_line(slabel);
+            } else if (fe->kind == ND_VAR) {
+              emit_s("\t.quad\t_"); emit_line(fe->sval);
+            } else if (fe->kind == ND_UNARY && fe->ival == '&' && fe->left != 0 && fe->left->kind == ND_VAR) {
+              emit_s("\t.quad\t_"); emit_line(fe->left->sval);
+            } else if (fe->kind == ND_CAST && fe->left != 0 && fe->left->kind == ND_NUM) {
+              emit_s(dir); emit_num(fe->left->ival); emit_ch('\n');
+            } else if (fe->kind == ND_CAST && fe->left != 0 && fe->left->kind == ND_VAR) {
+              emit_s("\t.quad\t_"); emit_line(fe->left->sval);
+            } else {
+              int cval = 0;
+              if (try_eval_const(fe, &cval)) {
+                emit_s(dir); emit_num(cval); emit_ch('\n');
+              } else {
+                emit_s(dir); emit_line("0");
+              }
+            }
+            cur_off = cur_off + f_sz;
+            fsi++;
+          }
+          // Trailing padding
+          int total_bsz = cg_struct_byte_size(gd->stype);
+          if (cur_off < total_bsz) {
+            emit_s("\t.zero\t"); emit_num(total_bsz - cur_off); emit_ch('\n');
+          }
+        } else {
+          // Legacy: .quad per slot
+          fsi = 0;
+          while (fsi < nf_total) {
+            struct Expr *fe = sflat[fsi];
+            if (fe == 0) {
+              emit_line("\t.quad\t0");
+            } else if (fe->kind == ND_NUM) {
+              emit_s("\t.quad\t"); emit_num(fe->ival); emit_ch('\n');
+            } else if (fe->kind == ND_UNARY && fe->ival == '-' && fe->left->kind == ND_NUM) {
+              emit_s("\t.quad\t-"); emit_num(fe->left->ival); emit_ch('\n');
+            } else if (fe->kind == ND_STRLIT) {
+              int *slabel = cg_intern_string(fe->sval);
+              emit_s("\t.quad\t"); emit_line(slabel);
+            } else if (fe->kind == ND_VAR) {
+              emit_s("\t.quad\t_"); emit_line(fe->sval);
+            } else if (fe->kind == ND_UNARY && fe->ival == '&' && fe->left != 0 && fe->left->kind == ND_VAR) {
+              emit_s("\t.quad\t_"); emit_line(fe->left->sval);
+            } else if (fe->kind == ND_CAST && fe->left != 0 && fe->left->kind == ND_NUM) {
+              emit_s("\t.quad\t"); emit_num(fe->left->ival); emit_ch('\n');
+            } else if (fe->kind == ND_CAST && fe->left != 0 && fe->left->kind == ND_VAR) {
+              emit_s("\t.quad\t_"); emit_line(fe->left->sval);
+            } else {
+              int cval = 0;
+              if (try_eval_const(fe, &cval)) {
+                emit_s("\t.quad\t"); emit_num(cval); emit_ch('\n');
+              } else {
+                emit_line("\t.quad\t0");
+              }
+            }
+            fsi++;
+          }
         }
       } else if (gd->has_init != 0 && gd->init_str != 0) {
         // String initialized

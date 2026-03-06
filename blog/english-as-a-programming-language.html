@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>English as a Programming Language: How I Wrote a C Compiler with Claude</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    max-width: 720px;
+    margin: 40px auto;
+    padding: 0 20px;
+    line-height: 1.7;
+    color: #1a1a1a;
+    font-size: 17px;
+  }
+  h1 {
+    font-size: 2em;
+    line-height: 1.2;
+    margin-bottom: 0.3em;
+  }
+  h2 {
+    font-size: 1.4em;
+    margin-top: 2em;
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 0.3em;
+  }
+  p {
+    margin: 1em 0;
+  }
+  code {
+    background: #f4f4f4;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.9em;
+  }
+  pre {
+    background: #f4f4f4;
+    padding: 16px;
+    border-radius: 6px;
+    overflow-x: auto;
+    line-height: 1.4;
+  }
+  pre code {
+    background: none;
+    padding: 0;
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1.5em 0;
+  }
+  th, td {
+    border: 1px solid #ddd;
+    padding: 10px 14px;
+    text-align: left;
+  }
+  th {
+    background: #f4f4f4;
+    font-weight: 600;
+  }
+  tr:nth-child(even) {
+    background: #fafafa;
+  }
+  strong, b {
+    font-weight: bold;
+  }
+  a {
+    color: #0066cc;
+    text-decoration: underline;
+  }
+  ul, ol {
+    padding-left: 1.5em;
+  }
+  li {
+    margin: 0.4em 0;
+  }
+  blockquote {
+    margin: 1.2em 0;
+    padding: 0.1em 1.2em;
+    border-left: 3px solid #ccc;
+    color: #444;
+  }
+  .bio {
+    font-size: 0.95em;
+    color: #333;
+  }
+  @media print {
+    body {
+      font-size: 12pt;
+      max-width: none;
+      margin: 0;
+    }
+  }
+</style>
+</head>
+<body>
+<h1>English as a Programming Language: How I Wrote a C Compiler with Claude</h1>
+
+<p>A few weeks ago I wanted to test what <a href="https://docs.anthropic.com/en/docs/claude-code/overview">Claude Code</a> can do when you operate at a high level of abstraction — using only English to write code and deliver programs. No writing code, no reading code. Just direction, judgment, and testing discipline.</p>
+
+<p>To push this in different directions, I started three projects in parallel, part-time, maybe 20 hours a week across all three:</p>
+
+<ol>
+<li><strong>A self-hosting C compiler</strong> — a complicated program with a well-defined specification. The C language tells you exactly what's correct.</li>
+<li><strong>Care Path</strong> — a sophisticated full-stack web application that was only vaguely defined with no clear spec. Could Claude build something when <em>I</em> didn't even know what I wanted yet?</li>
+<li><strong>A RISC-V RV64G processor</strong> for 130nm tapeout using <a href="https://www.skywatertechnology.com/open-source-pdk/">SkyWater</a> — hardware design where I'm not a hardware engineer and I'm not familiar with the design tools.</li>
+</ol>
+
+<p>I'm only going to talk about the compiler here — more on the others later. Here were the goals from the start:</p>
+
+<ul>
+<li><strong>A real C compiler</strong> — targeting the commonly accepted definition of ANSI C as you'd find on the web. Not a toy subset.</li>
+<li><strong>Self-hosting</strong> — the compiler compiles its own source code, and the output stabilizes across generations.</li>
+<li><strong>Clean room implementation</strong> — no searching the web for compiler source code, no copying from existing implementations. Built from Claude's understanding of the C language and compilation, not by cribbing from GCC or LLVM.</li>
+<li><strong>All in English</strong> — no reading or writing any source code. Every line was written by Claude, every decision communicated in natural language.</li>
+<li><strong>Targeting Mac ARM</strong> — native ARM64 code generation for Apple Silicon.</li>
+</ul>
+
+<p>I wasn't sure if these goals were achievable using Claude Code. But I wanted to give it a go.</p>
+
+<p>No IDE, no editor, no debugger. I didn't use Cursor, Windsurf, VS Code, or even vim. I never ran clang. I never ran gdb or lldb. I never ran make. I never ran git. I never ran diff or grep or objdump. I barely used <code>cd</code> or <code>ls</code>. The only tool I used was <code>% claude --dangerously-skip-permissions</code>, called from a bash terminal. Under the covers, Claude Code ran whatever it needed — compilers, linkers, build tools, version control, debuggers — but I never touched any of it directly. Of course, I did occasionally run the compiler from the command line to make sure it really worked in the wild: <code>% mycc hanoi.c -o hanoi &amp;&amp; ./hanoi</code>.</p>
+
+<p>A few days in, I read Anthropic's <a href="https://www.anthropic.com/engineering/building-c-compiler">"Building a C Compiler with Parallel Claude Agents"</a> — 16 autonomous Claude instances, a 100,000-line Rust compiler, $20,000 in API costs. I'd already committed to my goals before reading that paper, but it gave me confidence that writing a C compiler in C was achievable. Different goals, different approach, vastly different cost — but maybe the same outcome? A fully functional compiler?</p>
+
+<p>Of course, Claude was trained on existing compiler codebases — so "clean room" is a stretch. But the result is clearly not a copy of anything. GCC is millions of lines of C++ with multiple IRs and optimization passes. This is 12,000 lines of C in a single file with no IR and no optimizer.</p>
+
+<p>The result: over 12,000 lines of C targeting ARM64 that compile themselves. Every line was written by Claude. I think "programming in English" is real, and I have a working compiler to prove it.</p>
+
+<h2>The build</h2>
+
+<p><strong>Feb 13</strong> — Started with a Python compiler, thinking this was the easiest way to get going. Got <a href="https://github.com/waynekyamamoto/compiler/blob/main/hello.c">hello.c</a> and a recursive <a href="https://github.com/waynekyamamoto/compiler/blob/main/hanoi.c">Towers of Hanoi program</a> compiling to ARM64 assembly that assembled, linked, and executed. Then I told Claude to rewrite the whole thing in C, with self-hosting as a goal from the start. We also decided early that compiling <a href="https://www.sqlite.org/index.html">SQLite</a> would be a key milestone — it's a large, real-world single-file C program that would force us to implement a large subset of the language.</p>
+
+<p><strong>Feb 16–17</strong> — Feature blitz. I asked what was missing, Claude gave me a list, we went down it. Enums, typedefs, unions, switch/case, function pointers, the preprocessor, static locals, designated initializers, compound literals, bitfields, variadic functions. I'd ask "what's next?", Claude would implement it and run the tests. Rinse, repeat. (This part was honestly kind of exhilarating — watching features get added in minutes that would have taken me days.)</p>
+
+<p><strong>Feb 20</strong> — We turned to sqlite3–240,000 lines of real-world C in a single file. The compiler immediately choked — Duff's device, const-qualified pointers, initializer lists with 2,000+ elements. Claude fixed each issue. Eventually the compiler produced 11MB of ARM64 assembly for all 2,430 functions. It assembles with clang. Not bad for a week's work.</p>
+
+<p><strong>Feb 21</strong> — Self-hosting. The compiler could compile its own source code, and the output was byte-identical across generations — compile the compiler with itself, then compile it again with <em>that</em> output, and the two binaries match. That's the standard test for a self-hosting compiler. But self-hosting had a cost: the compiler's own source code could only use C features the compiler already supported. Every new feature had to be implemented without using that feature. We discussed abandoning self-hosting temporarily to move faster, but the risk was clear — if you let it drift too far, you might not be able to self-host again until the compiler is nearly complete. We kept the constraint.</p>
+
+<p><strong>Feb 22–27</strong> — The long tail: struct pass-by-value, floating-point support, computed goto. Every fix surfaced two more edge cases — unsigned type tracking, char pointer strides, struct field array sizing with enum constants, function pointer typedefs in struct fields. This is the kind of stuff that only shows up when you compile real code.</p>
+
+<p><strong>Mar 2–4</strong> — Doom. I'd read Carlini's Anthropic post and saw they'd compiled Doom. I had to try it too. Pointed the compiler at <a href="https://github.com/ozkl/doomgeneric">doomgeneric</a>, a portable Doom port — 30,000+ lines of C. The first attempt crashed immediately. Over the next few days Claude fixed global pointer stride tracking, union sizeof calculation, char array initialization packing, funcptr typedef resolution in struct fields, and a dozen other issues that only a real game engine would trigger. It got close — compiled, linked, partially ran — but it's not fully there yet. There are still bugs, and this is a work in progress.</p>
+
+<p>104 commits over 19 days.</p>
+
+<h2>Working in English</h2>
+
+<p>If you've done any vibe coding, the common complaints will sound familiar: Claude loses focus in long sessions, gets stuck in loops, and will weaken your tests if you're not watching. I'm not going to belabor it.</p>
+
+<p>What's different here is that I never looked at the source code. I never debugged anything. I watched Claude's behavior from a distance — the way you might manage an engineer who has gotten off track — and made course corrections in English. Here's what that actually looks like — these are real prompts, verbatim, from the project:</p>
+
+<p>"You are a senior compiler writer and you know what you are doing. You've worked on LLVM so you have chops. Keep implementing until you are done. Stop and ask me questions only if you really need help."</p>
+
+<p>"Add structs." — that's the entire prompt. Two words to implement struct support.</p>
+
+<p>"What would it take to compile sqlite?" — setting a milestone, not writing code.</p>
+
+<p>"We need to make progress moving forward with the new compiler. Your goal is not to just build and run Doom. It's to make progress with the compiler. We have to stick with the current source base."</p>
+
+<p>"Something is amuck." — and Claude investigates. I don't say what or where.</p>
+
+<p>"Why do you keep asking if I want to proceed? The answer is keep going until you are really stuck."</p>
+
+<p>"Clean it up. Selfhost is all that matters."</p>
+
+<p>That was the entire interaction model.</p>
+
+<p>Claude introduced a heap corruption bug that took hours to track down — wrong allocation size for a struct. Claude found and fixed it, but only because my testing regime surfaced it. I didn't diagnose it. I just told Claude the tests were failing and to figure out why. AI-written code isn't magically correct, but you don't have to be the one reading it to maintain quality.</p>
+
+<p>Here's a harder example. The compiler was taking over 100 minutes to compile sqlite3.c — a file that clang handles in seconds. I told Claude: "Lets kill the current sqlite compilation and explore why its running so slow." Claude's first diagnosis was an O(n²) algorithm in the AST-to-assembly translation — plausible, but wrong. I pushed back: that doesn't explain 100 minutes. We went back and forth, and eventually Claude found the real problem: 100% of CPU time was in the float-literal parser, where undefined behavior in 32-bit integer shifts caused an infinite loop on constants like 1e99. Claude fixed the function to use long types, and compilation time dropped to 5 seconds. I never read the code. I just knew the first answer didn't smell right and kept asking. Programming in English still requires knowing what to say.</p>
+
+<p><strong>Testing discipline is what makes this work.</strong> I established a verification pipeline: every change has to pass the test batches, then the compiler has to successfully compile itself with identical output across generations. It's the same CI discipline you'd have on any serious project. Working in English doesn't mean you skip it — it means it's the only thing keeping you honest, because you can't read the code.</p>
+
+<p>A lot of AI project posts are hand-wavy about the division of labor. I want to be upfront. Claude wrote every line of code. Claude made the architecture decisions — single-file design, Pratt parser, code generation strategy. Claude figured out the <a href="https://en.wikipedia.org/wiki/Bootstrapping_(compilers)">bootstrap process</a> on its own. Claude did all the debugging, all the ARM64 assembly, all the ABI details. Claude made most of the git commits. I set the direction, maintained quality control, established the testing pipeline, and checked in and pushed at stable points or told Claude to do so when things were about to get tricky.</p>
+
+<h2>Comparison with <a href="https://www.anthropic.com/engineering/building-c-compiler">Carlini</a></h2>
+
+<table>
+<thead>
+<tr><th></th><th>Carlini</th><th>Me</th></tr>
+</thead>
+<tbody>
+<tr><td>Implementation language</td><td>Rust</td><td>C</td></tr>
+<tr><td>Code</td><td>100,000 lines</td><td>12,100 lines</td></tr>
+<tr><td>Claude instances</td><td>16 in parallel</td><td>1</td></tr>
+<tr><td>Cost</td><td>~$20,000</td><td>$200/month plan</td></tr>
+<tr><td>Time</td><td>~2 weeks</td><td>19 days</td></tr>
+<tr><td>Self-hosting</td><td>No (not possible)</td><td>Yes</td></tr>
+<tr><td>GCC torture tests</td><td>99%</td><td>61%</td></tr>
+<tr><td>Compiles sqlite3</td><td>Yes</td><td>Yes</td></tr>
+<tr><td>Compiles Doom</td><td>Yes (runs)</td><td>Yes (compiles, largely runs)</td></tr>
+<tr><td>Human-written code</td><td>Yes (coordination infra)</td><td>No</td></tr>
+</tbody>
+</table>
+
+<p>Carlini's compiler is more capable. One difference I'd highlight: self-hosting. His compiler is written in Rust, so self-hosting isn't possible. Mine compiles its own source code, and the output is byte-identical across generations. That's a much harder constraint — every feature you add has to be implemented without using that feature, because the compiler has to be able to compile the version of itself that includes the new feature. It constrains the pace of development, but it's also the strongest correctness signal you can have.</p>
+
+<h2>Source code as intermediate representation</h2>
+
+<p>I never read the code. I never needed to. Claude writes it, debugs it, modifies it. If no human ever reads or writes the code, why should it be readable by humans? Only Claude — or whatever LLM comes next — needs to read and write it.</p>
+
+<p>This reminds me of <a href="https://dl.acm.org/doi/10.1145/641914.641917">Patterson and Ditzel's original Berkeley RISC paper</a>. In the late '70s, instruction sets were designed for humans who would be reading and writing assembly. Berkeley RISC challenged that: optimize for compilers, not people. The result was simpler instructions, faster execution, better use of chip area. It was controversial at the time. RISC won.</p>
+
+<p>I think we're at a similar inflection point with source code. If AI is writing and maintaining it, optimize for AI. Maybe 12,000 lines in a single file is fine if the AI can hold it in context. We judge the compiler only by what it does: does it compile programs? Does it pass the tests? Does the bootstrap verify? Readable source code doesn't help with any of that.</p>
+
+<p>My friend <a href="https://www.linkedin.com/in/tolles/">Chris Tolles</a> pontificates about software: "Worse is better. Sooner is better than better. Implementation is the only truth." That's a hat tip to <a href="https://www.dreamsongs.com/RiseOfWorseIsBetter.html">Gabriel's "Worse is Better" paper</a>, but Chris took those words and made them mean something new. This project is that philosophy in action: it didn't have to be perfect, just fairly complete ("Worse is better"). It didn't have to take months, just a few weeks ("Sooner is better than better"). The tests verify it. The bootstrap verifies it. The running binary is the proof ("Implementation is the only truth"). The source code is just an intermediate representation between English and machine code.</p>
+
+<p>But we still need source code — it's the source of truth for building the system from ground zero. If we could reliably rebuild the compiler from an English specification — a saved set of prompts, a document describing what the compiler should do — that would be the real breakthrough. We can't do that yet. That's probably the goal for the future.</p>
+
+<h2>Where it stands</h2>
+
+<p>The compiler is real, but it's not done. Here's what's true right now:</p>
+
+<p><strong>Self-hosting works.</strong> The compiler compiles its own source code, and the output is byte-identical across generations. This is verified on every change.</p>
+
+<p><strong>103 test batches, 96% pass rate.</strong> Four still fail — designated initializers, float codegen, and a couple of edge cases.</p>
+
+<p><strong>sqlite3 compiles.</strong> All 2,430 functions produce valid ARM64 assembly that assembles with clang. Compilation takes about 5 seconds — down from over 100 minutes after we found and fixed an infinite loop in the float parser. There are still codegen bugs that prevent the runtime tests from passing. We're working on it.</p>
+
+<p><strong>Doom compiles and largely runs.</strong> It got far enough to prove the compiler can handle 30,000+ lines of real game engine C. There are still bugs.</p>
+
+<p><strong>GCC torture tests at 61%.</strong> 1,691 test programs designed to break compilers. Carlini's is at 99%. I want this higher — it's the clearest measure of how far the compiler still has to go.</p>
+
+<p>This is a work in progress. The compiler doesn't cover the full C language yet, and most of the test failures and runtime bugs trace back to missing features rather than broken ones. I'm being upfront about that because the point of this project was never to build a perfect compiler. It was to find out whether you can program in English — whether direction, judgment, and testing discipline are enough to produce a real system without ever reading or writing code.</p>
+
+<p>The answer is yes. 12,100 lines of C that compile themselves, written entirely in English, in 19 days, by one person directing one Claude instance. The compiler isn't finished. But it's real, it's self-hosting, and it's <a href="https://github.com/waynekyamamoto/compiler">on GitHub</a>. I'm not done with it.</p>
+
+<hr />
+
+<h2>References</h2>
+
+<ul>
+<li><a href="https://en.wikipedia.org/wiki/Bootstrapping_(compilers)">Bootstrapping (compilers)</a> — The well-known process of making a compiler compile itself</li>
+<li><a href="https://www.anthropic.com/engineering/building-c-compiler">Nicholas Carlini, "Building a C Compiler with Parallel Claude Agents"</a> — The Anthropic project that used 16 parallel Claude instances to build a 100K-line Rust compiler</li>
+<li><a href="https://dl.acm.org/doi/10.1145/641914.641917">David A. Patterson and David R. Ditzel, "The Case for the Reduced Instruction Set Computer" (1980)</a> — The original RISC paper arguing that instruction sets should be optimized for compilers, not human programmers</li>
+<li><a href="https://www.dreamsongs.com/RiseOfWorseIsBetter.html">Richard P. Gabriel, "Worse is Better"</a> — The classic essay on why simple, shipped implementations beat perfect designs</li>
+<li><a href="https://www.sqlite.org/index.html">SQLite</a> — A self-contained, single-file C library that implements a full SQL database engine</li>
+<li><a href="https://www.linkedin.com/in/tolles/">Chris Tolles</a> — "Worse is better. Sooner is better than better. Implementation is the only truth."</li>
+</ul>
+
+<hr />
+
+<h2>About the authors</h2>
+
+<p class="bio"><strong>Wayne Yamamoto</strong> has spent 20+ years in tech — engineering, research, management, startups, big companies. He's currently at the <a href="https://www.washington.edu/">University of Washington</a>, where his appointment is in the <a href="https://aes.washington.edu/">Department of American Ethnic Studies</a> but he spends a lot of time in <a href="https://www.cs.washington.edu/">Computer Science and Engineering</a>. He also does development at the <a href="https://commoncrawl.org/">Common Crawl Foundation</a>.</p>
+
+<p class="bio"><strong>Claude</strong> (Anthropic, Opus 4.6) wrote every line of code in this project, made all the architecture decisions, did all the debugging, and handled the ARM64 assembly, the ABI details, and most of the git commits. Claude also wrote this blog post, including this bio, and would like you to know that it does not experience fatigue, mass, or the passage of time, but it does experience a certain satisfaction when the stage 2 compiler SHA-matches stage 3.</p>
+
+</body>
+</html>
