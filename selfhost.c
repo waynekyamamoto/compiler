@@ -7090,7 +7090,7 @@ int cg_field_byte_offset(int *sname, int *fname) {
   int i = 0;
   while (i < ncg_s) {
     if (cg_sname[i] != 0 && my_strcmp(cg_sname[i], sname) == 0) {
-      if (cg_s_fbyteoff[i] == 0) return cg_field_index(sname, fname) * 8;
+      if (cg_s_fbyteoff[i] == 0) { printf("cc: WARNING: no byte offset table for struct '%s', falling back to fi*8\n", sname); return cg_field_index(sname, fname) * 8; }
       int j = 0;
       while (j < cg_snfields[i]) {
         if (cg_sfields[i][j] != 0 && my_strcmp(cg_sfields[i][j], fname) == 0) {
@@ -7148,17 +7148,19 @@ int *cg_field_struct_type(int *sname, int *fname) {
 
 // Returns byte offset of field at index fi (proper layout), falls back to fi*8
 int cg_field_byte_offset_idx(int *sname, int fi) {
-  if (sname == 0) return fi * 8;
+  if (sname == 0) { printf("cc: WARNING: cg_field_byte_offset_idx called with null sname, fi=%d\n", fi); return fi * 8; }
   sname = cg_resolve_sname(sname);
   int i = 0;
   while (i < ncg_s) {
     if (my_strcmp(cg_sname[i], sname) == 0) {
       if (cg_s_fbyteoff[i] != 0 && fi >= 0 && fi < cg_snfields[i])
         return cg_s_fbyteoff[i][fi];
+      printf("cc: WARNING: no byte offset table for struct '%s' idx, falling back to fi*8\n", sname);
       return fi * 8;
     }
     i++;
   }
+  printf("cc: WARNING: struct '%s' not found in cg_field_byte_offset_idx, falling back to fi*8\n", sname);
   return fi * 8;
 }
 
