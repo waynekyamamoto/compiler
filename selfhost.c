@@ -2406,60 +2406,59 @@ int p_sizeof_struct_proper(int *sname) {
   return total;
 }
 
-// Compute sizeof for a struct type name (resolves typedefs, expands embedded structs 1 level deep)
-int p_sizeof_struct(int *sname) {
-  if (use_proper_layout) { return p_sizeof_struct_proper(sname); }
-  // Try direct struct lookup
+// Compute byte offset of field fname in struct sname using proper layout
+int p_field_byte_offset(int *sname, int *fname) {
   struct SDefInfo *sd = find_sdef(sname);
-  // If not found, try resolving as typedef
   if (sd == 0) {
     int *resolved = find_typedef(sname);
-    if (resolved != 0) {
-      sd = find_sdef(resolved);
-    }
+    if (resolved != 0) { sd = find_sdef(resolved); }
   }
-  if (sd == 0) return 8;
-  if (sd->nwords > 0) return sd->nwords * 8;
-  // Count total words, expanding embedded struct fields and arrays
-  int total = 0;
+  if (sd == 0) return 0;
+  if (sd->nwords > 0) return 0;
+  int offset = 0;
   int fi = 0;
   while (fi < sd->nflds) {
-    int f_slots = 1;
     int *fst = sd->flds[fi]->stype;
     int fip = sd->flds[fi]->is_ptr;
     int f_arr = sd->flds[fi]->is_array;
     int f_chr = sd->flds[fi]->is_char;
-    if (fip == 0 && f_arr > 0 && f_chr) {
-      // Char array field: ceil(arr_size / 8) slots
-      f_slots = (f_arr + 7) / 8;
-    } else if (fip == 0 && f_arr > 0) {
-      // Non-char array field: expand to array_size slots (or array_size * struct_nwords for struct arrays)
-      if (fst != 0) {
-        struct SDefInfo *fsd = find_sdef(fst);
-        if (fsd == 0) { int *fr = find_typedef(fst); if (fr != 0) { fsd = find_sdef(fr); } }
-        int elem_slots = 1;
-        if (fsd != 0) { elem_slots = (fsd->nwords > 0) ? fsd->nwords : fsd->nflds; }
-        f_slots = f_arr * elem_slots;
+    int f_cht = sd->flds[fi]->is_char_type;
+    int f_sht = sd->flds[fi]->is_short;
+    int f_lng = sd->flds[fi]->is_long;
+    int fsz = 4;
+    int falign = 4;
+    if (fip > 0) {
+      fsz = 8; falign = 8;
+    } else if (fst != 0) {
+      fsz = p_sizeof_struct_proper(fst);
+      falign = 4;
+      if (fsz >= 8) { falign = 8; }
+    } else if (f_chr || f_cht) {
+      fsz = 1; falign = 1;
+    } else if (f_sht) {
+      fsz = 2; falign = 2;
+    } else if (f_lng) {
+      fsz = 8; falign = 8;
+    }
+    if (f_arr > 0) {
+      if (f_chr && fip == 0) {
+        fsz = f_arr; falign = 1;
       } else {
-        f_slots = f_arr;
-      }
-    } else if (fst != 0 && fip == 0) {
-      // Embedded struct field — look up its size
-      struct SDefInfo *fsd = find_sdef(fst);
-      if (fsd == 0) {
-        int *fr = find_typedef(fst);
-        if (fr != 0) { fsd = find_sdef(fr); }
-      }
-      if (fsd != 0) {
-        if (fsd->nwords > 0) { f_slots = fsd->nwords; }
-        else { f_slots = fsd->nflds; }
+        fsz = fsz * f_arr;
       }
     }
-    total = total + f_slots;
-    fi = fi + 1;
+    offset = p_align_up(offset, falign);
+    if (my_strcmp(sd->flds[fi]->name, fname) == 0) {
+      return offset;
+    }
+    offset = offset + fsz;
+    fi++;
   }
-  if (total == 0) return 8;
-  return total * 8;
+  return 0;
+}
+
+int p_sizeof_struct(int *sname) {
+  return p_sizeof_struct_proper(sname);
 }
 
 int p_sizeof_field(int *sname, int *fname) {
@@ -2480,18 +2479,14 @@ int p_sizeof_field(int *sname, int *fname) {
         return sd->flds[fi]->is_array * elem_sz;
       }
       if (sd->flds[fi]->stype != 0) return p_sizeof_struct(sd->flds[fi]->stype);
-      if (use_proper_layout) {
-        if (sd->flds[fi]->is_char_type) return 1;
-        if (sd->flds[fi]->is_short) return 2;
-        if (sd->flds[fi]->is_long) return 8;
-        return 4;
-      }
-      return 8;
+      if (sd->flds[fi]->is_char_type) return 1;
+      if (sd->flds[fi]->is_short) return 2;
+      if (sd->flds[fi]->is_long) return 8;
+      return 4;
     }
     fi++;
   }
-  if (use_proper_layout) return 4;
-  return 8;
+  return 4;
 }
 
 int *resolve_stype(struct Expr *e) {
@@ -3727,12 +3722,10 @@ struct Expr *parse_unary() {
           sz = 1;
         } else if (sz_stype != 0) {
           sz = p_sizeof_struct(sz_stype);
-        } else if (use_proper_layout) {
+        } else {
           if (is_short_type) { sz = 2; }
           else if (is_long_type) { sz = 8; }
           else { sz = 4; }
-        } else {
-          sz = 8;
         }
         // Check for array dimension
         if (p_match(TK_OP, "[")) {
@@ -3760,7 +3753,7 @@ struct Expr *parse_unary() {
           int *sz_vname = tok[cur_pos].val;
           int *sz_vstype = find_lv_stype(sz_vname);
           int sz_elem = 8;
-          if (use_proper_layout) { sz_elem = 4; sz = 4; }
+          sz_elem = 4; sz = 4;
           int sz_isptr = find_lv_isptr(sz_vname);
           if (sz_isptr == 0) { sz_isptr = find_glv_isptr(sz_vname); }
           if (find_lv_is_char(sz_vname)) { sz_elem = 1; sz = 1; }
@@ -4015,22 +4008,10 @@ struct Expr *parse_primary() {
       p_eat(TK_OP, ",");
       int *ofs_field = my_strdup(p_eat(TK_ID, 0));
       p_eat(TK_OP, ")");
-      // Look up field index
+      // Look up proper byte offset
       int ofs_val = 0;
       if (ofs_stype != 0) {
-        int si3 = 0;
-        while (si3 < np_sdefs) {
-          struct SDefInfo *sdi3 = p_sdefs[si3];
-          if (my_strcmp(sdi3->name, ofs_stype) == 0) {
-            int fi3 = 0;
-            while (fi3 < sdi3->nflds) {
-              if (my_strcmp(sdi3->flds[fi3]->name, ofs_field) == 0) { ofs_val = fi3 * 8; fi3 = sdi3->nflds; }
-              fi3++;
-            }
-            si3 = np_sdefs;
-          }
-          si3++;
-        }
+        ofs_val = p_field_byte_offset(ofs_stype, ofs_field);
       }
       e = new_num(ofs_val);
     }
@@ -7404,11 +7385,9 @@ int lay_walk_expr_cl(struct Expr *e, int *offset) {
     int *cl_name = build_str2("__cl_", int_to_str(cg_cl_counter));
     cg_cl_counter++;
     int nf = cg_struct_nfields(e->sval);
-    if (use_proper_layout) {
+    {
       int bsz = cg_struct_byte_size(e->sval);
       *offset = *offset + ((bsz + 7) / 8) * 8;
-    } else {
-      *offset = *offset + nf * 8;
     }
     lay_add_slot(cl_name, *offset);
     if (nlay_sv >= 64) my_fatal("too many struct vars");
@@ -7497,11 +7476,9 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
         if (vd->stype != 0 && vd->is_ptr == 0 && vd->arr_size >= 0) {
           // struct array: allocate arr_size * nfields slots
           nf = cg_struct_nfields(vd->stype);
-          if (use_proper_layout) {
+          {
             int bsz = cg_struct_byte_size(vd->stype);
             *offset = *offset + vd->arr_size * ((bsz + 7) / 8) * 8;
-          } else {
-            *offset = *offset + vd->arr_size * nf * 8;
           }
           lay_sv_name[nlay_sv] = my_strdup(vd->name);
           lay_sv_type[nlay_sv] = my_strdup(vd->stype);
@@ -7512,11 +7489,9 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
           nlay_arr++;
         } else if (vd->stype != 0 && vd->is_ptr == 0) {
           nf = cg_struct_nfields(vd->stype);
-          if (use_proper_layout) {
+          {
             int bsz = cg_struct_byte_size(vd->stype);
             *offset = *offset + ((bsz + 7) / 8) * 8;
-          } else {
-            *offset = *offset + nf * 8;
           }
           lay_sv_name[nlay_sv] = my_strdup(vd->name);
           lay_sv_type[nlay_sv] = my_strdup(vd->stype);
@@ -7798,11 +7773,9 @@ int layout_func(struct FuncDef *f) {
   for (int i = 0; i < f->nparams; i++) {
     if (f->param_stypes != 0 && f->param_stypes[i] != 0) {
       int nf = cg_struct_nfields(f->param_stypes[i]);
-      if (use_proper_layout) {
+      {
         int bsz = cg_struct_byte_size(f->param_stypes[i]);
         offset += ((bsz + 7) / 8) * 8;
-      } else {
-        offset += nf * 8;
       }
       lay_add_slot(f->params[i], offset);
       lay_sv_name[nlay_sv] = my_strdup(f->params[i]);
@@ -7965,7 +7938,7 @@ int gen_addr(struct Expr *e) {
       } else if (cg_is_char_larr(e->left->sval)) {
         idx_stride = 1;
         idx_is_char = 1;
-      } else if (use_proper_layout && cg_global_is_bare_char_arr(e->left->sval)) {
+      } else if (cg_global_is_bare_char_arr(e->left->sval)) {
         idx_stride = 1;
         idx_is_char = 1;
       } else {
@@ -7997,7 +7970,7 @@ int gen_addr(struct Expr *e) {
         idx_is_char = 1;
       }
       // Proper layout: determine element stride for array fields in structs
-      if (use_proper_layout && idx_is_char == 0 && cg_field_is_array(e->left->sval2, e->left->sval) > 0) {
+      if (idx_is_char == 0 && cg_field_is_array(e->left->sval2, e->left->sval) > 0) {
         int fp = cg_field_is_ptr(e->left->sval2, e->left->sval);
         if (fp == 0) {
           int es = cg_field_arr_elem_size(e->left->sval2, e->left->sval);
@@ -8024,11 +7997,7 @@ int gen_addr(struct Expr *e) {
       }
     }
     if (idx_stype != 0) {
-      if (use_proper_layout) {
-        idx_stride = cg_struct_byte_size(idx_stype);
-      } else {
-        idx_stride = cg_struct_nfields(idx_stype) * 8;
-      }
+      idx_stride = cg_struct_byte_size(idx_stype);
     }
     gen_value(e->left);
     emit_line("\tstr\tx0, [sp, #-16]!");
@@ -8063,11 +8032,7 @@ int gen_addr(struct Expr *e) {
         fi_stype = e->sval2;
       }
       if (fi_stype != 0) {
-        if (use_proper_layout) {
-          fi_stride = cg_struct_byte_size(fi_stype);
-        } else {
-          fi_stride = cg_struct_nfields(fi_stype) * 8;
-        }
+        fi_stride = cg_struct_byte_size(fi_stype);
       }
       gen_value(e->left->left);
       emit_line("\tstr\tx0, [sp, #-16]!");
@@ -8080,33 +8045,24 @@ int gen_addr(struct Expr *e) {
       }
       emit_line("\tldr\tx1, [sp], #16");
       emit_line("\tadd\tx0, x1, x0");
-      if (use_proper_layout) {
+      {
         int boff = cg_field_byte_offset(e->sval2, e->sval);
         if (boff > 0) { emit_add_imm("x0", "x0", boff); }
-      } else {
-        fi = cg_field_index(e->sval2, e->sval);
-        if (fi > 0) { emit_add_imm("x0", "x0", fi * 8); }
       }
       return 0;
     }
     gen_addr(e->left);
-    if (use_proper_layout) {
+    {
       int boff = cg_field_byte_offset(e->sval2, e->sval);
       if (boff > 0) { emit_add_imm("x0", "x0", boff); }
-    } else {
-      fi = cg_field_index(e->sval2, e->sval);
-      if (fi > 0) { emit_add_imm("x0", "x0", fi * 8); }
     }
     return 0;
   }
   if (e->kind == ND_ARROW) {
     gen_value(e->left);
-    if (use_proper_layout) {
+    {
       int boff = cg_field_byte_offset(e->sval2, e->sval);
       if (boff > 0) { emit_add_imm("x0", "x0", boff); }
-    } else {
-      fi = cg_field_index(e->sval2, e->sval);
-      if (fi > 0) { emit_add_imm("x0", "x0", fi * 8); }
     }
     return 0;
   }
@@ -8232,14 +8188,12 @@ int gen_val_field_arrow(struct Expr *e) {
   if (cg_field_is_array(e->sval2, e->sval)) {
     return 0;
   }
-  if (use_proper_layout) {
+  {
     int bsz = cg_field_byte_size(e->sval2, e->sval);
     if (bsz == 1) { emit_line("\tldrb\tw0, [x0]"); }
     else if (bsz == 2) { emit_line("\tldrsh\tx0, [x0]"); }
     else if (bsz == 4) { emit_line("\tldrsw\tx0, [x0]"); }
     else { emit_line("\tldr\tx0, [x0]"); }
-  } else {
-    emit_line("\tldr\tx0, [x0]");
   }
   if (bf_width > 0) {
     if (bf_bit_off > 0) {
@@ -8278,14 +8232,14 @@ int gen_val_index(struct Expr *e) {
     return 0;
   }
   gen_addr(e);
-  if (e->left->kind == ND_VAR && (cg_is_char(e->left->sval) || cg_is_char_larr(e->left->sval) || (use_proper_layout && cg_global_is_bare_char_arr(e->left->sval)))) {
+  if (e->left->kind == ND_VAR && (cg_is_char(e->left->sval) || cg_is_char_larr(e->left->sval) || cg_global_is_bare_char_arr(e->left->sval))) {
     emit_line("\tldrb\tw0, [x0]");
   } else if ((e->left->kind == ND_ARROW || e->left->kind == ND_FIELD) && cg_field_is_char(e->left->sval2, e->left->sval) && (cg_field_is_ptr(e->left->sval2, e->left->sval) == 0 || cg_field_is_array(e->left->sval2, e->left->sval) == 0)) {
     emit_line("\tldrb\tw0, [x0]");
   } else if (e->left->kind == ND_INDEX && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_char_arr(e->left->left->sval)) {
     // char *arr[N]; arr[i][j] — second index should byte-load
     emit_line("\tldrb\tw0, [x0]");
-  } else if (use_proper_layout && (e->left->kind == ND_ARROW || e->left->kind == ND_FIELD) && cg_field_is_array(e->left->sval2, e->left->sval) > 0 && cg_field_is_ptr(e->left->sval2, e->left->sval) == 0) {
+  } else if ((e->left->kind == ND_ARROW || e->left->kind == ND_FIELD) && cg_field_is_array(e->left->sval2, e->left->sval) > 0 && cg_field_is_ptr(e->left->sval2, e->left->sval) == 0) {
     int es = cg_field_arr_elem_size(e->left->sval2, e->left->sval);
     if (es == 1) { emit_line("\tldrb\tw0, [x0]"); }
     else if (es == 2) { emit_line("\tldrsh\tx0, [x0]"); }
@@ -8378,7 +8332,7 @@ int gen_val_assign(struct Expr *e) {
       }
       emit_line("\tldr\tx1, [sp], #16");
       // x0 = src addr, x1 = dest addr — byte-level copy
-      if (use_proper_layout) {
+      {
         int sa_bsz = cg_struct_byte_size(sa_type);
         int sa_bi = 0;
         while (sa_bi + 8 <= sa_bsz) {
@@ -8407,19 +8361,6 @@ int gen_val_assign(struct Expr *e) {
           emit_s("\tstrb\tw9, [x1, #"); emit_num(sa_bi); emit_line("]");
           sa_bi = sa_bi + 1;
         }
-      } else {
-        sa_fi = 0;
-        while (sa_fi < sa_nf) {
-          if (sa_fi * 8 <= 32760) {
-            emit_s("\tldr\tx9, [x0, #"); emit_num(sa_fi * 8); emit_line("]");
-            emit_s("\tstr\tx9, [x1, #"); emit_num(sa_fi * 8); emit_line("]");
-          } else {
-            emit_mov_imm("x10", sa_fi * 8);
-            emit_line("\tldr\tx9, [x0, x10]");
-            emit_line("\tstr\tx9, [x1, x10]");
-          }
-          sa_fi++;
-        }
       }
       return 0;
     }
@@ -8446,7 +8387,7 @@ int gen_val_assign(struct Expr *e) {
     if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { assign_char = 1; }
     // *char_ptr++ = val or *char_ptr-- = val
     if (e->left->kind == ND_UNARY && e->left->ival == '*' && (e->left->left->kind == ND_POSTINC || e->left->left->kind == ND_POSTDEC) && e->left->left->left != 0 && e->left->left->left->kind == ND_VAR && cg_is_char(e->left->left->left->sval)) { assign_char = 1; }
-    if (e->left->kind == ND_INDEX && e->left->left->kind == ND_VAR && (cg_is_char(e->left->left->sval) || cg_is_char_larr(e->left->left->sval) || (use_proper_layout && cg_global_is_bare_char_arr(e->left->left->sval)))) { assign_char = 1; }
+    if (e->left->kind == ND_INDEX && e->left->left->kind == ND_VAR && (cg_is_char(e->left->left->sval) || cg_is_char_larr(e->left->left->sval) || cg_global_is_bare_char_arr(e->left->left->sval))) { assign_char = 1; }
     if (e->left->kind == ND_INDEX && (e->left->left->kind == ND_ARROW || e->left->left->kind == ND_FIELD) && cg_field_is_char(e->left->left->sval2, e->left->left->sval) && (cg_field_is_ptr(e->left->left->sval2, e->left->left->sval) == 0 || cg_field_is_array(e->left->left->sval2, e->left->left->sval) == 0)) { assign_char = 1; }
     if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left->kind == ND_BINARY && e->left->left->left != 0 && e->left->left->left->kind == ND_VAR && cg_is_char(e->left->left->left->sval)) { assign_char = 1; }
     // char *arr[N]; arr[i][j] = val
@@ -8459,13 +8400,13 @@ int gen_val_assign(struct Expr *e) {
     }
     if (assign_char) {
       emit_line("\tstrb\tw0, [x1]");
-    } else if (use_proper_layout && (e->left->kind == ND_FIELD || e->left->kind == ND_ARROW)) {
+    } else if (e->left->kind == ND_FIELD || e->left->kind == ND_ARROW) {
       int bsz = cg_field_byte_size(e->left->sval2, e->left->sval);
       if (bsz == 1) { emit_line("\tstrb\tw0, [x1]"); }
       else if (bsz == 2) { emit_line("\tstrh\tw0, [x1]"); }
       else if (bsz == 4) { emit_line("\tstr\tw0, [x1]"); }
       else { emit_line("\tstr\tx0, [x1]"); }
-    } else if (use_proper_layout && e->left->kind == ND_INDEX && (e->left->left->kind == ND_ARROW || e->left->left->kind == ND_FIELD) && cg_field_is_array(e->left->left->sval2, e->left->left->sval) > 0 && cg_field_is_ptr(e->left->left->sval2, e->left->left->sval) == 0) {
+    } else if (e->left->kind == ND_INDEX && (e->left->left->kind == ND_ARROW || e->left->left->kind == ND_FIELD) && cg_field_is_array(e->left->left->sval2, e->left->left->sval) > 0 && cg_field_is_ptr(e->left->left->sval2, e->left->left->sval) == 0) {
       int es = cg_field_arr_elem_size(e->left->left->sval2, e->left->left->sval);
       if (es == 1) { emit_line("\tstrb\tw0, [x1]"); }
       else if (es == 2) { emit_line("\tstrh\tw0, [x1]"); }
@@ -8484,11 +8425,7 @@ int gen_val_postinc_postdec(struct Expr *e) {
   if (e->left->kind == ND_VAR) {
     int *pi_pstype = cg_ptr_structvar_type(e->left->sval);
     if (pi_pstype != 0) {
-      if (use_proper_layout) {
-        inc = cg_struct_byte_size(pi_pstype);
-      } else {
-        inc = cg_struct_nfields(pi_pstype) * 8;
-      }
+      inc = cg_struct_byte_size(pi_pstype);
     } else if (cg_is_intptr(e->left->sval)) {
       inc = 8;
     }
@@ -8537,7 +8474,7 @@ int gen_val_compoulit(struct Expr *e) {
     int cl_k = 0;
     int cl_target = 0;
     int cl_off = 0;
-    if (use_proper_layout && e->sval != 0) {
+    if (e->sval != 0) {
       // Zero-fill the compound literal first
       int bsz = cg_struct_byte_size(e->sval);
       int nslots = (bsz + 7) / 8;
@@ -8742,7 +8679,7 @@ int gen_val_binary(struct Expr *e) {
       scale_rhs = 0;
     }
     if (pstype != 0) {
-      int scale = use_proper_layout ? cg_struct_byte_size(pstype) : cg_struct_nfields(pstype) * 8;
+      int scale = cg_struct_byte_size(pstype);
       if (scale_rhs) {
         emit_mov_imm("x9", scale);
         emit_line("\tmul\tx0, x0, x9");
@@ -8818,7 +8755,7 @@ int gen_val_binary(struct Expr *e) {
       int *left_pstype = cg_ptr_structvar_type(e->left->sval);
       int *right_pstype = cg_ptr_structvar_type(e->right->sval);
       if (left_pstype != 0 && right_pstype != 0) {
-        int scale = use_proper_layout ? cg_struct_byte_size(left_pstype) : cg_struct_nfields(left_pstype) * 8;
+        int scale = cg_struct_byte_size(left_pstype);
         emit_mov_imm("x9", scale);
         emit_line("\tsdiv\tx0, x0, x9");
       } else if (cg_is_intptr(e->left->sval) && cg_is_intptr(e->right->sval)) {
@@ -9474,7 +9411,7 @@ int gen_stmt_vardecl(struct Stmt *st, int *ret_label) {
       if (vd->init != 0 && vd->init->kind == ND_INITLIST) {
         base_off = cg_find_slot(vd->name);
         // Zero-fill struct before writing init elements
-        if (use_proper_layout) {
+        {
           int bsz = cg_struct_byte_size(vd->stype);
           int nslots = (bsz + 7) / 8;
           k = 0;
@@ -9489,25 +9426,10 @@ int gen_stmt_vardecl(struct Stmt *st, int *ret_label) {
             }
             k++;
           }
-        } else {
-        nf = cg_struct_nfields(vd->stype);
-        k = 0;
-        while (k < nf) {
-          elem_off = base_off - k * 8;
-          emit_line("\tmov\tx0, #0");
-          if (elem_off <= 255) {
-            emit_s("\tstr\tx0, [x29, #-"); emit_num(elem_off); emit_line("]");
-          } else {
-            emit_sub_imm("x9", "x29", elem_off);
-            emit_line("\tstr\tx0, [x9]");
-          }
-          k++;
-        }
         }
         vd_di = vd->init->desig;
         vd_pos_idx = 0;
         k = 0;
-        if (use_proper_layout) {
         while (k < vd->init->nargs) {
           if (vd->init->args[k] != 0 && vd->init->args[k]->kind == ND_INITLIST) {
             struct Expr *inner = vd->init->args[k];
@@ -9553,54 +9475,13 @@ int gen_stmt_vardecl(struct Stmt *st, int *ret_label) {
           }
           k++;
         }
-        } else {
-        while (k < vd->init->nargs) {
-          // Handle nested init lists inside struct init (embedded structs/arrays)
-          if (vd->init->args[k] != 0 && vd->init->args[k]->kind == ND_INITLIST) {
-            struct Expr *inner = vd->init->args[k];
-            vd_target = vd_pos_idx;
-            if (vd_di != 0 && vd_di[k] >= 0) { vd_target = vd_di[k]; }
-            int ni_j = 0;
-            while (ni_j < inner->nargs) {
-              gen_value(inner->args[ni_j]);
-              elem_off = base_off - (vd_target + ni_j) * 8;
-              if (elem_off <= 255) {
-                emit_s("\tstr\tx0, [x29, #-"); emit_num(elem_off); emit_line("]");
-              } else {
-                emit_sub_imm("x9", "x29", elem_off);
-                emit_line("\tstr\tx0, [x9]");
-              }
-              ni_j++;
-            }
-            vd_pos_idx = vd_target + inner->nargs;
-            k++;
-            continue;
-          }
-          gen_value(vd->init->args[k]);
-          vd_target = vd_pos_idx;
-          if (vd_di != 0 && vd_di[k] >= 0) { vd_target = vd_di[k]; }
-          vd_pos_idx = vd_target + 1;
-          elem_off = base_off - vd_target * 8;
-          if (elem_off <= 255) {
-            emit_s("\tstr\tx0, [x29, #-");
-            emit_num(elem_off);
-            emit_line("]");
-          } else {
-            emit_s("\tsub\tx9, x29, #");
-            emit_num(elem_off);
-            emit_ch('\n');
-            emit_line("\tstr\tx0, [x9]");
-          }
-          k++;
-        }
-        }
       } else if (vd->init != 0 && vd->init->kind == ND_CALL) {
         // Struct init from function call: struct Foo x = make_foo();
         base_off = cg_find_slot(vd->name);
         gen_value(vd->init);
         // x0 = pointer to returned struct
         emit_line("\tmov\tx10, x0");
-        if (use_proper_layout) {
+        {
           int bsz = cg_struct_byte_size(vd->stype);
           int nslots = (bsz + 7) / 8;
           k = 0;
@@ -9611,28 +9492,13 @@ int gen_stmt_vardecl(struct Stmt *st, int *ret_label) {
             emit_line("\tstr\tx9, [x11]");
             k++;
           }
-        } else {
-        nf = cg_struct_nfields(vd->stype);
-        k = 0;
-        while (k < nf) {
-          emit_s("\tldr\tx9, [x10, #"); emit_num(k * 8); emit_line("]");
-          elem_off = base_off - k * 8;
-          if (elem_off <= 255) {
-            emit_s("\tstr\tx9, [x29, #-"); emit_num(elem_off); emit_line("]");
-          } else {
-            if (elem_off <= 4095) { emit_s("\tsub\tx11, x29, #"); emit_num(elem_off); emit_ch('\n'); }
-            else { emit_mov_imm("x11", elem_off); emit_line("\tsub\tx11, x29, x11"); }
-            emit_line("\tstr\tx9, [x11]");
-          }
-          k++;
-        }
         }
       } else if (vd->init != 0) {
         // Struct copy from expression: struct Foo x = other_struct;
         base_off = cg_find_slot(vd->name);
         gen_addr(vd->init);
         emit_line("\tmov\tx10, x0");
-        if (use_proper_layout) {
+        {
           int bsz = cg_struct_byte_size(vd->stype);
           int nslots = (bsz + 7) / 8;
           k = 0;
@@ -9643,21 +9509,6 @@ int gen_stmt_vardecl(struct Stmt *st, int *ret_label) {
             emit_line("\tstr\tx9, [x11]");
             k++;
           }
-        } else {
-        nf = cg_struct_nfields(vd->stype);
-        k = 0;
-        while (k < nf) {
-          emit_s("\tldr\tx9, [x10, #"); emit_num(k * 8); emit_line("]");
-          elem_off = base_off - k * 8;
-          if (elem_off <= 255) {
-            emit_s("\tstr\tx9, [x29, #-"); emit_num(elem_off); emit_line("]");
-          } else {
-            if (elem_off <= 4095) { emit_s("\tsub\tx11, x29, #"); emit_num(elem_off); emit_ch('\n'); }
-            else { emit_mov_imm("x11", elem_off); emit_line("\tsub\tx11, x29, x11"); }
-            emit_line("\tstr\tx9, [x11]");
-          }
-          k++;
-        }
         }
       }
       i++;
@@ -9693,7 +9544,7 @@ int gen_stmt_vardecl(struct Stmt *st, int *ret_label) {
             emit_line("\tstrb\tw0, [x9]");
             k++;
           }
-        } else if (use_proper_layout && vd->stype != 0 && vd->is_ptr == 0) {
+        } else if (vd->stype != 0 && vd->is_ptr == 0) {
         // Proper layout: array of structs
         int struct_bsz = cg_struct_byte_size(vd->stype);
         int total_bytes = vd->arr_size * struct_bsz;
@@ -10145,13 +9996,8 @@ int gen_func(struct FuncDef *f) {
   for (int i = 0; i < f->nparams && i < 8; i++) {
     int off = cg_find_slot(f->params[i]);
     if (f->param_stypes != 0 && f->param_stypes[i] != 0) {
-      int nf_copy = 0;
-      if (use_proper_layout) {
-        int bsz = cg_struct_byte_size(f->param_stypes[i]);
-        nf_copy = (bsz + 7) / 8;
-      } else {
-        nf_copy = cg_struct_nfields(f->param_stypes[i]);
-      }
+      int bsz = cg_struct_byte_size(f->param_stypes[i]);
+      int nf_copy = (bsz + 7) / 8;
       for (int fi = 0; fi < nf_copy; fi++) {
         int src_off = fi * 8;
         int dst_off = off - fi * 8;
@@ -10929,16 +10775,11 @@ int cg_emit_globals(struct Program *prog) {
       } else if (gd->array_size >= 0) {
         // Uninitialized array: use .comm (or .zerofill for static)
         int elem_sz = 8;
-        if (use_proper_layout && gd->is_char && gd->is_ptr == 0) {
+        if (gd->is_char && gd->is_ptr == 0) {
           elem_sz = 1;
         }
         if (gd->stype != 0 && gd->is_ptr == 0) {
-          int nf = cg_struct_nfields(gd->stype);
-          if (use_proper_layout) {
-            elem_sz = cg_struct_byte_size(gd->stype);
-          } else {
-            if (nf > 1) { elem_sz = nf * 8; }
-          }
+          elem_sz = cg_struct_byte_size(gd->stype);
         }
         int sz = gd->array_size * elem_sz;
         if (sz == 0 && gd->stype != 0) { sz = elem_sz; }
@@ -10955,7 +10796,7 @@ int cg_emit_globals(struct Program *prog) {
         }
       } else if (gd->init_list != 0 && gd->init_list->kind == ND_INITLIST) {
         // Struct (non-array) with init list: struct S obj = {10, 20};
-        if (gd->stype != 0 && use_proper_layout) { printf("cc: struct init '%s' stype='%s' nargs=%d\n", gd->name, gd->stype, gd->init_list->nargs); }
+        if (gd->stype != 0) { printf("cc: struct init '%s' stype='%s' nargs=%d\n", gd->name, gd->stype, gd->init_list->nargs); }
         int nf_total = 0;
         if (gd->stype != 0) { nf_total = cg_struct_nfields(gd->stype); }
         if (nf_total < gd->init_list->nargs) { nf_total = gd->init_list->nargs; }
@@ -10976,7 +10817,7 @@ int cg_emit_globals(struct Program *prog) {
         if (gd->is_static == 0) { emit_s("\t.globl\t_"); emit_line(gd->name); }
         emit_line("\t.p2align\t3");
         emit_s("_"); emit_s(gd->name); emit_line(":");
-        if (use_proper_layout && gd->stype != 0) {
+        if (gd->stype != 0) {
           // Proper layout: emit each slot at its correct byte offset with correct size
           int *sl_off = my_malloc(nf_total * 8);
           int *sl_sz = my_malloc(nf_total * 8);
@@ -11104,12 +10945,7 @@ int cg_emit_globals(struct Program *prog) {
         // Uninitialized: use .comm (or .zerofill for static)
         int gsz = 8;
         if (gd->stype != 0 && gd->is_ptr == 0) {
-          int gnf = cg_struct_nfields(gd->stype);
-          if (use_proper_layout) {
-            gsz = cg_struct_byte_size(gd->stype);
-          } else {
-            if (gnf > 1) { gsz = gnf * 8; }
-          }
+          gsz = cg_struct_byte_size(gd->stype);
         }
         if (gd->is_static) {
           emit_s("\t.zerofill __DATA,__bss,_");
@@ -11331,7 +11167,7 @@ int *parse_args(int argc, int *argv) {
       include_dirs[ninclude_dirs] = idir;
       ninclude_dirs++;
     } else if (my_strcmp(arg, "-fproper-layout") == 0) {
-      use_proper_layout = 1;
+      // use_proper_layout is always 1; flag accepted for compatibility
     } else if (__read_byte(arg, 0) == '-') {
       printf("Unknown option: %s\n", arg);
       exit(1);
