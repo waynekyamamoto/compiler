@@ -82,6 +82,8 @@ struct VarDecl {
   int arr_size2;
   int is_char;
   int is_float;
+  int is_short;
+  int is_long;
 };
 
 struct Stmt {
@@ -112,11 +114,13 @@ struct FuncDef {
   int nbody;
   int ret_is_ptr;
   int ret_is_unsigned;
+  int ret_is_long;
   int is_variadic;
   int *param_is_char;
   int *param_is_unsigned;
   int *param_is_intptr;
   int *param_is_long;
+  int *param_is_short;
   int *ret_stype;
   int **param_stypes;
   int *param_is_float;
@@ -174,6 +178,8 @@ struct GDecl {
   int is_char;
   int is_static;
   int is_unsigned;
+  int is_short;
+  int is_long;
 };
 
 struct Program {
@@ -184,6 +190,7 @@ struct Program {
   int **proto_names;
   int *proto_ret_is_ptr;
   int *proto_ret_is_unsigned;
+  int *proto_ret_is_long;
   int *proto_is_variadic;
   int *proto_nparams;
   int **proto_ret_stype;
@@ -206,6 +213,7 @@ int n_ptr_ret;
 // Unsigned-returning function names (skip sxtw after bl)
 int *unsigned_ret_names[MAX_RET_FUNCS];
 int n_unsigned_ret;
+
 
 // Struct-returning function names and their struct types
 int *struct_ret_names[MAX_FUNC_INFO];
@@ -236,6 +244,8 @@ struct CGlobal {
   int is_barechar;
   int is_intptr;
   int is_bare_char_arr;
+  int esz;
+  int ptr_esz;
 };
 struct CGlobal cgg[MAX_CG_GLOBALS];
 int ncg_g;
@@ -309,6 +319,7 @@ int nlay;
 int *lay_arr_name[MAX_LAYOUT_ARR];
 int lay_arr_count[MAX_LAYOUT_ARR];
 int lay_arr_inner[MAX_LAYOUT_ARR];
+int lay_arr_esz[MAX_LAYOUT_ARR];
 int nlay_arr;
 int *lay_sv_name[MAX_LAYOUT_ARR];
 int *lay_sv_type[MAX_LAYOUT_ARR];
@@ -325,12 +336,15 @@ int nlay_char_arr;
 int *lay_char_larr_name[MAX_LAYOUT]; // char local arrays: char arr[N]
 int nlay_char_larr;
 int *lay_intptr_name[MAX_LAYOUT];
+int lay_intptr_esz[MAX_LAYOUT];
 int nlay_intptr;
 int *lay_float_name[MAX_LAYOUT];
 int nlay_float;
 int *lay_barechar_name[MAX_LAYOUT];
 int lay_barechar_unsigned[MAX_LAYOUT];
 int nlay_barechar;
+int *lay_long_name[MAX_LAYOUT];
+int nlay_long;
 int lay_stack_size;
 
 // Float-returning function names
@@ -355,6 +369,7 @@ struct TypeDef {
 };
 struct TypeDef td[MAX_TYPEDEFS];
 int ntd;
+int td_is_long[MAX_TYPEDEFS];
 
 // Current function name for goto label mangling
 int *cg_cur_func_name;
@@ -374,6 +389,7 @@ int static_global_counter;
 // Parser: last_type_unsigned flag
 int last_type_unsigned;
 int last_type_is_long;
+int last_type_is_short;
 
 // Inline struct defs for anonymous structs
 struct SDef *inline_sdefs[MAX_STRUCTS];
@@ -2878,6 +2894,17 @@ int td_lookup_is_funcptr(int *name) {
   return 0;
 }
 
+int td_lookup_is_long(int *name) {
+  int i = ntd - 1;
+  while (i >= 0) {
+    if (my_strcmp(td[i].name, name) == 0) {
+      return td_is_long[i];
+    }
+    i--;
+  }
+  return 0;
+}
+
 int add_typedef(int *name, int *stype) {
   if (ntd >= MAX_TYPEDEFS) { printf("cc: OVERFLOW td_name ntd=%d name=%s\n", ntd, name); fflush(0); }
   td[ntd].name = my_strdup(name);
@@ -2908,10 +2935,11 @@ int *parse_base_type() {
   skip_qualifiers();
   last_type_unsigned = 0;
   last_type_is_long = 0;
+  last_type_is_short = 0;
   if (p_match(TK_KW, "int")) {
     p_eat(TK_KW, "int");
     // consume trailing long/short
-    while (p_match(TK_KW, "long") || p_match(TK_KW, "short")) { if (p_match(TK_KW, "long")) { last_type_is_long = 1; } cur_pos = cur_pos + 1; }
+    while (p_match(TK_KW, "long") || p_match(TK_KW, "short")) { if (p_match(TK_KW, "long")) { last_type_is_long = 1; } if (p_match(TK_KW, "short")) { last_type_is_short = 1; } cur_pos = cur_pos + 1; }
     skip_qualifiers();
     return 0;
   }
@@ -2931,7 +2959,7 @@ int *parse_base_type() {
     // optional: int, long, short, char after
     if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; }
     else if (p_match(TK_KW, "long")) { last_type_is_long = 1; cur_pos = cur_pos + 1; if (p_match(TK_KW, "long")) { cur_pos = cur_pos + 1; } if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; } }
-    else if (p_match(TK_KW, "short")) { cur_pos = cur_pos + 1; if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; } }
+    else if (p_match(TK_KW, "short")) { last_type_is_short = 1; cur_pos = cur_pos + 1; if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; } }
     else if (p_match(TK_KW, "char")) { cur_pos = cur_pos + 1; }
     skip_qualifiers();
     return 0;
@@ -2947,6 +2975,7 @@ int *parse_base_type() {
     return 0;
   }
   if (p_match(TK_KW, "short")) {
+    last_type_is_short = 1;
     cur_pos++;
     if (p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) { last_type_unsigned = p_match(TK_KW, "unsigned"); cur_pos = cur_pos + 1; }
     if (p_match(TK_KW, "int")) { cur_pos = cur_pos + 1; }
@@ -3206,8 +3235,11 @@ int *parse_base_type() {
   }
   // Check if it's a typedef name
   if (tok[cur_pos].kind == TK_ID && has_typedef(tok[cur_pos].val)) {
-    // Mark known 64-bit typedefs as long to prevent sxtw
-    if (my_strcmp(tok[cur_pos].val, "va_list") == 0 || my_strcmp(tok[cur_pos].val, "__builtin_va_list") == 0 ||
+    // Mark long typedefs to prevent sxtw and use x registers
+    if (td_lookup_is_long(tok[cur_pos].val)) {
+      last_type_is_long = 1;
+    }
+    else if (my_strcmp(tok[cur_pos].val, "va_list") == 0 || my_strcmp(tok[cur_pos].val, "__builtin_va_list") == 0 ||
         my_strcmp(tok[cur_pos].val, "size_t") == 0 || my_strcmp(tok[cur_pos].val, "ssize_t") == 0 ||
         my_strcmp(tok[cur_pos].val, "ptrdiff_t") == 0) {
       last_type_is_long = 1;
@@ -3267,7 +3299,7 @@ struct Stmt **parse_block_or_stmt(int *out_len) {
 int parse_const_expr();
 
 struct VarDecl *make_vd(int *name, int *stype, int arr_size, int is_ptr, struct Expr *init, int is_static) {
-  struct VarDecl *vd = my_malloc(80);
+  struct VarDecl *vd = my_malloc(96);
   vd->name = name;
   vd->stype = stype;
   vd->arr_size = arr_size;
@@ -3278,6 +3310,8 @@ struct VarDecl *make_vd(int *name, int *stype, int arr_size, int is_ptr, struct 
   vd->arr_size2 = 0 - 1;
   vd->is_char = 0;
   vd->is_float = 0;
+  vd->is_short = 0;
+  vd->is_long = 0;
   return vd;
 }
 
@@ -3390,14 +3424,20 @@ struct Stmt *parse_vardecl_stmt(int vd_is_static) {
   int base_is_float = 0;
   int base_unsigned = 0;
   int base_is_funcptr_td = 0;
-  // Check if base type is char or float/double (before parse_base_type consumes it)
+  int base_is_short = 0;
+  int base_is_long = 0;
+  // Check if base type is char or float/double/short/long (before parse_base_type consumes it)
   {
     int sv = cur_pos;
     skip_qualifiers();
     if (p_match(TK_KW, "char")) { base_is_char = 1; }
     else if (p_match(TK_KW, "float") || p_match(TK_KW, "double")) { base_is_float = 1; }
+    else if (p_match(TK_KW, "short")) { base_is_short = 1; }
+    else if (p_match(TK_KW, "long")) { base_is_long = 1; }
     else if (p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) {
       if (tok[cur_pos + 1].kind == TK_KW && my_strcmp(tok[cur_pos + 1].val, "char") == 0) { base_is_char = 1; }
+      if (tok[cur_pos + 1].kind == TK_KW && my_strcmp(tok[cur_pos + 1].val, "short") == 0) { base_is_short = 1; }
+      if (tok[cur_pos + 1].kind == TK_KW && my_strcmp(tok[cur_pos + 1].val, "long") == 0) { base_is_long = 1; }
     }
     else if (tok[cur_pos].kind == TK_ID) {
       int tdc = td_lookup_is_char(tok[cur_pos].val);
@@ -3526,6 +3566,10 @@ struct Stmt *parse_vardecl_stmt(int vd_is_static) {
     decls[ndecls]->is_char = base_is_char;
     decls[ndecls]->is_float = base_is_float;
     decls[ndecls]->arr_size2 = arr_size2;
+    decls[ndecls]->is_short = base_is_short;
+    decls[ndecls]->is_long = base_is_long;
+    if (last_type_is_short) { decls[ndecls]->is_short = 1; }
+    if (last_type_is_long) { decls[ndecls]->is_long = 1; }
     ndecls++;
     // Always register local variable name (for enum shadowing)
     if (stype != 0) {
@@ -3712,6 +3756,8 @@ struct Expr *parse_unary() {
       if (tok[cur_pos].kind == TK_KW && is_type_keyword(tok[cur_pos].val)) {
         int is_char_type = p_match(TK_KW, "char");
         int is_short_type = p_match(TK_KW, "short");
+        int is_float_type = p_match(TK_KW, "float");
+        int is_double_type = p_match(TK_KW, "double");
         int *sz_stype = parse_base_type();
         int is_long_type = last_type_is_long;
         int sz_is_ptr = 0;
@@ -3724,7 +3770,8 @@ struct Expr *parse_unary() {
           sz = p_sizeof_struct(sz_stype);
         } else {
           if (is_short_type) { sz = 2; }
-          else if (is_long_type) { sz = 8; }
+          else if (is_long_type || is_double_type) { sz = 8; }
+          else if (is_float_type) { sz = 4; }
           else { sz = 4; }
         }
         // Check for array dimension
@@ -4975,6 +5022,7 @@ struct FuncDef *parse_func() {
     cur_pos = sv_rf; }
   int *ret_stype = parse_base_type();
   int ret_is_unsigned = last_type_unsigned;
+  int ret_is_long = last_type_is_long;
   int ret_is_ptr = 0;
   while (p_match(TK_OP, "*")) { p_eat(TK_OP, "*"); ret_is_ptr = 1; skip_qualifiers(); }
   int *name = my_strdup(p_eat(TK_ID, 0));
@@ -4985,6 +5033,7 @@ struct FuncDef *parse_func() {
   int *param_is_unsigned = my_malloc(64 * 4);
   int *param_is_intptr = my_malloc(64 * 4);
   int *param_is_long = my_malloc(64 * 4);
+  int *param_is_short = my_malloc(64 * 4);
   int *param_is_float = my_malloc(64 * 4);
   int *param_is_barechar = my_malloc(64 * 4);
   int **param_stypes = my_malloc(64 * 8);
@@ -5013,6 +5062,7 @@ struct FuncDef *parse_func() {
       param_is_unsigned[np] = 0;
       param_is_intptr[np] = 0;
       param_is_long[np] = 0;
+      param_is_short[np] = 0;
       param_is_float[np] = 0;
       param_stypes[np] = 0;
       np++;
@@ -5040,6 +5090,7 @@ struct FuncDef *parse_func() {
       int *kr_stype = parse_base_type();
       int kr_is_unsigned = last_type_unsigned;
       int kr_is_long = last_type_is_long;
+      int kr_is_short = last_type_is_short;
       // Loop over comma-separated declarators for this type
       while (1) {
         int kr_is_ptr = 0;
@@ -5058,10 +5109,16 @@ struct FuncDef *parse_func() {
         int ki = 0;
         while (ki < np) {
           if (my_strcmp(params[ki], kr_pname) == 0) {
-            param_is_char[ki] = (kr_is_char && kr_is_ptr > 0) ? 1 : 0;
+            param_is_char[ki] = (kr_is_char && kr_ptr_depth == 1) ? 1 : 0;
             param_is_unsigned[ki] = kr_is_unsigned;
-            param_is_intptr[ki] = (kr_is_ptr > 0 && kr_is_char == 0) ? 1 : 0;
+            {
+              int krpip = 0;
+              if (kr_is_ptr > 0 && kr_is_char == 0) { krpip = kr_ptr_depth; if (krpip < 1) { krpip = 1; } }
+              if (kr_is_char && kr_ptr_depth >= 2) { krpip = kr_ptr_depth; }
+              param_is_intptr[ki] = krpip;
+            }
             param_is_long[ki] = kr_is_long;
+            param_is_short[ki] = kr_is_short;
             param_is_float[ki] = kr_is_float;
             if (kr_stype != 0 && kr_is_ptr == 0) {
               param_stypes[ki] = my_strdup(kr_stype);
@@ -5111,6 +5168,7 @@ struct FuncDef *parse_func() {
       int *stype = parse_base_type();
       int p_is_unsigned = last_type_unsigned;
       int p_is_long = last_type_is_long;
+      int p_is_short = last_type_is_short;
       if (p_is_barechar_unsigned) { p_is_unsigned = 1; }
       int is_ptr = 0;
       int is_funcptr = 0;
@@ -5194,10 +5252,18 @@ struct FuncDef *parse_func() {
         }
         while (skip_attribute()) {}
         params[np] = my_strdup(pname);
-        param_is_char[np] = (p_is_char && is_ptr > 0) ? 1 : 0;
+        param_is_char[np] = (p_is_char && is_ptr == 1) ? 1 : 0;
         param_is_unsigned[np] = p_is_unsigned;
-        param_is_intptr[np] = ((is_ptr > 0 || is_funcptr > 0 || is_funcptr_from_td > 0) && p_is_char == 0) ? 1 : 0;
+        {
+          int pip = 0;
+          if ((is_ptr > 0 || is_funcptr > 0 || is_funcptr_from_td > 0) && p_is_char == 0) {
+            pip = ptr_depth;
+            if (pip < 1) { pip = 1; }
+          }
+          param_is_intptr[np] = pip;
+        }
         param_is_long[np] = p_is_long;
+        param_is_short[np] = p_is_short;
         param_is_float[np] = p_is_float;
         param_is_barechar[np] = (p_is_char && is_ptr == 0) ? (p_is_unsigned ? 2 : 1) : 0;
         if (stype != 0 && is_ptr == 0) {
@@ -5210,10 +5276,18 @@ struct FuncDef *parse_func() {
       } else {
         // Unnamed parameter (prototype): still count it
         params[np] = "__unnamed";
-        param_is_char[np] = (p_is_char && is_ptr > 0) ? 1 : 0;
+        param_is_char[np] = (p_is_char && is_ptr == 1) ? 1 : 0;
         param_is_unsigned[np] = p_is_unsigned;
-        param_is_intptr[np] = ((is_ptr > 0 || is_funcptr > 0 || is_funcptr_from_td > 0) && p_is_char == 0) ? 1 : 0;
+        {
+          int pip = 0;
+          if ((is_ptr > 0 || is_funcptr > 0 || is_funcptr_from_td > 0) && p_is_char == 0) {
+            pip = ptr_depth;
+            if (pip < 1) { pip = 1; }
+          }
+          param_is_intptr[np] = pip;
+        }
         param_is_long[np] = p_is_long;
+        param_is_short[np] = p_is_short;
         param_is_float[np] = p_is_float;
         param_is_barechar[np] = 0;
         param_stypes[np] = 0;
@@ -5244,11 +5318,13 @@ struct FuncDef *parse_func() {
     fd->nbody = 0 - 1;
     fd->ret_is_ptr = ret_is_ptr;
     fd->ret_is_unsigned = ret_is_unsigned;
+    fd->ret_is_long = ret_is_long;
     fd->is_variadic = is_variadic;
     fd->param_is_char = param_is_char;
     fd->param_is_unsigned = param_is_unsigned;
     fd->param_is_intptr = param_is_intptr;
     fd->param_is_long = param_is_long;
+    fd->param_is_short = param_is_short;
     if (ret_is_ptr == 0) { fd->ret_stype = ret_stype; }
     if (ret_stype != 0) { struct_ret_names[n_struct_ret] = my_strdup(name); struct_ret_stypes[n_struct_ret] = my_strdup(ret_stype); n_struct_ret++; }
     fd->param_stypes = param_stypes;
@@ -5272,11 +5348,13 @@ struct FuncDef *parse_func() {
   fd->nbody = blen;
   fd->ret_is_ptr = ret_is_ptr;
   fd->ret_is_unsigned = ret_is_unsigned;
+  fd->ret_is_long = ret_is_long;
   fd->is_variadic = is_variadic;
   fd->param_is_char = param_is_char;
   fd->param_is_unsigned = param_is_unsigned;
   fd->param_is_intptr = param_is_intptr;
   fd->param_is_long = param_is_long;
+  fd->param_is_short = param_is_short;
   if (ret_is_ptr == 0) { fd->ret_stype = ret_stype; }
   if (ret_stype != 0) { struct_ret_names[n_struct_ret] = my_strdup(name); struct_ret_stypes[n_struct_ret] = my_strdup(ret_stype); n_struct_ret++; }
   fd->param_stypes = param_stypes;
@@ -5420,7 +5498,7 @@ struct GDecl *parse_global_decl_one(int *stype, int g_is_char) {
       gi--;
     }
   }
-  struct GDecl *gd = my_malloc(88);
+  struct GDecl *gd = my_malloc(104);
   gd->name = name;
   gd->is_ptr = is_ptr;
   gd->array_size = array_size;
@@ -5432,6 +5510,8 @@ struct GDecl *parse_global_decl_one(int *stype, int g_is_char) {
   gd->is_char = g_is_char;
   gd->is_static = 0;
   gd->is_unsigned = 0;
+  gd->is_short = 0;
+  gd->is_long = 0;
   return gd;
 }
 
@@ -5452,6 +5532,19 @@ int parse_global_decls(struct GDecl **globals, int ng, int top_is_static) {
     }
     cur_pos = sv;
   }
+  int g_is_short = 0;
+  int g_is_long = 0;
+  {
+    int sv3 = cur_pos;
+    skip_qualifiers();
+    if (p_match(TK_KW, "short")) { g_is_short = 1; }
+    else if (p_match(TK_KW, "long")) { g_is_long = 1; }
+    else if (p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) {
+      if (tok[cur_pos + 1].kind == TK_KW && my_strcmp(tok[cur_pos + 1].val, "short") == 0) { g_is_short = 1; }
+      if (tok[cur_pos + 1].kind == TK_KW && my_strcmp(tok[cur_pos + 1].val, "long") == 0) { g_is_long = 1; }
+    }
+    cur_pos = sv3;
+  }
   int g_is_funcptr_td = 0;
   {
     int sv2 = cur_pos;
@@ -5461,10 +5554,14 @@ int parse_global_decls(struct GDecl **globals, int ng, int top_is_static) {
   }
   int *stype = parse_base_type();
   int g_is_unsigned = last_type_unsigned;
+  if (last_type_is_short) { g_is_short = 1; }
+  if (last_type_is_long) { g_is_long = 1; }
   struct GDecl *gd = parse_global_decl_one(stype, g_is_char);
   if (g_is_funcptr_td && gd->is_ptr == 0) { gd->is_ptr = 1; }
   gd->is_static = top_is_static;
   gd->is_unsigned = g_is_unsigned;
+  gd->is_short = g_is_short;
+  gd->is_long = g_is_long;
   globals[ng] = gd;
   ng++;
   while (p_match(TK_OP, ",")) {
@@ -5472,6 +5569,8 @@ int parse_global_decls(struct GDecl **globals, int ng, int top_is_static) {
     struct GDecl *gd2 = parse_global_decl_one(stype, g_is_char);
     gd2->is_static = top_is_static;
     gd2->is_unsigned = g_is_unsigned;
+    gd2->is_short = g_is_short;
+    gd2->is_long = g_is_long;
     globals[ng] = gd2;
     ng++;
   }
@@ -6181,6 +6280,7 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
     skip_qualifiers();
     add_typedef(alias, ptd_stype);
     if (ptd_is_char) { td[ntd - 1].is_char = 1; td[ntd - 1].is_unsigned = ptd_is_unsigned; }
+    if (last_type_is_long) { td_is_long[ntd - 1] = 1; }
     // Handle comma-separated typedefs: typedef struct { ... } A, *B;
     while (p_match(TK_OP, ",")) {
       p_eat(TK_OP, ",");
@@ -6259,6 +6359,7 @@ struct Program *parse_program() {
   int **proto_names = my_malloc(MAX_PROGRAM * 8);
   int *proto_rip = my_malloc(MAX_PROGRAM * 8);
   int *proto_riu = my_malloc(MAX_PROGRAM * 8);
+  int *proto_ril = my_malloc(MAX_PROGRAM * 8);
   int *proto_is_var = my_malloc(MAX_PROGRAM * 8);
   int *proto_np = my_malloc(MAX_PROGRAM * 8);
   int **proto_rs = my_malloc(MAX_PROGRAM * 8);
@@ -6336,6 +6437,8 @@ struct Program *parse_program() {
             proto_names[nprotos] = fd->name;
             proto_rip[nprotos] = fd->ret_is_ptr;
             proto_riu[nprotos] = fd->ret_is_unsigned;
+          proto_ril[nprotos] = fd->ret_is_long;
+            proto_ril[nprotos] = fd->ret_is_long;
             proto_is_var[nprotos] = fd->is_variadic;
             proto_np[nprotos] = fd->nparams;
             proto_rs[nprotos] = fd->ret_stype;
@@ -6356,6 +6459,7 @@ struct Program *parse_program() {
           proto_names[nprotos] = fd->name;
           proto_rip[nprotos] = fd->ret_is_ptr;
           proto_riu[nprotos] = fd->ret_is_unsigned;
+          proto_ril[nprotos] = fd->ret_is_long;
           proto_is_var[nprotos] = fd->is_variadic;
           proto_np[nprotos] = fd->nparams;
           proto_rs[nprotos] = fd->ret_stype;
@@ -6433,12 +6537,12 @@ struct Program *parse_program() {
               if (p_match(TK_OP, "{")) { sv_init_list2 = parse_init_list(0); }
               else { sv_init_val2 = parse_const_expr(); }
             }
-            struct GDecl *sv_gd2 = my_malloc(88);
+            struct GDecl *sv_gd2 = my_malloc(104);
             sv_gd2->name = sv_name2; sv_gd2->is_ptr = sv_ptr2; sv_gd2->array_size = sv_arr2;
             sv_gd2->init_val = sv_init_val2; sv_gd2->has_init = sv_has_init2;
             sv_gd2->init_str = 0; sv_gd2->init_list = sv_init_list2;
             sv_gd2->stype = sv_stype; sv_gd2->is_char = 0; sv_gd2->is_unsigned = 0;
-            sv_gd2->is_static = top_is_static;
+            sv_gd2->is_static = top_is_static; sv_gd2->is_short = 0; sv_gd2->is_long = 0;
             globals[ng] = sv_gd2; ng++;
             glv[nglv].name = my_strdup(sv_name2);
             glv[nglv].stype = my_strdup(sv_stype);
@@ -6448,12 +6552,12 @@ struct Program *parse_program() {
             nglv++;
           }
           p_eat(TK_OP, ";");
-          struct GDecl *sv_gd = my_malloc(88);
+          struct GDecl *sv_gd = my_malloc(104);
           sv_gd->name = sv_name; sv_gd->is_ptr = sv_ptr; sv_gd->array_size = sv_arr;
           sv_gd->init_val = sv_init_val; sv_gd->has_init = sv_has_init;
           sv_gd->init_str = sv_init_str; sv_gd->init_list = sv_init_list;
           sv_gd->stype = sv_stype; sv_gd->is_char = 0; sv_gd->is_unsigned = 0;
-          sv_gd->is_static = top_is_static;
+          sv_gd->is_static = top_is_static; sv_gd->is_short = 0; sv_gd->is_long = 0;
           globals[ng] = sv_gd; ng++;
           glv[nglv].name = my_strdup(sv_name);
           glv[nglv].stype = my_strdup(sv_stype);
@@ -6525,12 +6629,12 @@ struct Program *parse_program() {
               if (p_match(TK_OP, "{")) { sv_init_list2 = parse_init_list(0); }
               else { sv_init_val2 = parse_const_expr(); }
             }
-            struct GDecl *sv_gd2 = my_malloc(88);
+            struct GDecl *sv_gd2 = my_malloc(104);
             sv_gd2->name = sv_name2; sv_gd2->is_ptr = sv_ptr2; sv_gd2->array_size = sv_arr2;
             sv_gd2->init_val = sv_init_val2; sv_gd2->has_init = sv_has_init2;
             sv_gd2->init_str = 0; sv_gd2->init_list = sv_init_list2;
             sv_gd2->stype = sv_stype; sv_gd2->is_char = 0; sv_gd2->is_unsigned = 0;
-            sv_gd2->is_static = top_is_static;
+            sv_gd2->is_static = top_is_static; sv_gd2->is_short = 0; sv_gd2->is_long = 0;
             globals[ng] = sv_gd2; ng++;
             if (sv_stype != 0) {
               glv[nglv].name = my_strdup(sv_name2);
@@ -6542,12 +6646,12 @@ struct Program *parse_program() {
             }
           }
           p_eat(TK_OP, ";");
-          struct GDecl *sv_gd = my_malloc(88);
+          struct GDecl *sv_gd = my_malloc(104);
           sv_gd->name = sv_name; sv_gd->is_ptr = sv_ptr; sv_gd->array_size = sv_arr;
           sv_gd->init_val = sv_init_val; sv_gd->has_init = sv_has_init;
           sv_gd->init_str = sv_init_str; sv_gd->init_list = sv_init_list;
           sv_gd->stype = sv_stype; sv_gd->is_char = 0; sv_gd->is_unsigned = 0;
-          sv_gd->is_static = top_is_static;
+          sv_gd->is_static = top_is_static; sv_gd->is_short = 0; sv_gd->is_long = 0;
           globals[ng] = sv_gd; ng++;
           // Register for resolve_stype
           if (sv_stype != 0) {
@@ -6577,6 +6681,8 @@ struct Program *parse_program() {
               proto_names[nprotos] = fd->name;
               proto_rip[nprotos] = fd->ret_is_ptr;
               proto_riu[nprotos] = fd->ret_is_unsigned;
+          proto_ril[nprotos] = fd->ret_is_long;
+            proto_ril[nprotos] = fd->ret_is_long;
               proto_is_var[nprotos] = fd->is_variadic;
               proto_np[nprotos] = fd->nparams;
               proto_rs[nprotos] = fd->ret_stype;
@@ -6599,6 +6705,8 @@ struct Program *parse_program() {
             proto_names[nprotos] = fd->name;
             proto_rip[nprotos] = fd->ret_is_ptr;
             proto_riu[nprotos] = fd->ret_is_unsigned;
+          proto_ril[nprotos] = fd->ret_is_long;
+            proto_ril[nprotos] = fd->ret_is_long;
             proto_is_var[nprotos] = fd->is_variadic;
             proto_np[nprotos] = fd->nparams;
             proto_rs[nprotos] = fd->ret_stype;
@@ -6677,6 +6785,8 @@ struct Program *parse_program() {
             proto_names[nprotos] = fd->name;
             proto_rip[nprotos] = fd->ret_is_ptr;
             proto_riu[nprotos] = fd->ret_is_unsigned;
+          proto_ril[nprotos] = fd->ret_is_long;
+            proto_ril[nprotos] = fd->ret_is_long;
             proto_is_var[nprotos] = fd->is_variadic;
             proto_np[nprotos] = fd->nparams;
             proto_rs[nprotos] = fd->ret_stype;
@@ -6705,6 +6815,7 @@ struct Program *parse_program() {
           proto_names[nprotos] = fd->name;
           proto_rip[nprotos] = fd->ret_is_ptr;
           proto_riu[nprotos] = fd->ret_is_unsigned;
+          proto_ril[nprotos] = fd->ret_is_long;
           proto_is_var[nprotos] = fd->is_variadic;
           proto_np[nprotos] = fd->nparams;
           proto_rs[nprotos] = fd->ret_stype;
@@ -6722,7 +6833,7 @@ struct Program *parse_program() {
     }
   }
 
-  struct Program *p = my_malloc(112);
+  struct Program *p = my_malloc(120);
   p->structs = structs;
   p->nstructs = ns;
   p->funcs = funcs;
@@ -6730,6 +6841,7 @@ struct Program *parse_program() {
   p->proto_names = proto_names;
   p->proto_ret_is_ptr = proto_rip;
   p->proto_ret_is_unsigned = proto_riu;
+  p->proto_ret_is_long = proto_ril;
   p->proto_is_variadic = proto_is_var;
   p->proto_nparams = proto_np;
   p->proto_ret_stype = proto_rs;
@@ -6766,6 +6878,26 @@ int cg_global_is_array(int *name) {
   int i = 0;
   while (i < ncg_g) {
     if (my_strcmp(cgg[i].name, name) == 0) { return cgg[i].is_array; }
+    i++;
+  }
+  return 0;
+}
+
+int cg_global_esz(int *name) {
+  if (cg_is_local(name)) return 0;
+  int i = 0;
+  while (i < ncg_g) {
+    if (my_strcmp(cgg[i].name, name) == 0) { return cgg[i].esz; }
+    i++;
+  }
+  return 0;
+}
+
+int cg_global_ptr_esz(int *name) {
+  if (cg_is_local(name)) return 0;
+  int i = 0;
+  while (i < ncg_g) {
+    if (my_strcmp(cgg[i].name, name) == 0) { return cgg[i].ptr_esz; }
     i++;
   }
   return 0;
@@ -7023,6 +7155,48 @@ int cg_field_is_ptr(int *sname, int *fname) {
       while (j < cg_snfields[i]) {
         if (cg_sfields[i][j] != 0 && my_strcmp(cg_sfields[i][j], fname) == 0) {
           return cg_s_fp[i][j];
+        }
+        j++;
+      }
+      return 0;
+    }
+    i++;
+  }
+  return 0;
+}
+
+int cg_field_is_short(int *sname, int *fname) {
+  if (sname == 0 || fname == 0) return 0;
+  sname = cg_resolve_sname(sname);
+  int i = 0;
+  while (i < ncg_s) {
+    if (cg_sname[i] != 0 && my_strcmp(cg_sname[i], sname) == 0) {
+      if (cg_s_fsh[i] == 0) return 0;
+      int j = 0;
+      while (j < cg_snfields[i]) {
+        if (cg_sfields[i][j] != 0 && my_strcmp(cg_sfields[i][j], fname) == 0) {
+          return cg_s_fsh[i][j];
+        }
+        j++;
+      }
+      return 0;
+    }
+    i++;
+  }
+  return 0;
+}
+
+int cg_field_is_long(int *sname, int *fname) {
+  if (sname == 0 || fname == 0) return 0;
+  sname = cg_resolve_sname(sname);
+  int i = 0;
+  while (i < ncg_s) {
+    if (cg_sname[i] != 0 && my_strcmp(cg_sname[i], sname) == 0) {
+      if (cg_s_fl[i] == 0) return 0;
+      int j = 0;
+      while (j < cg_snfields[i]) {
+        if (cg_sfields[i][j] != 0 && my_strcmp(cg_sfields[i][j], fname) == 0) {
+          return cg_s_fl[i][j];
         }
         j++;
       }
@@ -7488,6 +7662,7 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
           lay_arr_name[nlay_arr] = my_strdup(vd->name);
           lay_arr_count[nlay_arr] = vd->arr_size;
           lay_arr_inner[nlay_arr] = 0 - 1;
+          lay_arr_esz[nlay_arr] = 8;
           nlay_arr++;
         } else if (vd->stype != 0 && vd->is_ptr == 0) {
           nf = cg_struct_nfields(vd->stype);
@@ -7505,16 +7680,21 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
           lay_arr_name[nlay_arr] = my_strdup(vd->name);
           lay_arr_count[nlay_arr] = vd->arr_size;
           lay_arr_inner[nlay_arr] = 0 - 1;
+          lay_arr_esz[nlay_arr] = 1;
           nlay_arr++;
           lay_char_larr_name[nlay_char_larr] = my_strdup(vd->name);
           nlay_char_larr++;
         } else if (vd->arr_size >= 0) {
           int total = vd->arr_size;
           if (vd->arr_size2 >= 0) { total = vd->arr_size * vd->arr_size2; }
-          *offset = *offset + total * 8;
+          int esz = 8;
+          if (vd->is_short && vd->is_ptr == 0 && vd->stype == 0) { esz = 2; }
+          else if (vd->is_char == 0 && vd->is_ptr == 0 && vd->stype == 0 && vd->is_float == 0 && vd->is_short == 0 && vd->is_long == 0) { esz = 4; }
+          *offset = *offset + ((total * esz + 7) / 8) * 8;
           lay_arr_name[nlay_arr] = my_strdup(vd->name);
           lay_arr_count[nlay_arr] = total;
           lay_arr_inner[nlay_arr] = vd->arr_size2;
+          lay_arr_esz[nlay_arr] = esz;
           nlay_arr++;
         } else {
           *offset = *offset + 8;
@@ -7539,6 +7719,12 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
         }
         if (vd->is_ptr > 0 && vd->stype == 0 && (vd->is_char == 0 || vd->is_ptr >= 2) && vd->arr_size < 0) {
           lay_intptr_name[nlay_intptr] = my_strdup(vd->name);
+          {
+            int pesz = 8;
+            if (vd->is_ptr == 1 && vd->is_char == 0 && vd->is_float == 0 && vd->is_long == 0 && vd->is_short == 0) { pesz = 4; }
+            if (vd->is_ptr == 1 && vd->is_short) { pesz = 2; }
+            lay_intptr_esz[nlay_intptr] = pesz;
+          }
           nlay_intptr++;
         }
         if (vd->is_float) {
@@ -7549,6 +7735,10 @@ int lay_walk_stmts(struct Stmt **stmts, int nstmts, int *offset) {
           lay_barechar_name[nlay_barechar] = my_strdup(vd->name);
           lay_barechar_unsigned[nlay_barechar] = vd->is_unsigned;
           nlay_barechar++;
+        }
+        if (vd->is_long || vd->is_ptr > 0 || vd->stype != 0) {
+          lay_long_name[nlay_long] = my_strdup(vd->name);
+          nlay_long++;
         }
       }
     } else if (st->kind == ST_IF) {
@@ -7706,6 +7896,28 @@ int cg_is_intptr(int *name) {
   return 0;
 }
 
+int cg_arr_esz(int *name) {
+  int i = 0;
+  while (i < nlay_arr) {
+    if (my_strcmp(lay_arr_name[i], name) == 0) {
+      return lay_arr_esz[i];
+    }
+    i++;
+  }
+  return 0;
+}
+
+int cg_intptr_esz(int *name) {
+  int i = 0;
+  while (i < nlay_intptr) {
+    if (my_strcmp(lay_intptr_name[i], name) == 0) {
+      return lay_intptr_esz[i];
+    }
+    i++;
+  }
+  return 0;
+}
+
 int cg_is_float(int *name) {
   int i = 0;
   while (i < nlay_float) {
@@ -7715,11 +7927,46 @@ int cg_is_float(int *name) {
   return 0;
 }
 
+int cg_is_long_or_ptr(int *name) {
+  int i = 0;
+  while (i < nlay_long) {
+    if (my_strcmp(lay_long_name[i], name) == 0) { return 1; }
+    i++;
+  }
+  // Arrays evaluate to pointers (64-bit)
+  i = 0;
+  while (i < nlay_arr) {
+    if (my_strcmp(lay_arr_name[i], name) == 0) { return 1; }
+    i++;
+  }
+  // Also check globals — pointers and arrays are 64-bit
+  if (cg_is_global(name)) { return cg_global_is_array(name) || cg_is_intptr(name) || cg_is_char(name); }
+  return 0;
+}
+
+int func_returns_long_or_ptr(int *name) {
+  return func_returns_ptr(name) || (func_ret_stype(name) != 0);
+}
+
 int func_returns_float(int *name) {
   int i = 0;
   while (i < n_float_ret) {
     if (my_strcmp(float_ret_names[i], name) == 0) { return 1; }
     i++;
+  }
+  return 0;
+}
+
+// Check if an expression evaluates to a long/pointer (64-bit) type
+int expr_is_long(struct Expr *e) {
+  if (e == 0) return 0;
+  if (e->kind == ND_VAR) return cg_is_long_or_ptr(e->sval);
+  if (e->kind == ND_CALL) return func_returns_long_or_ptr(e->sval);
+  if (e->kind == ND_UNARY && e->sval != 0 && e->sval[0] == '&') return 1;
+  if (e->kind == ND_STRLIT) return 1;
+  if (e->kind == ND_CAST && e->ival == 2) return 1;
+  if (e->kind == ND_BINARY) {
+    if (expr_is_long(e->left) || expr_is_long(e->right)) return 1;
   }
   return 0;
 }
@@ -7770,6 +8017,7 @@ int layout_func(struct FuncDef *f) {
   nlay_intptr = 0;
   nlay_float = 0;
   nlay_barechar = 0;
+  nlay_long = 0;
   int offset = 0;
 
   for (int i = 0; i < f->nparams; i++) {
@@ -7803,11 +8051,26 @@ int layout_func(struct FuncDef *f) {
     }
     if (f->param_is_intptr != 0 && f->param_is_intptr[i]) {
       lay_intptr_name[nlay_intptr] = my_strdup(f->params[i]);
+      {
+        int pesz = 4;
+        if (f->param_is_short != 0 && f->param_is_short[i]) { pesz = 2; }
+        if (f->param_is_long != 0 && f->param_is_long[i]) { pesz = 8; }
+        if (f->param_is_intptr[i] >= 2) { pesz = 8; }
+        if (f->param_stypes != 0 && f->param_stypes[i] != 0) { pesz = 8; }
+        lay_intptr_esz[nlay_intptr] = pesz;
+      }
       nlay_intptr++;
     }
     if (f->param_is_float != 0 && f->param_is_float[i]) {
       lay_float_name[nlay_float] = my_strdup(f->params[i]);
       nlay_float++;
+    }
+    if ((f->param_is_long != 0 && f->param_is_long[i]) ||
+        (f->param_is_intptr != 0 && f->param_is_intptr[i]) ||
+        (f->param_is_char != 0 && f->param_is_char[i]) ||
+        (f->param_stypes != 0 && f->param_stypes[i] != 0)) {
+      lay_long_name[nlay_long] = my_strdup(f->params[i]);
+      nlay_long++;
     }
     // Check bare char params from side table
     {
@@ -7956,11 +8219,33 @@ int gen_addr(struct Expr *e) {
         if (idx_stype == 0) {
           idx_stype = cg_global_ptr_stype(e->left->sval);
         }
-        // Check for 2D array: stride = inner_dim * 8
+        // Check for 2D array: stride = inner_dim * esz
         if (idx_stype == 0) {
           int inner = cg_get_arr_inner(e->left->sval);
           if (inner >= 0) {
-            idx_stride = inner * 8;
+            int inner_esz = cg_arr_esz(e->left->sval);
+            if (inner_esz > 0 && inner_esz < 8) {
+              idx_stride = inner * inner_esz;
+            } else {
+              idx_stride = inner * 8;
+            }
+          }
+        }
+        // Check if this is a plain int/short array or int/short pointer
+        if (idx_stype == 0 && idx_stride == 8 && idx_is_char == 0) {
+          int aesz = cg_arr_esz(e->left->sval);
+          if (aesz > 0 && aesz < 8) { idx_stride = aesz; }
+          if (idx_stride == 8) {
+            int iesz = cg_intptr_esz(e->left->sval);
+            if (iesz > 0 && iesz < 8) { idx_stride = iesz; }
+          }
+          if (idx_stride == 8) {
+            int gesz = cg_global_esz(e->left->sval);
+            if (gesz > 0 && gesz < 8) { idx_stride = gesz; }
+          }
+          if (idx_stride == 8 && cg_global_is_array(e->left->sval) == 0) {
+            int gpesz = cg_global_ptr_esz(e->left->sval);
+            if (gpesz > 0 && gpesz < 8) { idx_stride = gpesz; }
           }
         }
       }
@@ -7990,12 +8275,42 @@ int gen_addr(struct Expr *e) {
         int fp = cg_field_is_ptr(e->left->sval2, e->left->sval);
         if (fs != 0 && fp <= 1) { idx_stype = fs; }
       }
+      // Check if field is an int*/short*/long* pointer (non-array, non-char, non-struct)
+      // e.g. vm->prog[i] where prog is int* — stride should be 4, not 8
+      if (idx_stype == 0 && idx_is_char == 0 && idx_stride == 8) {
+        int fp2 = cg_field_is_ptr(e->left->sval2, e->left->sval);
+        int fa2 = cg_field_is_array(e->left->sval2, e->left->sval);
+        if (fp2 > 0 && fa2 == 0) {
+          int fc2 = cg_field_is_char(e->left->sval2, e->left->sval);
+          if (fc2 == 0 && fp2 == 1) {
+            // Single pointer to non-char, non-struct: check short/long/plain
+            if (cg_field_is_short(e->left->sval2, e->left->sval)) {
+              idx_stride = 2;
+            } else if (cg_field_is_long(e->left->sval2, e->left->sval)) {
+              idx_stride = 8;
+            } else {
+              idx_stride = 4;
+            }
+          }
+          // fp2 >= 2: pointer to pointer, stride = 8 (already default)
+        }
+      }
     }
     // Check if indexing result of char* array (e.g. names[i][j])
     if (e->left->kind == ND_INDEX && idx_is_char == 0 && e->left->left != 0 && e->left->left->kind == ND_VAR) {
       if (cg_is_char_arr(e->left->left->sval)) {
         idx_stride = 1;
         idx_is_char = 1;
+      }
+      // Check if indexing a 2D int/short array (e.g. arr[i][j])
+      if (idx_is_char == 0 && idx_stype == 0 && idx_stride == 8) {
+        int aesz2 = cg_arr_esz(e->left->left->sval);
+        if (aesz2 > 0 && aesz2 < 8) { idx_stride = aesz2; }
+      }
+      // Check if indexing through global int* array (e.g. cg_s_fa[i][j])
+      if (idx_is_char == 0 && idx_stype == 0 && idx_stride == 8) {
+        int gpe = cg_global_ptr_esz(e->left->left->sval);
+        if (gpe > 0 && gpe < 8) { idx_stride = gpe; }
       }
     }
     if (idx_stype != 0) {
@@ -8008,6 +8323,10 @@ int gen_addr(struct Expr *e) {
       // No scaling needed for char pointers (stride = 1)
     } else if (idx_stride == 8) {
       emit_line("\tlsl\tx0, x0, #3");
+    } else if (idx_stride == 4) {
+      emit_line("\tlsl\tx0, x0, #2");
+    } else if (idx_stride == 2) {
+      emit_line("\tlsl\tx0, x0, #1");
     } else {
       emit_s("\tmov\tx1, #");
       emit_num(idx_stride);
@@ -8247,6 +8566,27 @@ int gen_val_index(struct Expr *e) {
     else if (es == 2) { emit_line("\tldrsh\tx0, [x0]"); }
     else if (es == 4) { emit_line("\tldrsw\tx0, [x0]"); }
     else { emit_line("\tldr\tx0, [x0]"); }
+  } else if ((e->left->kind == ND_ARROW || e->left->kind == ND_FIELD) && cg_field_is_ptr(e->left->sval2, e->left->sval) == 1 && cg_field_is_char(e->left->sval2, e->left->sval) == 0 && field_stype(e->left->sval2, e->left->sval) == 0) {
+    // Struct field pointer indexing: s->field[i] where field is int*/short*
+    if (cg_field_is_short(e->left->sval2, e->left->sval)) { emit_line("\tldrsh\tx0, [x0]"); }
+    else if (cg_field_is_long(e->left->sval2, e->left->sval)) { emit_line("\tldr\tx0, [x0]"); }
+    else { emit_line("\tldrsw\tx0, [x0]"); }
+  } else if (e->left->kind == ND_VAR) {
+    int aesz = cg_arr_esz(e->left->sval);
+    if (aesz == 0) { aesz = cg_intptr_esz(e->left->sval); }
+    if (aesz == 0 && cg_global_is_array(e->left->sval) == 0) { aesz = cg_global_ptr_esz(e->left->sval); }
+    if (aesz == 0) { aesz = cg_global_esz(e->left->sval); }
+    if (aesz == 4) { emit_line("\tldrsw\tx0, [x0]"); }
+    else if (aesz == 2) { emit_line("\tldrsh\tx0, [x0]"); }
+    else { emit_line("\tldr\tx0, [x0]"); }
+  } else if (e->left->kind == ND_INDEX && e->left->left != 0 && e->left->left->kind == ND_VAR) {
+    // 2D array element load: arr[i][j]
+    int aesz = cg_arr_esz(e->left->left->sval);
+    if (aesz == 0) { aesz = cg_global_ptr_esz(e->left->left->sval); }
+    if (aesz == 0) { aesz = cg_global_esz(e->left->left->sval); }
+    if (aesz == 4) { emit_line("\tldrsw\tx0, [x0]"); }
+    else if (aesz == 2) { emit_line("\tldrsh\tx0, [x0]"); }
+    else { emit_line("\tldr\tx0, [x0]"); }
   } else {
     emit_line("\tldr\tx0, [x0]");
   }
@@ -8414,6 +8754,60 @@ int gen_val_assign(struct Expr *e) {
       else if (es == 2) { emit_line("\tstrh\tw0, [x1]"); }
       else if (es == 4) { emit_line("\tstr\tw0, [x1]"); }
       else { emit_line("\tstr\tx0, [x1]"); }
+    } else if (e->left->kind == ND_INDEX && (e->left->left->kind == ND_ARROW || e->left->left->kind == ND_FIELD) && cg_field_is_ptr(e->left->left->sval2, e->left->left->sval) == 1 && cg_field_is_char(e->left->left->sval2, e->left->left->sval) == 0 && field_stype(e->left->left->sval2, e->left->left->sval) == 0) {
+      // Struct field pointer store: s->field[i] = val where field is int*/short*
+      if (cg_field_is_short(e->left->left->sval2, e->left->left->sval)) { emit_line("\tstrh\tw0, [x1]"); }
+      else if (cg_field_is_long(e->left->left->sval2, e->left->left->sval)) { emit_line("\tstr\tx0, [x1]"); }
+      else { emit_line("\tstr\tw0, [x1]"); }
+    } else if (e->left->kind == ND_INDEX && e->left->left != 0 && e->left->left->kind == ND_VAR) {
+      int aesz = cg_arr_esz(e->left->left->sval);
+      if (aesz == 0) { aesz = cg_intptr_esz(e->left->left->sval); }
+      if (aesz == 0 && cg_global_is_array(e->left->left->sval) == 0) { aesz = cg_global_ptr_esz(e->left->left->sval); }
+      if (aesz == 0) { aesz = cg_global_esz(e->left->left->sval); }
+      if (aesz == 4) { emit_line("\tstr\tw0, [x1]"); }
+      else if (aesz == 2) { emit_line("\tstrh\tw0, [x1]"); }
+      else { emit_line("\tstr\tx0, [x1]"); }
+    } else if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_intptr(e->left->left->sval)) {
+      int desz = cg_intptr_esz(e->left->left->sval);
+      if (desz == 0) { desz = cg_global_ptr_esz(e->left->left->sval); }
+      if (desz == 0) { desz = 4; }
+      if (desz == 4) { emit_line("\tstr\tw0, [x1]"); }
+      else if (desz == 2) { emit_line("\tstrh\tw0, [x1]"); }
+      else { emit_line("\tstr\tx0, [x1]"); }
+    } else if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left != 0 && e->left->left->kind == ND_BINARY && e->left->left->left != 0 && e->left->left->left->kind == ND_VAR && cg_is_intptr(e->left->left->left->sval)) {
+      int desz = cg_intptr_esz(e->left->left->left->sval);
+      if (desz == 0) { desz = cg_global_ptr_esz(e->left->left->left->sval); }
+      if (desz == 0) { desz = 4; }
+      if (desz == 4) { emit_line("\tstr\tw0, [x1]"); }
+      else if (desz == 2) { emit_line("\tstrh\tw0, [x1]"); }
+      else { emit_line("\tstr\tx0, [x1]"); }
+    } else if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left != 0 && (e->left->left->kind == ND_POSTINC || e->left->left->kind == ND_POSTDEC) && e->left->left->left != 0 && e->left->left->left->kind == ND_VAR && cg_is_intptr(e->left->left->left->sval)) {
+      int desz = cg_intptr_esz(e->left->left->left->sval);
+      if (desz == 0) { desz = cg_global_ptr_esz(e->left->left->left->sval); }
+      if (desz == 0) { desz = 4; }
+      if (desz == 4) { emit_line("\tstr\tw0, [x1]"); }
+      else if (desz == 2) { emit_line("\tstrh\tw0, [x1]"); }
+      else { emit_line("\tstr\tx0, [x1]"); }
+    } else if (e->left->kind == ND_UNARY && e->left->ival == '*' && e->left->left != 0 && (e->left->left->kind == ND_ARROW || e->left->left->kind == ND_FIELD)) {
+      // Store through struct field pointer: *mi->field = val
+      int fp = cg_field_is_ptr(e->left->left->sval2, e->left->left->sval);
+      if (fp == 1 && cg_field_is_char(e->left->left->sval2, e->left->left->sval)) {
+        emit_line("\tstrb\tw0, [x1]");
+      } else if (fp == 1 && field_stype(e->left->left->sval2, e->left->left->sval) == 0) {
+        if (cg_field_is_short(e->left->left->sval2, e->left->left->sval)) { emit_line("\tstrh\tw0, [x1]"); }
+        else if (cg_field_is_long(e->left->left->sval2, e->left->left->sval)) { emit_line("\tstr\tx0, [x1]"); }
+        else { emit_line("\tstr\tw0, [x1]"); }
+      } else {
+        emit_line("\tstr\tx0, [x1]");
+      }
+    } else if (e->left->kind == ND_INDEX && e->left->left != 0 && e->left->left->kind == ND_INDEX && e->left->left->left != 0 && e->left->left->left->kind == ND_VAR) {
+      // 2D array element store: arr[i][j] = val
+      int aesz = cg_arr_esz(e->left->left->left->sval);
+      if (aesz == 0) { aesz = cg_global_ptr_esz(e->left->left->left->sval); }
+      if (aesz == 0) { aesz = cg_global_esz(e->left->left->left->sval); }
+      if (aesz == 4) { emit_line("\tstr\tw0, [x1]"); }
+      else if (aesz == 2) { emit_line("\tstrh\tw0, [x1]"); }
+      else { emit_line("\tstr\tx0, [x1]"); }
     } else {
       emit_line("\tstr\tx0, [x1]");
     }
@@ -8429,7 +8823,9 @@ int gen_val_postinc_postdec(struct Expr *e) {
     if (pi_pstype != 0) {
       inc = cg_struct_byte_size(pi_pstype);
     } else if (cg_is_intptr(e->left->sval)) {
-      inc = 8;
+      inc = cg_intptr_esz(e->left->sval);
+      if (inc == 0) { inc = cg_global_ptr_esz(e->left->sval); }
+      if (inc == 0) { inc = 4; }
     }
   }
   gen_addr(e->left);
@@ -8582,14 +8978,59 @@ int gen_val_unary(struct Expr *e) {
     int deref_char = 0;
     if (e->left->kind == ND_VAR && cg_is_char(e->left->sval)) { deref_char = 1; }
     if (e->left->kind == ND_BINARY && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { deref_char = 1; }
+    if (e->left->kind == ND_BINARY && e->left->right != 0 && e->left->right->kind == ND_VAR && cg_is_char(e->left->right->sval)) { deref_char = 1; }
     if (e->left->kind == ND_INDEX && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_char_arr(e->left->left->sval)) { deref_char = 1; }
     // *s++ / *s-- where s is char*
     if ((e->left->kind == ND_POSTINC || e->left->kind == ND_POSTDEC) && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { deref_char = 1; }
+    // *++s / *--s where s is char* (pre-inc/dec is ND_ASSIGN)
+    if (e->left->kind == ND_ASSIGN && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_char(e->left->left->sval)) { deref_char = 1; }
+    // *mi->field where field is char* in a struct
+    if ((e->left->kind == ND_ARROW || e->left->kind == ND_FIELD) && cg_field_is_char(e->left->sval2, e->left->sval) && cg_field_is_ptr(e->left->sval2, e->left->sval) == 1) { deref_char = 1; }
     gen_value(e->left);
     if (deref_char) {
       emit_line("\tldrb\tw0, [x0]");
     } else {
-      emit_line("\tldr\tx0, [x0]");
+      int deref_esz = 8;
+      if (e->left->kind == ND_VAR && cg_is_intptr(e->left->sval)) {
+        deref_esz = cg_intptr_esz(e->left->sval);
+        if (deref_esz == 0) { deref_esz = cg_global_ptr_esz(e->left->sval); }
+        if (deref_esz == 0) { deref_esz = 4; }
+      }
+      if (e->left->kind == ND_BINARY && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_intptr(e->left->left->sval)) {
+        deref_esz = cg_intptr_esz(e->left->left->sval);
+        if (deref_esz == 0) { deref_esz = cg_global_ptr_esz(e->left->left->sval); }
+        if (deref_esz == 0) { deref_esz = 4; }
+      }
+      // Commutative: *(N + p) where pointer is on the right
+      if (deref_esz == 8 && e->left->kind == ND_BINARY && e->left->right != 0 && e->left->right->kind == ND_VAR && cg_is_intptr(e->left->right->sval)) {
+        deref_esz = cg_intptr_esz(e->left->right->sval);
+        if (deref_esz == 0) { deref_esz = cg_global_ptr_esz(e->left->right->sval); }
+        if (deref_esz == 0) { deref_esz = 4; }
+      }
+      if ((e->left->kind == ND_POSTINC || e->left->kind == ND_POSTDEC) && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_intptr(e->left->left->sval)) {
+        deref_esz = cg_intptr_esz(e->left->left->sval);
+        if (deref_esz == 0) { deref_esz = cg_global_ptr_esz(e->left->left->sval); }
+        if (deref_esz == 0) { deref_esz = 4; }
+      }
+      // Pre-increment/decrement: *++p or *--p is *(p = p +/- 1)
+      if (deref_esz == 8 && e->left->kind == ND_ASSIGN && e->left->left != 0 && e->left->left->kind == ND_VAR && cg_is_intptr(e->left->left->sval)) {
+        deref_esz = cg_intptr_esz(e->left->left->sval);
+        if (deref_esz == 0) { deref_esz = cg_global_ptr_esz(e->left->left->sval); }
+        if (deref_esz == 0) { deref_esz = 4; }
+      }
+      // Struct field pointer dereference: *mi->field where field is int*/short*/long*
+      if (deref_esz == 8 && (e->left->kind == ND_ARROW || e->left->kind == ND_FIELD)) {
+        int fp = cg_field_is_ptr(e->left->sval2, e->left->sval);
+        int *fst = field_stype(e->left->sval2, e->left->sval);
+        if (fp == 1 && fst == 0) {
+          if (cg_field_is_short(e->left->sval2, e->left->sval)) { deref_esz = 2; }
+          else if (cg_field_is_long(e->left->sval2, e->left->sval)) { deref_esz = 8; }
+          else { deref_esz = 4; }
+        }
+      }
+      if (deref_esz == 4) { emit_line("\tldrsw\tx0, [x0]"); }
+      else if (deref_esz == 2) { emit_line("\tldrsh\tx0, [x0]"); }
+      else { emit_line("\tldr\tx0, [x0]"); }
     }
     return 0;
   }
@@ -8709,12 +9150,32 @@ int gen_val_binary(struct Expr *e) {
         }
       }
       if (left_intptr && right_intptr && my_strcmp(bin_op, "-") == 0) {
-        // ptr - ptr: don't scale, divide result by 8 after sub
+        // ptr - ptr: don't scale, divide result by esz after sub
         // handled below after sub instruction
       } else if (left_intptr) {
-        emit_line("\tlsl\tx0, x0, #3");
+        int lp_esz = 8;
+        if (e->left->kind == ND_VAR) {
+          int le = cg_intptr_esz(e->left->sval);
+          if (le > 0) { lp_esz = le; }
+          if (lp_esz == 8) { le = cg_arr_esz(e->left->sval); if (le > 0) { lp_esz = le; } }
+          if (lp_esz == 8 && cg_global_is_array(e->left->sval) == 0) { le = cg_global_ptr_esz(e->left->sval); if (le > 0) { lp_esz = le; } }
+          if (lp_esz == 8) { le = cg_global_esz(e->left->sval); if (le > 0) { lp_esz = le; } }
+        }
+        if (lp_esz == 4) { emit_line("\tlsl\tx0, x0, #2"); }
+        else if (lp_esz == 2) { emit_line("\tlsl\tx0, x0, #1"); }
+        else { emit_line("\tlsl\tx0, x0, #3"); }
       } else if (right_intptr) {
-        emit_line("\tlsl\tx1, x1, #3");
+        int rp_esz = 8;
+        if (e->right->kind == ND_VAR) {
+          int re = cg_intptr_esz(e->right->sval);
+          if (re > 0) { rp_esz = re; }
+          if (rp_esz == 8) { re = cg_arr_esz(e->right->sval); if (re > 0) { rp_esz = re; } }
+          if (rp_esz == 8 && cg_global_is_array(e->right->sval) == 0) { re = cg_global_ptr_esz(e->right->sval); if (re > 0) { rp_esz = re; } }
+          if (rp_esz == 8) { re = cg_global_esz(e->right->sval); if (re > 0) { rp_esz = re; } }
+        }
+        if (rp_esz == 4) { emit_line("\tlsl\tx1, x1, #2"); }
+        else if (rp_esz == 2) { emit_line("\tlsl\tx1, x1, #1"); }
+        else { emit_line("\tlsl\tx1, x1, #3"); }
       }
     }
   }
@@ -8749,6 +9210,13 @@ int gen_val_binary(struct Expr *e) {
   if (e->right->kind == ND_VAR && cg_is_unsigned(e->right->sval)) { use_unsigned = 1; }
   if (e->left->kind == ND_CALL && func_returns_unsigned(e->left->sval)) { use_unsigned = 1; }
   if (e->right->kind == ND_CALL && func_returns_unsigned(e->right->sval)) { use_unsigned = 1; }
+  if (e->left->kind == ND_CAST && (e->left->ival == 4 || e->left->ival == 6)) { use_unsigned = 1; }
+  if (e->right->kind == ND_CAST && (e->right->ival == 4 || e->right->ival == 6)) { use_unsigned = 1; }
+
+  // Check if either operand is 64-bit (long/pointer) — use x registers; otherwise use w registers
+  int use_long = 0;
+  if (expr_is_long(e->left) || expr_is_long(e->right)) { use_long = 1; }
+
   if (my_strcmp(bin_op, "+") == 0) { emit_line("\tadd\tx0, x1, x0"); }
   else if (my_strcmp(bin_op, "-") == 0) {
     emit_line("\tsub\tx0, x1, x0");
@@ -8761,48 +9229,79 @@ int gen_val_binary(struct Expr *e) {
         emit_mov_imm("x9", scale);
         emit_line("\tsdiv\tx0, x0, x9");
       } else if (cg_is_intptr(e->left->sval) && cg_is_intptr(e->right->sval)) {
-        emit_line("\tasr\tx0, x0, #3");
+        int pp_esz = cg_intptr_esz(e->left->sval);
+        if (pp_esz == 0) { pp_esz = cg_global_ptr_esz(e->left->sval); }
+        if (pp_esz == 0) { pp_esz = cg_global_esz(e->left->sval); }
+        if (pp_esz == 0) { pp_esz = 8; }
+        if (pp_esz == 4) { emit_line("\tasr\tx0, x0, #2"); }
+        else if (pp_esz == 2) { emit_line("\tasr\tx0, x0, #1"); }
+        else { emit_line("\tasr\tx0, x0, #3"); }
       }
     }
   }
   else if (my_strcmp(bin_op, "*") == 0) { emit_line("\tmul\tx0, x1, x0"); }
   else if (my_strcmp(bin_op, "/") == 0) {
-    if (use_unsigned) { emit_line("\tudiv\tx0, x1, x0"); }
-    else { emit_line("\tsdiv\tx0, x1, x0"); }
+    if (use_long) {
+      if (use_unsigned) { emit_line("\tudiv\tx0, x1, x0"); }
+      else { emit_line("\tsdiv\tx0, x1, x0"); }
+    } else {
+      if (use_unsigned) { emit_line("\tudiv\tw0, w1, w0"); }
+      else { emit_line("\tsdiv\tw0, w1, w0"); }
+    }
   }
   else if (my_strcmp(bin_op, "&") == 0) { emit_line("\tand\tx0, x1, x0"); }
   else if (my_strcmp(bin_op, "|") == 0) { emit_line("\torr\tx0, x1, x0"); }
   else if (my_strcmp(bin_op, "^") == 0) { emit_line("\teor\tx0, x1, x0"); }
   else if (my_strcmp(bin_op, "<<") == 0) { emit_line("\tlsl\tx0, x1, x0"); }
   else if (my_strcmp(bin_op, ">>") == 0) {
-    if (use_unsigned) { emit_line("\tmov\tw1, w1"); emit_line("\tlsr\tx0, x1, x0"); }
-    else { emit_line("\tasr\tx0, x1, x0"); }
+    if (use_long) {
+      if (use_unsigned) { emit_line("\tlsr\tx0, x1, x0"); }
+      else { emit_line("\tasr\tx0, x1, x0"); }
+    } else {
+      if (use_unsigned) { emit_line("\tlsr\tw0, w1, w0"); }
+      else { emit_line("\tasr\tw0, w1, w0"); }
+    }
   }
   else if (my_strcmp(bin_op, "%") == 0) {
-    if (use_unsigned) {
-      emit_line("\tudiv\tx9, x1, x0");
+    if (use_long) {
+      if (use_unsigned) { emit_line("\tudiv\tx9, x1, x0"); }
+      else { emit_line("\tsdiv\tx9, x1, x0"); }
+      emit_line("\tmsub\tx0, x9, x0, x1");
     } else {
-      emit_line("\tsdiv\tx9, x1, x0");
+      if (use_unsigned) { emit_line("\tudiv\tw9, w1, w0"); }
+      else { emit_line("\tsdiv\tw9, w1, w0"); }
+      emit_line("\tmsub\tw0, w9, w0, w1");
     }
-    emit_line("\tmsub\tx0, x9, x0, x1");
   }
-  else if (my_strcmp(bin_op, "==") == 0) { emit_line("\tcmp\tx1, x0"); emit_line("\tcset\tx0, eq"); }
-  else if (my_strcmp(bin_op, "!=") == 0) { emit_line("\tcmp\tx1, x0"); emit_line("\tcset\tx0, ne"); }
+  else if (my_strcmp(bin_op, "==") == 0) {
+    if (use_long) { emit_line("\tcmp\tx1, x0"); }
+    else { emit_line("\tcmp\tw1, w0"); }
+    emit_line("\tcset\tw0, eq");
+  }
+  else if (my_strcmp(bin_op, "!=") == 0) {
+    if (use_long) { emit_line("\tcmp\tx1, x0"); }
+    else { emit_line("\tcmp\tw1, w0"); }
+    emit_line("\tcset\tw0, ne");
+  }
   else if (my_strcmp(bin_op, "<") == 0) {
-    emit_line("\tcmp\tx1, x0");
-    if (use_unsigned) { emit_line("\tcset\tx0, lo"); } else { emit_line("\tcset\tx0, lt"); }
+    if (use_long) { emit_line("\tcmp\tx1, x0"); }
+    else { emit_line("\tcmp\tw1, w0"); }
+    if (use_unsigned) { emit_line("\tcset\tw0, lo"); } else { emit_line("\tcset\tw0, lt"); }
   }
   else if (my_strcmp(bin_op, "<=") == 0) {
-    emit_line("\tcmp\tx1, x0");
-    if (use_unsigned) { emit_line("\tcset\tx0, ls"); } else { emit_line("\tcset\tx0, le"); }
+    if (use_long) { emit_line("\tcmp\tx1, x0"); }
+    else { emit_line("\tcmp\tw1, w0"); }
+    if (use_unsigned) { emit_line("\tcset\tw0, ls"); } else { emit_line("\tcset\tw0, le"); }
   }
   else if (my_strcmp(bin_op, ">") == 0) {
-    emit_line("\tcmp\tx1, x0");
-    if (use_unsigned) { emit_line("\tcset\tx0, hi"); } else { emit_line("\tcset\tx0, gt"); }
+    if (use_long) { emit_line("\tcmp\tx1, x0"); }
+    else { emit_line("\tcmp\tw1, w0"); }
+    if (use_unsigned) { emit_line("\tcset\tw0, hi"); } else { emit_line("\tcset\tw0, gt"); }
   }
   else if (my_strcmp(bin_op, ">=") == 0) {
-    emit_line("\tcmp\tx1, x0");
-    if (use_unsigned) { emit_line("\tcset\tx0, hs"); } else { emit_line("\tcset\tx0, ge"); }
+    if (use_long) { emit_line("\tcmp\tx1, x0"); }
+    else { emit_line("\tcmp\tw1, w0"); }
+    if (use_unsigned) { emit_line("\tcset\tw0, hs"); } else { emit_line("\tcset\tw0, ge"); }
   }
   return 0;
 }
@@ -9603,23 +10102,43 @@ int gen_stmt_vardecl(struct Stmt *st, int *ret_label) {
           k++;
         }
         } else {
-        // Non-char array: 8-byte stride
+        // Non-char array: use tracked element size
+        int init_esz = cg_arr_esz(vd->name);
+        if (init_esz == 0) { init_esz = 8; }
         // Zero-fill the entire array before writing init elements
-        int zero_count = vd->arr_size;
-        if (vd->stype != 0 && vd->is_ptr == 0) {
-          zero_count = vd->arr_size * cg_struct_nfields(vd->stype);
-        }
-        k = 0;
-        while (k < zero_count) {
-          elem_off = base_off - k * 8;
-          emit_line("\tmov\tx0, #0");
-          if (elem_off <= 255) {
-            emit_s("\tstr\tx0, [x29, #-"); emit_num(elem_off); emit_line("]");
+        {
+          int total_bytes = 0;
+          if (vd->stype != 0 && vd->is_ptr == 0) {
+            total_bytes = vd->arr_size * cg_struct_byte_size(vd->stype);
           } else {
-            emit_sub_imm("x9", "x29", elem_off);
-            emit_line("\tstr\tx0, [x9]");
+            total_bytes = vd->arr_size * init_esz;
           }
-          k++;
+          int zbi = 0;
+          while (zbi + 8 <= total_bytes) {
+            elem_off = base_off - zbi;
+            emit_line("\tmov\tx0, #0");
+            if (elem_off <= 255) {
+              emit_s("\tstr\tx0, [x29, #-"); emit_num(elem_off); emit_line("]");
+            } else {
+              emit_sub_imm("x9", "x29", elem_off);
+              emit_line("\tstr\tx0, [x9]");
+            }
+            zbi = zbi + 8;
+          }
+          while (zbi + 4 <= total_bytes) {
+            elem_off = base_off - zbi;
+            emit_line("\tmov\tw0, #0");
+            emit_sub_imm("x9", "x29", elem_off);
+            emit_line("\tstr\tw0, [x9]");
+            zbi = zbi + 4;
+          }
+          while (zbi + 2 <= total_bytes) {
+            elem_off = base_off - zbi;
+            emit_line("\tmov\tw0, #0");
+            emit_sub_imm("x9", "x29", elem_off);
+            emit_line("\tstrh\tw0, [x9]");
+            zbi = zbi + 2;
+          }
         }
         vd_di = vd->init->desig;
         vd_pos_idx = 0;
@@ -9633,13 +10152,11 @@ int gen_stmt_vardecl(struct Stmt *st, int *ret_label) {
             int ni_j = 0;
             while (ni_j < inner->nargs) {
               gen_value(inner->args[ni_j]);
-              elem_off = base_off - (vd_target + ni_j) * 8;
-              if (elem_off <= 255) {
-                emit_s("\tstr\tx0, [x29, #-"); emit_num(elem_off); emit_line("]");
-              } else {
-                emit_sub_imm("x9", "x29", elem_off);
-                emit_line("\tstr\tx0, [x9]");
-              }
+              elem_off = base_off - (vd_target + ni_j) * init_esz;
+              emit_sub_imm("x9", "x29", elem_off);
+              if (init_esz == 4) { emit_line("\tstr\tw0, [x9]"); }
+              else if (init_esz == 2) { emit_line("\tstrh\tw0, [x9]"); }
+              else { emit_line("\tstr\tx0, [x9]"); }
               ni_j++;
             }
             vd_pos_idx = vd_target + inner->nargs;
@@ -9648,8 +10165,14 @@ int gen_stmt_vardecl(struct Stmt *st, int *ret_label) {
             vd_target = vd_pos_idx;
             if (vd_di != 0 && vd_di[k] >= 0) { vd_target = vd_di[k]; }
             vd_pos_idx = vd_target + 1;
-            elem_off = base_off - vd_target * 8;
-            if (elem_off <= 255) {
+            elem_off = base_off - vd_target * init_esz;
+            if (init_esz == 4) {
+              emit_sub_imm("x9", "x29", elem_off);
+              emit_line("\tstr\tw0, [x9]");
+            } else if (init_esz == 2) {
+              emit_sub_imm("x9", "x29", elem_off);
+              emit_line("\tstrh\tw0, [x9]");
+            } else if (elem_off <= 255) {
               emit_s("\tstr\tx0, [x29, #-"); emit_num(elem_off); emit_line("]");
             } else {
               emit_sub_imm("x9", "x29", elem_off);
@@ -10021,14 +10544,24 @@ int gen_func(struct FuncDef *f) {
         }
       }
     } else {
-      // Sign-extend int params (non-pointer, non-struct, non-long) to clean upper 32 bits
-      int is_ptr_param = 0;
-      if (f->param_is_intptr != 0 && f->param_is_intptr[i]) { is_ptr_param = 1; }
-      if (f->param_is_char != 0 && f->param_is_char[i]) { is_ptr_param = 1; }
-      if (f->param_stypes != 0 && f->param_stypes[i] != 0) { is_ptr_param = 1; }
-      if (f->param_is_long != 0 && f->param_is_long[i]) { is_ptr_param = 1; }
-      if (is_ptr_param == 0) {
-        emit_s("\tsxtw\tx"); emit_num(i); emit_s(", w"); emit_num(i); emit_ch('\n');
+      // Extend params to clean upper 32 bits based on type width
+      int is_64bit_param = 0;
+      if (f->param_is_intptr != 0 && f->param_is_intptr[i]) { is_64bit_param = 1; }
+      if (f->param_is_char != 0 && f->param_is_char[i]) { is_64bit_param = 1; }
+      if (f->param_stypes != 0 && f->param_stypes[i] != 0) { is_64bit_param = 1; }
+      if (f->param_is_long != 0 && f->param_is_long[i]) { is_64bit_param = 1; }
+      if (is_64bit_param == 0) {
+        int p_is_unsigned = (f->param_is_unsigned != 0 && f->param_is_unsigned[i]);
+        int p_is_short = (f->param_is_short != 0 && f->param_is_short[i]);
+        if (p_is_short) {
+          if (p_is_unsigned) { emit_s("\tuxth\tw"); emit_num(i); emit_s(", w"); emit_num(i); emit_ch('\n'); }
+          else { emit_s("\tsxth\tx"); emit_num(i); emit_s(", w"); emit_num(i); emit_ch('\n'); }
+        } else if (p_is_unsigned) {
+          // unsigned int: writing to wN zero-extends to xN, but value may already be clean
+          emit_s("\tmov\tw"); emit_num(i); emit_s(", w"); emit_num(i); emit_ch('\n');
+        } else {
+          emit_s("\tsxtw\tx"); emit_num(i); emit_s(", w"); emit_num(i); emit_ch('\n');
+        }
       }
       if (off <= 255) {
         emit_s("\tstr\tx");
@@ -10122,6 +10655,25 @@ int cg_register_functions(struct Program *prog) {
     if (fd->ret_is_unsigned != 0) {
       unsigned_ret_names[n_unsigned_ret] = fd->name;
       n_unsigned_ret++;
+    }
+    pi++;
+  }
+
+  // Register long-returning functions (add to ptr_ret_names since both skip sxtw)
+  pi = 0;
+  while (pi < prog->nprotos) {
+    if (prog->proto_ret_is_long[pi] != 0) {
+      ptr_ret_names[n_ptr_ret] = prog->proto_names[pi];
+      n_ptr_ret++;
+    }
+    pi++;
+  }
+  pi = 0;
+  while (pi < prog->nfuncs) {
+    fd = prog->funcs[pi];
+    if (fd->ret_is_long != 0) {
+      ptr_ret_names[n_ptr_ret] = fd->name;
+      n_ptr_ret++;
     }
     pi++;
   }
@@ -10239,6 +10791,27 @@ int cg_register_globals(struct Program *prog) {
     cgg[ncg_g].is_bare_char_arr = 0;
     if (gd->is_char && gd->is_ptr == 0 && gd->array_size >= 0) {
       cgg[ncg_g].is_bare_char_arr = 1;
+    }
+    {
+      int gesz = 8;
+      if (gd->is_char && gd->is_ptr == 0) { gesz = 1; }
+      else if (gd->stype != 0 && gd->is_ptr == 0) { gesz = 8; }
+      else if (gd->is_short && gd->is_ptr == 0) { gesz = 2; }
+      else if (gd->is_char == 0 && gd->is_ptr == 0 && gd->stype == 0 && gd->is_long == 0 && gd->is_short == 0) { gesz = 4; }
+      if (gd->is_ptr > 0) { gesz = 8; }
+      cgg[ncg_g].esz = gesz;
+    }
+    {
+      int pesz = 0;
+      if (gd->is_ptr > 0) {
+        if (gd->is_ptr >= 2) { pesz = 8; }
+        else if (gd->is_char) { pesz = 1; }
+        else if (gd->is_short) { pesz = 2; }
+        else if (gd->is_long) { pesz = 8; }
+        else if (gd->stype != 0) { pesz = 0; }
+        else { pesz = 4; }
+      }
+      cgg[ncg_g].ptr_esz = pesz;
     }
     ncg_g++;
   }
@@ -10669,9 +11242,19 @@ int cg_emit_globals(struct Program *prog) {
         if (has_data == 0) { emit_ch('\n'); emit_line("\t.data"); has_data = 1; }
         if (gd->is_static == 0) { emit_s("\t.globl\t_"); emit_line(gd->name); }
         int gd_is_char_arr = (gd->is_char && gd->is_ptr == 0);
+        int gd_esz = 8;
+        if (gd_is_char_arr) { gd_esz = 1; }
+        else if (gd->stype != 0 && gd->is_ptr == 0) { gd_esz = 8; }
+        else if (gd->is_short && gd->is_ptr == 0) { gd_esz = 2; }
+        else if (gd->is_char == 0 && gd->is_ptr == 0 && gd->stype == 0 && gd->is_long == 0 && gd->is_short == 0) { gd_esz = 4; }
+        if (gd->is_ptr > 0) { gd_esz = 8; }
         int *gd_dir = "\t.quad\t";
-        if (gd_is_char_arr) { gd_dir = "\t.byte\t"; }
-        if (gd_is_char_arr) { emit_line("\t.p2align\t0"); }
+        if (gd_esz == 1) { gd_dir = "\t.byte\t"; }
+        else if (gd_esz == 4) { gd_dir = "\t.long\t"; }
+        else if (gd_esz == 2) { gd_dir = "\t.short\t"; }
+        if (gd_esz == 1) { emit_line("\t.p2align\t0"); }
+        else if (gd_esz == 2) { emit_line("\t.p2align\t1"); }
+        else if (gd_esz == 4) { emit_line("\t.p2align\t2"); }
         else { emit_line("\t.p2align\t3"); }
         emit_s("_"); emit_s(gd->name); emit_line(":");
         fsi = 0;
@@ -10764,13 +11347,21 @@ int cg_emit_globals(struct Program *prog) {
             k++;
           }
         } else {
-          // Non-char array: emit .quad per character (8 bytes each)
-          emit_line("\t.p2align\t3");
+          // Non-char array: emit element-sized directives per character
+          int nc_esz = 8;
+          if (gd->is_short && gd->is_ptr == 0) { nc_esz = 2; }
+          else if (gd->is_char == 0 && gd->is_ptr == 0 && gd->stype == 0 && gd->is_long == 0) { nc_esz = 4; }
+          if (nc_esz == 4) { emit_line("\t.p2align\t2"); }
+          else if (nc_esz == 2) { emit_line("\t.p2align\t1"); }
+          else { emit_line("\t.p2align\t3"); }
           emit_s("_"); emit_s(gd->name); emit_line(":");
           k = 0;
           while (k < slen && k < gd->array_size) {
             ch = __read_byte(decoded, k);
-            emit_s("\t.quad\t"); emit_num(ch); emit_ch('\n');
+            if (nc_esz == 4) { emit_s("\t.long\t"); }
+            else if (nc_esz == 2) { emit_s("\t.short\t"); }
+            else { emit_s("\t.quad\t"); }
+            emit_num(ch); emit_ch('\n');
             k++;
           }
         }
@@ -10779,10 +11370,14 @@ int cg_emit_globals(struct Program *prog) {
         int elem_sz = 8;
         if (gd->is_char && gd->is_ptr == 0) {
           elem_sz = 1;
-        }
-        if (gd->stype != 0 && gd->is_ptr == 0) {
+        } else if (gd->stype != 0 && gd->is_ptr == 0) {
           elem_sz = cg_struct_byte_size(gd->stype);
+        } else if (gd->is_short && gd->is_ptr == 0) {
+          elem_sz = 2;
+        } else if (gd->is_char == 0 && gd->is_ptr == 0 && gd->stype == 0 && gd->is_long == 0) {
+          elem_sz = 4;
         }
+        if (gd->is_ptr > 0) { elem_sz = 8; }
         int sz = gd->array_size * elem_sz;
         if (sz == 0 && gd->stype != 0) { sz = elem_sz; }
         if (gd->is_static) {
@@ -11125,7 +11720,7 @@ int *cc_c_path;
 #ifdef __STDC__
 int *parse_args(int argc, char **argv) {
 #else
-int *parse_args(int argc, int *argv) {
+int *parse_args(int argc, int **argv) {
 #endif
   int *out_path = "a.out";
   int *c_path = 0;
@@ -11299,7 +11894,7 @@ int write_and_link(int *c_path, int *out_path) {
 #ifdef __STDC__
 int main(int argc, char **argv) {
 #else
-int main(int argc, int *argv) {
+int main(int argc, int **argv) {
 #endif
   int *c_path = parse_args(argc, argv);
   if (c_path == 0) { return 2; }
