@@ -3394,7 +3394,7 @@ struct VarDecl *make_vd(int *name, int *stype, int arr_size, int is_ptr, struct 
 struct Expr *parse_init_list(int *stype_name) {
   int init_cap = 256;
   struct Expr **elems = my_malloc(init_cap * 8);
-  int **desig = my_malloc(init_cap * 8);
+  int *desig = my_malloc(init_cap * 8);
   int nelems = 0;
   int has_desig = 0;
   int di = 0;
@@ -3457,7 +3457,7 @@ struct Expr *parse_init_list(int *stype_name) {
     if (nelems >= init_cap) {
       int new_cap = init_cap * 2;
       struct Expr **new_elems = my_malloc(new_cap * 8);
-      int **new_desig = my_malloc(new_cap * 8);
+      int *new_desig = my_malloc(new_cap * 8);
       for (int ri = 0; ri < nelems; ri++) { new_elems[ri] = elems[ri]; new_desig[ri] = desig[ri]; }
       elems = new_elems;
       desig = new_desig;
