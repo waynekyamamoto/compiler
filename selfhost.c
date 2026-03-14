@@ -8804,6 +8804,10 @@ int gen_val_var(struct Expr *e) {
           int vu = cg_is_unsigned(e->sval);
           if (vu) { emit_line("\tldrh\tw0, [x0]"); }
           else { emit_line("\tldrsh\tx0, [x0]"); }
+        } else if (vbsz == 4) {
+          int vu = cg_is_unsigned(e->sval);
+          if (vu) { emit_line("\tldr\tw0, [x0]"); }
+          else { emit_line("\tldrsw\tx0, [x0]"); }
         } else {
           emit_line("\tldr\tx0, [x0]");
         }
@@ -9177,11 +9181,12 @@ int gen_val_postinc_postdec(struct Expr *e) {
     else if (bc == 1) { emit_line("\tsxtb\tx0, w0"); }
   }
   emit_line("\tldr\tx1, [sp, #16]");
-  // Use ABI-width store for char/short locals
+  // Use ABI-width store for locals
   if (e->left->kind == ND_VAR) {
     int absz = cg_var_bsz(e->left->sval);
     if (absz == 1) { emit_line("\tstrb\tw0, [x1]"); }
     else if (absz == 2) { emit_line("\tstrh\tw0, [x1]"); }
+    else if (absz == 4) { emit_line("\tstr\tw0, [x1]"); }
     else { emit_line("\tstr\tx0, [x1]"); }
   } else {
     emit_line("\tstr\tx0, [x1]");
@@ -10570,13 +10575,14 @@ int gen_stmt_vardecl(struct Stmt *st, int *ret_label) {
       emit_line("\tmov\tx0, #0");
     }
     if (vd_bsz == 1) {
-      // Char variable: use 1-byte store
       emit_sub_imm("x9", "x29", off);
       emit_line("\tstrb\tw0, [x9]");
     } else if (vd_bsz == 2) {
-      // Short variable: use 2-byte store
       emit_sub_imm("x9", "x29", off);
       emit_line("\tstrh\tw0, [x9]");
+    } else if (vd_bsz == 4) {
+      emit_sub_imm("x9", "x29", off);
+      emit_line("\tstr\tw0, [x9]");
     } else if (off <= 255) {
       emit_s("\tstr\tx0, [x29, #-");
       emit_num(off);
