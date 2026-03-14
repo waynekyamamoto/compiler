@@ -61,7 +61,7 @@ enum {
 // ---- Structs ----
 struct Expr {
   int kind;
-  int ival;
+  long ival;
   int *sval;
   int *sval2;
   struct Expr *left;
@@ -144,6 +144,7 @@ struct SDef {
   int *field_is_short;
   int *field_is_long;
   int *field_is_char_type;
+  int *field_is_unsigned;
 };
 
 struct SFieldInfo {
@@ -156,6 +157,7 @@ struct SFieldInfo {
   int is_short;
   int is_long;
   int is_char_type;  // base type is char (regardless of ptr/arr)
+  int is_unsigned;
 };
 
 struct SDefInfo {
@@ -268,9 +270,11 @@ int *cg_s_fp[MAX_STRUCTS];     // field_is_ptr flags
 int *cg_s_fsh[MAX_STRUCTS];    // field_is_short flags
 int *cg_s_fl[MAX_STRUCTS];     // field_is_long flags
 int *cg_s_fct[MAX_STRUCTS];   // field_is_char_type flags
+int *cg_s_fu[MAX_STRUCTS];    // field_is_unsigned flags
 int *cg_s_fbyteoff[MAX_STRUCTS];  // per-field byte offset (proper layout)
 int *cg_s_fbytesize[MAX_STRUCTS]; // per-field byte size (proper layout)
 int cg_s_bytesize[MAX_STRUCTS];   // total struct byte size (proper layout)
+int cg_s_max_align[MAX_STRUCTS];  // max field alignment (for embedded struct alignment)
 int ncg_s;
 
 // Proper struct layout flag
@@ -377,6 +381,8 @@ struct TypeDef {
 struct TypeDef td[MAX_TYPEDEFS];
 int ntd;
 int td_is_long[MAX_TYPEDEFS];
+int td_is_short[MAX_TYPEDEFS];
+int td_is_unsigned[MAX_TYPEDEFS];
 int td_is_ptr[MAX_TYPEDEFS];
 
 // Current function name for goto label mangling
@@ -532,8 +538,8 @@ int hex_digit_val(int c) {
   return 0;
 }
 
-int my_atoi(int *s) {
-  int val = 0;
+long my_atoi(int *s) {
+  long val = 0;
   int i = 0;
   int neg = 0;
   if (__read_byte(s, 0) == '-') {
@@ -625,7 +631,7 @@ int emit_line(int *s) {
 }
 
 // Emit mov reg, #imm handling large immediates via movz/movk
-int emit_mov_imm(int *reg, int val) {
+int emit_mov_imm(int *reg, long val) {
   if (val >= 0 && val <= 65535) {
     emit_s("\tmov\t"); emit_s(reg); emit_s(", #"); emit_num(val); emit_ch('\n');
   } else if (val < 0 && val >= 0 - 65536) {
@@ -2401,6 +2407,28 @@ int p_align_up(int val, int align) {
   return (val + align - 1) / align * align;
 }
 
+// Compute max alignment of a struct's fields (for embedded struct alignment)
+int p_struct_max_align(struct SDefInfo *sd) {
+  int max_a = 1;
+  int k = 0;
+  while (k < sd->nflds) {
+    int ka = 4;  // default: int alignment
+    if (sd->flds[k]->is_ptr > 0) { ka = 8; }
+    else if ((sd->flds[k]->is_char || sd->flds[k]->is_char_type) && sd->flds[k]->is_ptr == 0) { ka = 1; }
+    else if (sd->flds[k]->is_short) { ka = 2; }
+    else if (sd->flds[k]->is_long) { ka = 8; }
+    else if (sd->flds[k]->stype != 0 && sd->flds[k]->is_ptr == 0) {
+      // Embedded struct: recurse
+      struct SDefInfo *inner = find_sdef(sd->flds[k]->stype);
+      if (inner == 0) { int *r = find_typedef(sd->flds[k]->stype); if (r != 0) { inner = find_sdef(r); } }
+      if (inner != 0) { ka = p_struct_max_align(inner); }
+    }
+    if (ka > max_a) { max_a = ka; }
+    k++;
+  }
+  return max_a;
+}
+
 int p_sizeof_struct_proper(int *sname) {
   struct SDefInfo *sd = find_sdef(sname);
   if (sd == 0) {
@@ -2436,20 +2464,7 @@ int p_sizeof_struct_proper(int *sname) {
       struct SDefInfo *fsd = find_sdef(fst);
       if (fsd == 0) { int *fr = find_typedef(fst); if (fr != 0) { fsd = find_sdef(fr); } }
       if (fsd != 0) {
-        int inner_max = 1;
-        int k = 0;
-        while (k < fsd->nflds) {
-          int ksz = 4;
-          if (fsd->flds[k]->is_ptr > 0) { ksz = 8; }
-          else if ((fsd->flds[k]->is_char || fsd->flds[k]->is_char_type) && fsd->flds[k]->is_ptr == 0 && fsd->flds[k]->is_array == 0) { ksz = 1; }
-          else if (fsd->flds[k]->is_short) { ksz = 2; }
-          else if (fsd->flds[k]->is_long) { ksz = 8; }
-          else if (fsd->flds[k]->stype != 0 && fsd->flds[k]->is_ptr == 0) { ksz = 4; }
-          if (ksz > inner_max) { inner_max = ksz; }
-          k++;
-        }
-        if (inner_max > 8) { inner_max = 8; }
-        falign = inner_max;
+        falign = p_struct_max_align(fsd);
       }
     } else if (f_chr || f_cht) {
       fsz = 1; falign = 1;
@@ -2617,7 +2632,7 @@ int *resolve_stype(struct Expr *e) {
 
 // ---- AST constructors ----
 
-struct Expr *new_num(int val) {
+struct Expr *new_num(long val) {
   struct Expr *e = my_malloc(72);
   e->kind = ND_NUM;
   e->ival = val;
@@ -2969,6 +2984,28 @@ int td_lookup_is_long(int *name) {
   return 0;
 }
 
+int td_lookup_is_short(int *name) {
+  int i = ntd - 1;
+  while (i >= 0) {
+    if (my_strcmp(td[i].name, name) == 0) {
+      return td_is_short[i];
+    }
+    i--;
+  }
+  return 0;
+}
+
+int td_lookup_is_unsigned(int *name) {
+  int i = ntd - 1;
+  while (i >= 0) {
+    if (my_strcmp(td[i].name, name) == 0) {
+      return td_is_unsigned[i];
+    }
+    i--;
+  }
+  return 0;
+}
+
 int td_lookup_is_ptr(int *name) {
   int i = ntd - 1;
   while (i >= 0) {
@@ -2993,7 +3030,7 @@ int add_typedef(int *name, int *stype) {
 }
 
 struct SFieldInfo *new_sfieldinfo(int *name, int *stype, int is_ptr, int bw, int is_arr, int is_char) {
-  struct SFieldInfo *fi = my_malloc(72);
+  struct SFieldInfo *fi = my_malloc(80);
   fi->name = name;
   fi->stype = stype;
   fi->is_ptr = is_ptr;
@@ -3002,6 +3039,7 @@ struct SFieldInfo *new_sfieldinfo(int *name, int *stype, int is_ptr, int bw, int
   fi->is_char = is_char;
   fi->is_short = 0;
   fi->is_long = 0;
+  fi->is_unsigned = 0;
   fi->is_char_type = 0;
   return fi;
 }
@@ -3100,7 +3138,13 @@ int *parse_base_type() {
       int **afield_types = my_malloc(256 * 8);
       int anf = 0;
       while (!p_match(TK_OP, "}")) {
+        int af_is_char = p_match(TK_KW, "char");
+        int af_is_short = p_match(TK_KW, "short");
         int *aftype = parse_base_type();
+        int af_is_long = last_type_is_long;
+        if (last_type_is_short) { af_is_short = 1; }
+        if (af_is_long) { af_is_short = 0; }
+        int af_is_unsigned = last_type_unsigned;
         int aptr = 0;
         int afp = 0;
         if (is_funcptr_decl()) { p_eat(TK_OP, "("); p_eat(TK_OP, "*"); aptr = 1; afp = 1; }
@@ -3112,6 +3156,10 @@ int *parse_base_type() {
           int abw2 = parse_const_expr();
           int *abname = build_str2("_anon_bf_", int_to_str(anf));
           struct SFieldInfo *afi2 = new_sfieldinfo(abname, aftype, aptr, abw2, 0, 0);
+          afi2->is_short = af_is_short;
+          afi2->is_long = af_is_long;
+          afi2->is_unsigned = af_is_unsigned;
+          afi2->is_char_type = af_is_char;
           aflds[anf] = afi2;
           afields[anf] = abname;
           afield_types[anf] = 0;
@@ -3124,7 +3172,11 @@ int *parse_base_type() {
         while (p_match(TK_OP, "[")) { p_eat(TK_OP, "["); while (!p_match(TK_OP, "]") && !p_match(TK_EOF, 0)) { cur_pos++; } p_eat(TK_OP, "]"); }
         int abw = 0;
         if (p_match(TK_OP, ":")) { p_eat(TK_OP, ":"); abw = my_atoi(p_eat(TK_NUM, 0)); }
-        struct SFieldInfo *afi = new_sfieldinfo(afname, aftype, aptr, abw, 0, 0);
+        struct SFieldInfo *afi = new_sfieldinfo(afname, aftype, aptr, abw, 0, af_is_char);
+        afi->is_short = af_is_short;
+        afi->is_long = af_is_long;
+        afi->is_unsigned = af_is_unsigned;
+        afi->is_char_type = af_is_char;
         aflds[anf] = afi;
         afields[anf] = afname;
         if (aftype != 0 && aptr == 0) { afield_types[anf] = aftype; } else { afield_types[anf] = 0; }
@@ -3138,7 +3190,11 @@ int *parse_base_type() {
           while (p_match(TK_OP, "[")) { p_eat(TK_OP, "["); while (!p_match(TK_OP, "]") && !p_match(TK_EOF, 0)) { cur_pos++; } p_eat(TK_OP, "]"); }
           int eabw = 0;
           if (p_match(TK_OP, ":")) { p_eat(TK_OP, ":"); eabw = my_atoi(p_eat(TK_NUM, 0)); }
-          afi = new_sfieldinfo(ean, aftype, eap, eabw, 0, 0);
+          afi = new_sfieldinfo(ean, aftype, eap, eabw, 0, af_is_char);
+          afi->is_short = af_is_short;
+          afi->is_long = af_is_long;
+          afi->is_unsigned = af_is_unsigned;
+          afi->is_char_type = af_is_char;
           aflds[anf] = afi;
           afields[anf] = ean;
           if (aftype != 0 && eap == 0) { afield_types[anf] = aftype; } else { afield_types[anf] = 0; }
@@ -3173,6 +3229,7 @@ int *parse_base_type() {
       asd->field_is_short = my_malloc(anf * 8);
       asd->field_is_long = my_malloc(anf * 8);
       asd->field_is_char_type = my_malloc(anf * 8);
+      asd->field_is_unsigned = my_malloc(anf * 8);
       // Extract field flags from SFieldInfo into temp arrays first, then copy
       // (workaround for gen0 codegen issue with struct field access in loops)
       int *tmp_fa = my_malloc(anf * 8);
@@ -3181,6 +3238,7 @@ int *parse_base_type() {
       int *tmp_fsh = my_malloc(anf * 8);
       int *tmp_fl = my_malloc(anf * 8);
       int *tmp_fct = my_malloc(anf * 8);
+      int *tmp_fu = my_malloc(anf * 8);
       { int ti = 0; while (ti < anf) {
         struct SFieldInfo *src = aflds[ti];
         tmp_fa[ti] = src->is_array;
@@ -3189,6 +3247,7 @@ int *parse_base_type() {
         tmp_fsh[ti] = src->is_short;
         tmp_fl[ti] = src->is_long;
         tmp_fct[ti] = src->is_char_type;
+        tmp_fu[ti] = src->is_unsigned;
         ti = ti + 1;
       } }
       { int ci = 0; while (ci < anf) {
@@ -3198,6 +3257,7 @@ int *parse_base_type() {
         asd->field_is_short[ci] = tmp_fsh[ci];
         asd->field_is_long[ci] = tmp_fl[ci];
         asd->field_is_char_type[ci] = tmp_fct[ci];
+        asd->field_is_unsigned[ci] = tmp_fu[ci];
         ci = ci + 1;
       } }
       inline_sdefs[ninline_sdefs] = asd;
@@ -3276,18 +3336,22 @@ int *parse_base_type() {
       lsd->field_is_short = my_malloc(lnf * 8);
       lsd->field_is_long = my_malloc(lnf * 8);
       lsd->field_is_char_type = my_malloc(lnf * 8);
+      lsd->field_is_unsigned = my_malloc(lnf * 8);
       // Extract field flags via temp arrays (workaround for gen0 codegen issue)
       { int *lfa = my_malloc(lnf * 8); int *lfc = my_malloc(lnf * 8); int *lfp = my_malloc(lnf * 8);
         int *lfsh = my_malloc(lnf * 8); int *lfl = my_malloc(lnf * 8); int *lfct = my_malloc(lnf * 8);
+        int *lfu = my_malloc(lnf * 8);
         int li2 = 0; while (li2 < lnf) {
           struct SFieldInfo *src = lflds[li2];
           lfa[li2] = src->is_array; lfc[li2] = src->is_char; lfp[li2] = src->is_ptr;
           lfsh[li2] = src->is_short; lfl[li2] = src->is_long; lfct[li2] = src->is_char_type;
+          lfu[li2] = src->is_unsigned;
           li2 = li2 + 1;
         }
         li2 = 0; while (li2 < lnf) {
           lsd->field_is_array[li2] = lfa[li2]; lsd->field_is_char[li2] = lfc[li2]; lsd->field_is_ptr[li2] = lfp[li2];
           lsd->field_is_short[li2] = lfsh[li2]; lsd->field_is_long[li2] = lfl[li2]; lsd->field_is_char_type[li2] = lfct[li2];
+          lsd->field_is_unsigned[li2] = lfu[li2];
           li2 = li2 + 1;
         }
       }
@@ -3310,14 +3374,20 @@ int *parse_base_type() {
   }
   // Check if it's a typedef name
   if (tok[cur_pos].kind == TK_ID && has_typedef(tok[cur_pos].val)) {
-    // Mark long typedefs to prevent sxtw and use x registers
+    // Mark long/short typedefs for correct sizing
     if (td_lookup_is_long(tok[cur_pos].val)) {
       last_type_is_long = 1;
+    }
+    else if (td_lookup_is_short(tok[cur_pos].val)) {
+      last_type_is_short = 1;
     }
     else if (my_strcmp(tok[cur_pos].val, "va_list") == 0 || my_strcmp(tok[cur_pos].val, "__builtin_va_list") == 0 ||
         my_strcmp(tok[cur_pos].val, "size_t") == 0 || my_strcmp(tok[cur_pos].val, "ssize_t") == 0 ||
         my_strcmp(tok[cur_pos].val, "ptrdiff_t") == 0) {
       last_type_is_long = 1;
+    }
+    if (td_lookup_is_unsigned(tok[cur_pos].val)) {
+      last_type_unsigned = 1;
     }
     int *td_st = find_typedef(tok[cur_pos].val);
     cur_pos++;
@@ -3511,6 +3581,7 @@ struct Stmt *parse_vardecl_stmt(int vd_is_static) {
     else if (p_match(TK_KW, "short")) { base_is_short = 1; }
     else if (p_match(TK_KW, "long")) { base_is_long = 1; }
     else if (p_match(TK_KW, "unsigned") || p_match(TK_KW, "signed")) {
+      if (p_match(TK_KW, "unsigned")) { base_unsigned = 1; }
       if (tok[cur_pos + 1].kind == TK_KW && my_strcmp(tok[cur_pos + 1].val, "char") == 0) { base_is_char = 1; }
       if (tok[cur_pos + 1].kind == TK_KW && my_strcmp(tok[cur_pos + 1].val, "short") == 0) { base_is_short = 1; }
       if (tok[cur_pos + 1].kind == TK_KW && my_strcmp(tok[cur_pos + 1].val, "long") == 0) { base_is_long = 1; }
@@ -3520,6 +3591,7 @@ struct Stmt *parse_vardecl_stmt(int vd_is_static) {
       if (tdc) { base_is_char = 1; if (tdc == 2) { base_unsigned = 1; } }
       if (td_lookup_is_funcptr(tok[cur_pos].val)) { base_is_funcptr_td = 1; }
       if (td_lookup_is_ptr(tok[cur_pos].val)) { base_td_is_ptr = 1; }
+      if (td_lookup_is_unsigned(tok[cur_pos].val)) { base_unsigned = 1; }
     }
     cur_pos = sv;
   }
@@ -3645,8 +3717,10 @@ struct Stmt *parse_vardecl_stmt(int vd_is_static) {
     decls[ndecls]->arr_size2 = arr_size2;
     decls[ndecls]->is_short = base_is_short;
     decls[ndecls]->is_long = base_is_long;
+    decls[ndecls]->is_unsigned = base_unsigned;
     if (last_type_is_short) { decls[ndecls]->is_short = 1; }
     if (last_type_is_long) { decls[ndecls]->is_long = 1; }
+    if (last_type_unsigned) { decls[ndecls]->is_unsigned = 1; }
     ndecls++;
     // Always register local variable name (for enum shadowing)
     if (stype != 0) {
@@ -3985,7 +4059,8 @@ struct Expr *parse_unary() {
         else if (ct_is_char) { cast_to_int = 3; } // (char) -> sxtb
         else if (ct_is_short && ct_is_unsigned) { cast_to_int = 6; } // (unsigned short) -> uxth
         else if (ct_is_short) { cast_to_int = 5; } // (short) -> sxth
-        else { cast_to_int = 2; } // regular int/long/unsigned cast
+        else if (ct_is_unsigned) { cast_to_int = 7; } // (unsigned int/long) — marks unsigned for comparisons
+        else { cast_to_int = 2; } // regular int/long cast
       }
       // Skip the rest of the type, handling nested parens for funcptr casts
       int cast_depth = 1;
@@ -4810,6 +4885,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     int f_is_char = 0;
     int f_is_short = 0;
     int f_is_long = 0;
+    int f_is_unsigned = 0;
     int f_is_funcptr_td = 0;
     int f_td_is_ptr = 0;
     if (inline_sname != 0) {
@@ -4866,6 +4942,8 @@ struct SDef *parse_struct_or_union_def(int is_union) {
       ftype = parse_base_type();
       if (last_type_is_long) { f_is_short = 0; }
       f_is_long = last_type_is_long;
+      if (last_type_is_short) { f_is_short = 1; }
+      f_is_unsigned = last_type_unsigned;
     }
     int is_ptr = 0;
     int is_funcptr = 0;
@@ -4966,6 +5044,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
     struct SFieldInfo *fi = new_sfieldinfo(fi_n, fi_st, is_ptr, bw, f_is_arr, fi_ic);
     fi->is_short = f_is_short;
     fi->is_long = f_is_long;
+    fi->is_unsigned = f_is_unsigned;
     fi->is_char_type = f_is_char;
     finfo[nf] = fi;
     nf++;
@@ -5010,6 +5089,7 @@ struct SDef *parse_struct_or_union_def(int is_union) {
       struct SFieldInfo *efi = new_sfieldinfo(efi_n, efi_st, extra_is_ptr, extra_bw, ef_is_arr, efi_ic);
       efi->is_short = f_is_short;
       efi->is_long = f_is_long;
+      efi->is_unsigned = f_is_unsigned;
       efi->is_char_type = f_is_char;
       finfo[nf] = efi;
       nf++;
@@ -5065,7 +5145,8 @@ struct SDef *parse_struct_or_union_def(int is_union) {
   sd->field_is_short = my_malloc(nf * 8);
   sd->field_is_long = my_malloc(nf * 8);
   sd->field_is_char_type = my_malloc(nf * 8);
-  for (int fai = 0; fai < nf; fai++) { sd->field_is_array[fai] = finfo[fai]->is_array; sd->field_is_char[fai] = finfo[fai]->is_char; sd->field_is_ptr[fai] = finfo[fai]->is_ptr; sd->field_is_short[fai] = finfo[fai]->is_short; sd->field_is_long[fai] = finfo[fai]->is_long; sd->field_is_char_type[fai] = finfo[fai]->is_char_type; }
+  sd->field_is_unsigned = my_malloc(nf * 8);
+  for (int fai = 0; fai < nf; fai++) { sd->field_is_array[fai] = finfo[fai]->is_array; sd->field_is_char[fai] = finfo[fai]->is_char; sd->field_is_ptr[fai] = finfo[fai]->is_ptr; sd->field_is_short[fai] = finfo[fai]->is_short; sd->field_is_long[fai] = finfo[fai]->is_long; sd->field_is_char_type[fai] = finfo[fai]->is_char_type; sd->field_is_unsigned[fai] = finfo[fai]->is_unsigned; }
 
   if (has_bf) {
     sd->bit_widths = my_malloc(nf * 8);
@@ -6115,6 +6196,8 @@ void register_td_struct(int *sname, int **td_fields, struct SFieldInfo **td_finf
   sd->field_is_long = fil;
   int *fict = my_malloc(td_nf * 8);
   sd->field_is_char_type = fict;
+  int *fiu = my_malloc(td_nf * 8);
+  sd->field_is_unsigned = fiu;
   int tdi = 0;
   while (tdi < td_nf) {
     sd->field_is_array[tdi] = td_finfo[tdi]->is_array;
@@ -6123,6 +6206,7 @@ void register_td_struct(int *sname, int **td_fields, struct SFieldInfo **td_finf
     sd->field_is_short[tdi] = td_finfo[tdi]->is_short;
     sd->field_is_long[tdi] = td_finfo[tdi]->is_long;
     sd->field_is_char_type[tdi] = td_finfo[tdi]->is_char_type;
+    sd->field_is_unsigned[tdi] = td_finfo[tdi]->is_unsigned;
     tdi++;
   }
   structs[*ns_ptr] = sd;
@@ -6253,6 +6337,7 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
         fi = new_sfieldinfo(_sfi_n, _sfi_st, fis_ptr, td_bw, f_is_arr, f_is_char);
         fi->is_short = tf_is_short;
         fi->is_long = tf_is_long;
+        fi->is_unsigned = last_type_unsigned;
         fi->is_char_type = f_is_char;
         td_finfo[td_nf] = fi;
         td_nf++;
@@ -6272,6 +6357,7 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
           fi = new_sfieldinfo(_sfi_n, _sfi_st, eip, ebw, ef_arr, f_is_char);
           fi->is_short = tf_is_short;
           fi->is_long = tf_is_long;
+          fi->is_unsigned = last_type_unsigned;
           fi->is_char_type = f_is_char;
           td_finfo[td_nf] = fi;
           td_nf++;
@@ -6406,6 +6492,8 @@ int parse_typedef(struct SDef **structs, int *ns_ptr) {
     if (ptd_is_ptr) { td_is_ptr[ntd - 1] = 1; }
     if (ptd_is_char) { td[ntd - 1].is_char = 1; td[ntd - 1].is_unsigned = ptd_is_unsigned; }
     if (last_type_is_long) { td_is_long[ntd - 1] = 1; }
+    if (last_type_is_short) { td_is_short[ntd - 1] = 1; }
+    if (last_type_unsigned) { td_is_unsigned[ntd - 1] = 1; }
     // Handle comma-separated typedefs: typedef struct { ... } A, *B;
     while (p_match(TK_OP, ",")) {
       p_eat(TK_OP, ",");
@@ -7281,6 +7369,25 @@ int cg_field_is_char(int *sname, int *fname) {
   return 0;
 }
 
+int cg_field_is_unsigned(int *sname, int *fname) {
+  sname = cg_resolve_sname(sname);
+  int i = 0;
+  while (i < ncg_s) {
+    if (my_strcmp(cg_sname[i], sname) == 0) {
+      int j = 0;
+      while (j < cg_snfields[i]) {
+        if (my_strcmp(cg_sfields[i][j], fname) == 0) {
+          return (cg_s_fu[i] != 0) ? cg_s_fu[i][j] : 0;
+        }
+        j++;
+      }
+      return 0;
+    }
+    i++;
+  }
+  return 0;
+}
+
 int cg_field_is_ptr(int *sname, int *fname) {
   if (sname == 0 || fname == 0) return 0;
   sname = cg_resolve_sname(sname);
@@ -8083,8 +8190,8 @@ int cg_is_long_or_ptr(int *name) {
     if (my_strcmp(lay_arr_name[i], name) == 0) { return 1; }
     i++;
   }
-  // Also check globals — pointers and arrays are 64-bit
-  if (cg_is_global(name)) { return cg_global_is_array(name) || cg_is_intptr(name) || cg_is_char(name); }
+  // Also check globals — pointers, arrays, and long types are 64-bit
+  if (cg_is_global(name)) { return cg_global_is_array(name) || cg_is_intptr(name) || cg_is_char(name) || find_glv_is_long(name); }
   return 0;
 }
 
@@ -8120,6 +8227,18 @@ int cg_global_var_bsz(int *name) {
 }
 
 // Check if an expression evaluates to a long/pointer (64-bit) type
+int expr_is_unsigned(struct Expr *e) {
+  if (e == 0) return 0;
+  if (e->kind == ND_VAR) return cg_is_unsigned(e->sval);
+  if (e->kind == ND_CALL) return func_returns_unsigned(e->sval);
+  if (e->kind == ND_CAST && (e->ival == 4 || e->ival == 6 || e->ival == 7)) return 1;
+  if (e->kind == ND_BINARY) {
+    if (expr_is_unsigned(e->left) || expr_is_unsigned(e->right)) return 1;
+  }
+  if (e->kind == ND_UNARY) return expr_is_unsigned(e->left);
+  return 0;
+}
+
 int expr_is_long(struct Expr *e) {
   if (e == 0) return 0;
   if (e->kind == ND_VAR) return cg_is_long_or_ptr(e->sval);
@@ -8483,6 +8602,11 @@ int gen_addr(struct Expr *e) {
         int gpe = cg_global_ptr_esz(e->left->left->sval);
         if (gpe > 0 && gpe < 8) { idx_stride = gpe; }
       }
+      // Check if double-indexing a short**/int** global (e.g. texturecolumnlump[tex][col])
+      if (idx_is_char == 0 && idx_stype == 0 && idx_stride == 8) {
+        if (find_glv_is_short(e->left->left->sval)) { idx_stride = 2; }
+        else if (cg_is_barechar(e->left->left->sval)) { idx_stride = 1; idx_is_char = 1; }
+      }
     }
     if (idx_stype != 0) {
       idx_stride = cg_struct_byte_size(idx_stype);
@@ -8612,7 +8736,7 @@ int gen_val_cast(struct Expr *e) {
 }
 
 int gen_val_num(struct Expr *e) {
-  int val = e->ival;
+  long val = e->ival;
   // Float literals need full 64-bit load via unsigned bit extraction
   if (e->nargs == 1) {
     int w0 = val & 65535;
@@ -8648,8 +8772,8 @@ int gen_val_num(struct Expr *e) {
 
 int gen_load_by_bsz(int bsz, int is_unsigned) {
   if (bsz == 1) {
-    if (is_unsigned) { emit_line("\tldrb\tw0, [x0]"); }
-    else { emit_line("\tldrsb\tx0, [x0]"); }
+    // ARM64: char is unsigned by default, always zero-extend
+    emit_line("\tldrb\tw0, [x0]");
   } else if (bsz == 2) {
     if (is_unsigned) { emit_line("\tldrh\tw0, [x0]"); }
     else { emit_line("\tldrsh\tx0, [x0]"); }
@@ -8696,10 +8820,8 @@ int gen_val_field_arrow(struct Expr *e) {
   }
   {
     int bsz = cg_field_byte_size(e->sval2, e->sval);
-    if (bsz == 1) { emit_line("\tldrb\tw0, [x0]"); }
-    else if (bsz == 2) { emit_line("\tldrsh\tx0, [x0]"); }
-    else if (bsz == 4) { emit_line("\tldrsw\tx0, [x0]"); }
-    else { emit_line("\tldr\tx0, [x0]"); }
+    int f_unsigned = cg_field_is_unsigned(e->sval2, e->sval);
+    gen_load_by_bsz(bsz, f_unsigned);
   }
   if (bf_width > 0) {
     if (bf_bit_off > 0) {
@@ -8747,15 +8869,14 @@ int gen_val_index(struct Expr *e) {
     emit_line("\tldrb\tw0, [x0]");
   } else if ((e->left->kind == ND_ARROW || e->left->kind == ND_FIELD) && cg_field_is_array(e->left->sval2, e->left->sval) > 0 && cg_field_is_ptr(e->left->sval2, e->left->sval) == 0) {
     int es = cg_field_arr_elem_size(e->left->sval2, e->left->sval);
-    if (es == 1) { emit_line("\tldrb\tw0, [x0]"); }
-    else if (es == 2) { emit_line("\tldrsh\tx0, [x0]"); }
-    else if (es == 4) { emit_line("\tldrsw\tx0, [x0]"); }
-    else { emit_line("\tldr\tx0, [x0]"); }
+    int fu = cg_field_is_unsigned(e->left->sval2, e->left->sval);
+    gen_load_by_bsz(es, fu);
   } else if ((e->left->kind == ND_ARROW || e->left->kind == ND_FIELD) && cg_field_is_ptr(e->left->sval2, e->left->sval) == 1 && cg_field_is_char(e->left->sval2, e->left->sval) == 0 && field_stype(e->left->sval2, e->left->sval) == 0) {
     // Struct field pointer indexing: s->field[i] where field is int*/short*
-    if (cg_field_is_short(e->left->sval2, e->left->sval)) { emit_line("\tldrsh\tx0, [x0]"); }
-    else if (cg_field_is_long(e->left->sval2, e->left->sval)) { emit_line("\tldr\tx0, [x0]"); }
-    else { emit_line("\tldrsw\tx0, [x0]"); }
+    { int fp_bsz = 4; int fp_u = cg_field_is_unsigned(e->left->sval2, e->left->sval);
+    if (cg_field_is_short(e->left->sval2, e->left->sval)) { fp_bsz = 2; }
+    else if (cg_field_is_long(e->left->sval2, e->left->sval)) { fp_bsz = 8; }
+    gen_load_by_bsz(fp_bsz, fp_u); }
   } else if (e->left->kind == ND_VAR) {
     int aesz = cg_arr_esz(e->left->sval);
     if (aesz == 0) { aesz = cg_intptr_esz(e->left->sval); }
@@ -8765,12 +8886,18 @@ int gen_val_index(struct Expr *e) {
     else if (aesz == 2) { emit_line("\tldrsh\tx0, [x0]"); }
     else { emit_line("\tldr\tx0, [x0]"); }
   } else if (e->left->kind == ND_INDEX && e->left->left != 0 && e->left->left->kind == ND_VAR) {
-    // 2D array element load: arr[i][j]
+    // 2D array element load: arr[i][j] or ptr_ptr[i][j]
     int aesz = cg_arr_esz(e->left->left->sval);
     if (aesz == 0) { aesz = cg_global_ptr_esz(e->left->left->sval); }
     if (aesz == 0) { aesz = cg_global_esz(e->left->left->sval); }
+    // For short**/char** double-pointer indexing, use inner element size
+    if (aesz == 0 || aesz == 8) {
+      if (find_glv_is_short(e->left->left->sval) || find_lv_is_short(e->left->left->sval)) { aesz = 2; }
+      else if (cg_is_barechar(e->left->left->sval)) { aesz = 1; }
+    }
     if (aesz == 4) { emit_line("\tldrsw\tx0, [x0]"); }
     else if (aesz == 2) { emit_line("\tldrsh\tx0, [x0]"); }
+    else if (aesz == 1) { emit_line("\tldrb\tw0, [x0]"); }
     else { emit_line("\tldr\tx0, [x0]"); }
   } else {
     emit_line("\tldr\tx0, [x0]");
@@ -9176,6 +9303,7 @@ int gen_val_unary(struct Expr *e) {
       emit_line("\tldrb\tw0, [x0]");
     } else {
       int deref_esz = 8;
+      int deref_unsigned = 0;
       if (e->left->kind == ND_VAR && cg_is_intptr(e->left->sval)) {
         deref_esz = cg_intptr_esz(e->left->sval);
         if (deref_esz == 0) { deref_esz = cg_global_ptr_esz(e->left->sval); }
@@ -9211,11 +9339,10 @@ int gen_val_unary(struct Expr *e) {
           if (cg_field_is_short(e->left->sval2, e->left->sval)) { deref_esz = 2; }
           else if (cg_field_is_long(e->left->sval2, e->left->sval)) { deref_esz = 8; }
           else { deref_esz = 4; }
+          deref_unsigned = cg_field_is_unsigned(e->left->sval2, e->left->sval);
         }
       }
-      if (deref_esz == 4) { emit_line("\tldrsw\tx0, [x0]"); }
-      else if (deref_esz == 2) { emit_line("\tldrsh\tx0, [x0]"); }
-      else { emit_line("\tldr\tx0, [x0]"); }
+      gen_load_by_bsz(deref_esz, deref_unsigned);
     }
     return 0;
   }
@@ -9395,8 +9522,8 @@ int gen_val_binary(struct Expr *e) {
   if (e->right->kind == ND_VAR && cg_is_unsigned(e->right->sval)) { use_unsigned = 1; }
   if (e->left->kind == ND_CALL && func_returns_unsigned(e->left->sval)) { use_unsigned = 1; }
   if (e->right->kind == ND_CALL && func_returns_unsigned(e->right->sval)) { use_unsigned = 1; }
-  if (e->left->kind == ND_CAST && (e->left->ival == 4 || e->left->ival == 6)) { use_unsigned = 1; }
-  if (e->right->kind == ND_CAST && (e->right->ival == 4 || e->right->ival == 6)) { use_unsigned = 1; }
+  if (e->left->kind == ND_CAST && (e->left->ival == 4 || e->left->ival == 6 || e->left->ival == 7)) { use_unsigned = 1; }
+  if (e->right->kind == ND_CAST && (e->right->ival == 4 || e->right->ival == 6 || e->right->ival == 7)) { use_unsigned = 1; }
 
   // Check if either operand is 64-bit (long/pointer) — use x registers; otherwise use w registers
   int use_long = 0;
@@ -9439,11 +9566,14 @@ int gen_val_binary(struct Expr *e) {
   else if (my_strcmp(bin_op, "^") == 0) { emit_line("\teor\tx0, x1, x0"); }
   else if (my_strcmp(bin_op, "<<") == 0) { emit_line("\tlsl\tx0, x1, x0"); }
   else if (my_strcmp(bin_op, ">>") == 0) {
+    // For >>, propagate unsigned through subexpressions of left operand
+    int shift_unsigned = use_unsigned;
+    if (shift_unsigned == 0) { shift_unsigned = expr_is_unsigned(e->left); }
     if (use_long) {
-      if (use_unsigned) { emit_line("\tlsr\tx0, x1, x0"); }
+      if (shift_unsigned) { emit_line("\tlsr\tx0, x1, x0"); }
       else { emit_line("\tasr\tx0, x1, x0"); }
     } else {
-      if (use_unsigned) { emit_line("\tlsr\tw0, w1, w0"); }
+      if (shift_unsigned) { emit_line("\tlsr\tw0, w1, w0"); }
       else { emit_line("\tasr\tw0, w1, w0"); }
     }
   }
@@ -11075,14 +11205,9 @@ int cg_compute_struct_layout(int si) {
       }
       if (inner >= 0 && cg_s_fbyteoff[inner] != 0) {
         fsz = cg_s_bytesize[inner];
-        // Compute max alignment of inner struct
-        falign = 1;
-        { int k = 0; while (k < cg_snfields[inner]) {
-          int fbs = cg_s_fbytesize[inner][k];
-          if (fbs > falign) { falign = fbs; }
-          k++;
-        } }
-        if (falign > 8) { falign = 8; }
+        // Use stored max alignment of inner struct (not byte size!)
+        falign = cg_s_max_align[inner];
+        if (falign < 1) { falign = 1; }
       } else {
         fsz = 8; falign = 8;  // fallback
       }
@@ -11136,6 +11261,7 @@ int cg_compute_struct_layout(int si) {
   cg_s_fbyteoff[si] = fbyteoff;
   cg_s_fbytesize[si] = fbytesize;
   cg_s_bytesize[si] = total;
+  cg_s_max_align[si] = max_align;
   return 0;
 }
 
@@ -11251,6 +11377,7 @@ int cg_register_structs(struct Program *prog) {
     cg_s_fsh[ncg_s] = sd->field_is_short;
     cg_s_fl[ncg_s] = sd->field_is_long;
     cg_s_fct[ncg_s] = sd->field_is_char_type;
+    cg_s_fu[ncg_s] = sd->field_is_unsigned;
     ncg_s++;
     i++;
   }
@@ -11273,6 +11400,7 @@ int cg_register_structs(struct Program *prog) {
     cg_s_fsh[ncg_s] = sd->field_is_short;
     cg_s_fl[ncg_s] = sd->field_is_long;
     cg_s_fct[ncg_s] = sd->field_is_char_type;
+    cg_s_fu[ncg_s] = sd->field_is_unsigned;
     ncg_s++;
     i++;
   }
