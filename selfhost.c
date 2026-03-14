@@ -8797,7 +8797,16 @@ int gen_val_var(struct Expr *e) {
     int is_local = (cg_find_slot(e->sval) >= 0);
     if (is_local) {
       if (cg_is_array(e->sval) == 0 && cg_is_structvar(e->sval) == 0) {
-        emit_line("\tldr\tx0, [x0]");
+        int vbsz = cg_var_bsz(e->sval);
+        if (vbsz == 1) {
+          emit_line("\tldrb\tw0, [x0]");
+        } else if (vbsz == 2) {
+          int vu = cg_is_unsigned(e->sval);
+          if (vu) { emit_line("\tldrh\tw0, [x0]"); }
+          else { emit_line("\tldrsh\tx0, [x0]"); }
+        } else {
+          emit_line("\tldr\tx0, [x0]");
+        }
       }
     } else {
       if (cg_is_array(e->sval) == 0 && cg_is_structvar(e->sval) == 0 && cg_global_is_array(e->sval) == 0 && cg_global_stype(e->sval) == 0) {
@@ -9168,7 +9177,15 @@ int gen_val_postinc_postdec(struct Expr *e) {
     else if (bc == 1) { emit_line("\tsxtb\tx0, w0"); }
   }
   emit_line("\tldr\tx1, [sp, #16]");
-  emit_line("\tstr\tx0, [x1]");
+  // Use ABI-width store for char/short locals
+  if (e->left->kind == ND_VAR) {
+    int absz = cg_var_bsz(e->left->sval);
+    if (absz == 1) { emit_line("\tstrb\tw0, [x1]"); }
+    else if (absz == 2) { emit_line("\tstrh\tw0, [x1]"); }
+    else { emit_line("\tstr\tx0, [x1]"); }
+  } else {
+    emit_line("\tstr\tx0, [x1]");
+  }
   emit_line("\tldr\tx0, [sp], #32");
   return 0;
 }
@@ -10536,6 +10553,7 @@ int gen_stmt_vardecl(struct Stmt *st, int *ret_label) {
       continue;
     }
     int off = cg_find_slot(vd->name);
+    int vd_bsz = cg_var_bsz(vd->name);
     if (vd->init != 0) {
       gen_value(vd->init);
       // Int-to-float conversion for float var init
@@ -10551,7 +10569,15 @@ int gen_stmt_vardecl(struct Stmt *st, int *ret_label) {
     } else {
       emit_line("\tmov\tx0, #0");
     }
-    if (off <= 255) {
+    if (vd_bsz == 1) {
+      // Char variable: use 1-byte store
+      emit_sub_imm("x9", "x29", off);
+      emit_line("\tstrb\tw0, [x9]");
+    } else if (vd_bsz == 2) {
+      // Short variable: use 2-byte store
+      emit_sub_imm("x9", "x29", off);
+      emit_line("\tstrh\tw0, [x9]");
+    } else if (off <= 255) {
       emit_s("\tstr\tx0, [x29, #-");
       emit_num(off);
       emit_line("]");
