@@ -8799,7 +8799,9 @@ int gen_val_var(struct Expr *e) {
       if (cg_is_array(e->sval) == 0 && cg_is_structvar(e->sval) == 0) {
         int vbsz = cg_var_bsz(e->sval);
         if (vbsz == 1) {
-          emit_line("\tldrb\tw0, [x0]");
+          int vu = cg_is_unsigned(e->sval);
+          if (vu) { emit_line("\tldrb\tw0, [x0]"); }
+          else { emit_line("\tldrsb\tx0, [x0]"); }
         } else if (vbsz == 2) {
           int vu = cg_is_unsigned(e->sval);
           if (vu) { emit_line("\tldrh\tw0, [x0]"); }
