@@ -2569,8 +2569,10 @@ int p_sizeof_field(int *sname, int *fname) {
       if (sd->flds[fi]->is_ptr) return 8;
       if (sd->flds[fi]->is_array > 0 && sd->flds[fi]->is_char) return sd->flds[fi]->is_array;
       if (sd->flds[fi]->is_array > 0) {
-        int elem_sz = 8;
+        int elem_sz = 4;  // default: int
         if (sd->flds[fi]->stype != 0) { elem_sz = p_sizeof_struct(sd->flds[fi]->stype); }
+        else if (sd->flds[fi]->is_short) { elem_sz = 2; }
+        else if (sd->flds[fi]->is_long) { elem_sz = 8; }
         return sd->flds[fi]->is_array * elem_sz;
       }
       if (sd->flds[fi]->stype != 0) return p_sizeof_struct(sd->flds[fi]->stype);
@@ -3949,7 +3951,12 @@ struct Expr *parse_unary() {
         } else if (td_st != 0) {
           sz = p_sizeof_struct(td_st);
         } else {
-          sz = 8;
+          // Primitive typedef: check base type
+          int tdc = td_lookup_is_char(tok[cur_pos - 1].val);
+          if (tdc) { sz = 1; }
+          else if (last_type_is_short) { sz = 2; }
+          else if (last_type_is_long) { sz = 8; }
+          else { sz = 4; }  // default: int
         }
       } else {
         // Check if it's a variable with a known struct type or array
